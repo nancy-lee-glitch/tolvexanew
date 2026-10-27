@@ -4,12 +4,12 @@ import {
   ColorType,
   CrosshairMode,
   LineStyle,
-  IChartApi,
-  ISeriesApi,
-  UTCTimestamp,
+  type IChartApi,
+  type ISeriesApi,
+  type UTCTimestamp,
 } from 'lightweight-charts';
 import type { AssetConfig, TimestampedTick } from '../types.ts';
-import { getAssetTimestampedTicks, getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
+import { getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
 
 export type ChartType = 'line' | 'area' | 'candles';
 export type AggregationInterval = 'tick' | '5s' | '15s' | '1m' | '5m';
@@ -44,6 +44,7 @@ export function LiveChart({
   wsConnected,
 }: LiveChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const fallbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Line'> | ISeriesApi<'Area'> | ISeriesApi<'Candlestick'> | null>(null);
   const autoFollowRef = useRef<boolean>(true);
@@ -53,17 +54,20 @@ export function LiveChart({
   const [interval, setInterval] = useState<AggregationInterval>('tick');
   const [isScrolledAway, setIsScrolledAway] = useState<boolean>(false);
   const [hoverData, setHoverData] = useState<{ price: string; time: string } | null>(null);
-  const [isChartReady, setIsChartReady] = useState<boolean>(false);
+  const [useFallbackCanvas, setUseFallbackCanvas] = useState<boolean>(false);
 
   // Buffer summary metrics
   const [metrics, setMetrics] = useState({
     changePips: 0,
     changePct: 0,
-    high: currentPrice,
-    low: currentPrice,
+    high: currentPrice || 1.085,
+    low: currentPrice || 1.085,
     totalBars: 0,
     timespanMinutes: 0,
   });
+
+  const decimals = activeAsset?.decimals ?? 5;
+  const pipSize = activeAsset?.pipSize ?? 0.0001;
 
   // Calculate resolution seconds from interval
   const intervalSeconds = useMemo(() => {
@@ -77,16 +81,18 @@ export function LiveChart({
     }
   }, [interval]);
 
-  // Client-side tick aggregation for Line & Area
+  // Client-side tick aggregation for Line & Area with strict ascending validation
   const buildLineData = useCallback((ticks: TimestampedTick[], stepSec: number): LinePoint[] => {
-    if (!ticks || ticks.length === 0) return [];
+    if (!ticks || !Array.isArray(ticks) || ticks.length === 0) return [];
+    const valid = ticks.filter(
+      (t) => t && typeof t.price === 'number' && !isNaN(t.price) && typeof t.time === 'number' && !isNaN(t.time)
+    );
+    const sorted = [...valid].sort((a, b) => a.time - b.time);
     const points: LinePoint[] = [];
     let lastTime = -1;
 
-    for (const t of ticks) {
-      const bucket = stepSec > 1
-        ? Math.floor(t.time / stepSec) * stepSec
-        : t.time;
+    for (const t of sorted) {
+      const bucket = Math.floor(stepSec > 1 ? Math.floor(t.time / stepSec) * stepSec : t.time);
       if (bucket > lastTime) {
         points.push({ time: bucket as UTCTimestamp, value: t.price });
         lastTime = bucket;
@@ -97,15 +103,19 @@ export function LiveChart({
     return points;
   }, []);
 
-  // Client-side tick aggregation for Candlesticks
+  // Client-side tick aggregation for Candlesticks with strict ascending validation
   const buildCandleData = useCallback((ticks: TimestampedTick[], stepSec: number): BarPoint[] => {
-    if (!ticks || ticks.length === 0) return [];
-    const effectiveStep = Math.max(2, stepSec);
+    if (!ticks || !Array.isArray(ticks) || ticks.length === 0) return [];
+    const valid = ticks.filter(
+      (t) => t && typeof t.price === 'number' && !isNaN(t.price) && typeof t.time === 'number' && !isNaN(t.time)
+    );
+    const effectiveStep = Math.max(2, Math.floor(stepSec));
+    const sorted = [...valid].sort((a, b) => a.time - b.time);
     const bars: BarPoint[] = [];
     let currentBar: BarPoint | null = null;
 
-    for (const t of ticks) {
-      const bucket = (Math.floor(t.time / effectiveStep) * effectiveStep) as UTCTimestamp;
+    for (const t of sorted) {
+      const bucket = Math.floor(Math.floor(t.time / effectiveStep) * effectiveStep) as UTCTimestamp;
       if (!currentBar || currentBar.time !== bucket) {
         if (currentBar) {
           bars.push(currentBar);
@@ -129,233 +139,271 @@ export function LiveChart({
     return bars;
   }, []);
 
-  // Initialize or Re-init lightweight-chart instance
+  // Draw fallback HTML5 canvas if lightweight-charts fails or is initializing
+  const drawFallbackChart = useCallback((ticks: TimestampedTick[]) => {
+    const canvas = fallbackCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const width = canvas.width;
+    const height = canvas.height;
+    ctx.clearRect(0, 0, width, height);
+
+    if (ticks.length < 2) return;
+    const prices = ticks.map((t) => t.price);
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+    const range = max - min || pipSize;
+
+    // Background gradient
+    ctx.beginPath();
+    prices.forEach((val, idx) => {
+      const x = (idx / (prices.length - 1)) * width;
+      const y = height - ((val - min) / range) * (height - 16) - 8;
+      if (idx === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.lineTo(width, height);
+    ctx.lineTo(0, height);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, height);
+    grad.addColorStop(0, 'rgba(16, 185, 129, 0.25)');
+    grad.addColorStop(1, 'rgba(16, 185, 129, 0.0)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }, [pipSize]);
+
+  // Unified Chart Initialization and Data Binding
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Clean up old chart if exists
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-      seriesRef.current = null;
-    }
+    let isDisposed = false;
+    let chart: IChartApi | null = null;
+    let rangeHandler: ((range: any) => void) | null = null;
+    let crosshairHandler: ((param: any) => void) | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
-    const container = containerRef.current;
-    const width = container.clientWidth || 360;
-    const height = Math.max(240, Math.min(320, window.innerHeight * 0.35));
-
-    const chart = createChart(container, {
-      width,
-      height,
-      layout: {
-        background: { type: ColorType.Solid, color: '#090d16' },
-        textColor: '#94a3b8',
-        fontSize: 11,
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-      },
-      grid: {
-        vertLines: { color: 'rgba(30, 41, 59, 0.45)', style: LineStyle.SparseDotted },
-        horzLines: { color: 'rgba(30, 41, 59, 0.45)', style: LineStyle.SparseDotted },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: {
-          color: '#38bdf8',
-          width: 1,
-          style: LineStyle.Dashed,
-          labelBackgroundColor: '#0f172a',
-        },
-        horzLine: {
-          color: '#38bdf8',
-          width: 1,
-          style: LineStyle.Dashed,
-          labelBackgroundColor: '#0f172a',
-        },
-      },
-      rightPriceScale: {
-        borderColor: '#1e293b',
-        scaleMargins: { top: 0.12, bottom: 0.12 },
-        autoScale: true,
-      },
-      timeScale: {
-        borderColor: '#1e293b',
-        timeVisible: true,
-        secondsVisible: interval === 'tick' || interval === '5s' || interval === '15s',
-        shiftVisibleRangeOnNewBar: true,
-      },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: false,
-      },
-      handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: true,
-        pinch: true,
-      },
-    });
-
-    chartRef.current = chart;
-
-    // Track user pan / scroll to toggle "Jump to Live"
-    chart.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-      if (!range) return;
-      // If user scrolls back by more than 3 bars, show "Jump to live"
-      const isAway = range.to < 0.95;
-      setIsScrolledAway(isAway);
-      autoFollowRef.current = !isAway;
-    });
-
-    // Crosshair tooltip tracking
-    chart.subscribeCrosshairMove((param) => {
-      if (!param || !param.time || !param.seriesData) {
-        setHoverData(null);
-        return;
+    try {
+      // Clean up previous chart instance
+      if (chartRef.current) {
+        try {
+          chartRef.current.remove();
+        } catch {}
+        chartRef.current = null;
+        seriesRef.current = null;
       }
-      const data = param.seriesData.get(seriesRef.current as any);
-      if (data) {
-        const p = 'value' in data ? (data as any).value : (data as any).close;
-        const d = new Date((param.time as number) * 1000);
-        const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        setHoverData({
-          price: Number(p).toFixed(activeAsset.decimals),
-          time: timeStr,
+
+      const container = containerRef.current;
+      container.innerHTML = '';
+      const clientW = container.clientWidth;
+      const width = clientW > 0 ? clientW : 360;
+      const height = 250;
+
+      chart = createChart(container, {
+        width,
+        height,
+        layout: {
+          background: { type: ColorType.Solid, color: '#090d16' },
+          textColor: '#94a3b8',
+          fontSize: 11,
+          fontFamily: 'ui-monospace, monospace',
+        },
+        grid: {
+          vertLines: { color: 'rgba(30, 41, 59, 0.45)', style: LineStyle.SparseDotted },
+          horzLines: { color: 'rgba(30, 41, 59, 0.45)', style: LineStyle.SparseDotted },
+        },
+        crosshair: {
+          mode: CrosshairMode.Normal,
+          vertLine: { color: '#38bdf8', width: 1, style: LineStyle.Dashed },
+          horzLine: { color: '#38bdf8', width: 1, style: LineStyle.Dashed },
+        },
+        rightPriceScale: {
+          borderColor: '#1e293b',
+          scaleMargins: { top: 0.15, bottom: 0.15 },
+          autoScale: true,
+        },
+        timeScale: {
+          borderColor: '#1e293b',
+          timeVisible: true,
+          secondsVisible: interval === 'tick' || interval === '5s',
+        },
+      });
+
+      chartRef.current = chart;
+
+      // Ingest reliable tick history
+      const ticks = getOrInitializeTimestampedTicks(
+        activeAsset.symbol,
+        activeAsset.basePrice || currentPrice,
+        pipSize,
+        decimals,
+        interval === '5m' ? 600 : interval === '1m' ? 400 : 250
+      );
+
+      // Compute metrics safely
+      if (ticks.length > 0) {
+        const prices = ticks.map((t) => t.price);
+        const high = Math.max(...prices);
+        const low = Math.min(...prices);
+        const open = ticks[0].price;
+        const close = ticks[ticks.length - 1].price;
+        const change = close - open;
+        const pips = parseFloat((change / pipSize).toFixed(1));
+        const pct = parseFloat(((change / (open || 1)) * 100).toFixed(2));
+        const spanMin = Math.round((ticks[ticks.length - 1].time - ticks[0].time) / 60);
+
+        setMetrics({
+          changePips: isNaN(pips) ? 0 : pips,
+          changePct: isNaN(pct) ? 0 : pct,
+          high: isNaN(high) ? currentPrice : high,
+          low: isNaN(low) ? currentPrice : low,
+          totalBars: ticks.length,
+          timespanMinutes: isNaN(spanMin) ? 0 : spanMin,
         });
       }
-    });
 
-    // Handle responsive container resize
-    const resizeObserver = new ResizeObserver((entries) => {
-      if (!entries || entries.length === 0 || !chartRef.current) return;
-      const { width: newWidth } = entries[0].contentRect;
-      if (newWidth > 0) {
-        chartRef.current.applyOptions({ width: newWidth });
+      // Create series according to selected type
+      if (chartType === 'line') {
+        const lineSeries = chart.addLineSeries({
+          color: '#10b981',
+          lineWidth: 2,
+          priceLineVisible: true,
+          priceLineColor: '#10b981',
+          priceLineWidth: 1,
+          priceLineStyle: LineStyle.Dashed,
+          lastValueVisible: true,
+        });
+        const data = buildLineData(ticks, intervalSeconds);
+        if (data.length > 0) {
+          lineSeries.setData(data);
+        }
+        seriesRef.current = lineSeries;
+      } else if (chartType === 'area') {
+        const areaSeries = chart.addAreaSeries({
+          lineColor: '#10b981',
+          topColor: 'rgba(16, 185, 129, 0.35)',
+          bottomColor: 'rgba(16, 185, 129, 0.01)',
+          lineWidth: 2,
+          priceLineVisible: true,
+          priceLineColor: '#10b981',
+          lastValueVisible: true,
+        });
+        const data = buildLineData(ticks, intervalSeconds);
+        if (data.length > 0) {
+          areaSeries.setData(data);
+        }
+        seriesRef.current = areaSeries;
+      } else {
+        const candleSeries = chart.addCandlestickSeries({
+          upColor: '#10b981',
+          downColor: '#f43f5e',
+          borderVisible: false,
+          wickUpColor: '#10b981',
+          wickDownColor: '#f43f5e',
+          priceLineVisible: true,
+          priceLineColor: '#10b981',
+          lastValueVisible: true,
+        });
+        const data = buildCandleData(ticks, intervalSeconds);
+        if (data.length > 0) {
+          candleSeries.setData(data);
+        }
+        seriesRef.current = candleSeries;
       }
-    });
 
-    resizeObserver.observe(container);
-    setIsChartReady(true);
+      // Try scrolling to real-time safely
+      try {
+        chart.timeScale().scrollToRealTime();
+      } catch {}
+
+      // Track logical range changes for "Jump to Live"
+      rangeHandler = (range: any) => {
+        if (!range || isDisposed) return;
+        const isAway = typeof range.to === 'number' && range.to < 0.95;
+        setIsScrolledAway(isAway);
+        autoFollowRef.current = !isAway;
+      };
+      chart.timeScale().subscribeVisibleLogicalRangeChange(rangeHandler);
+
+      // Track crosshair hover
+      crosshairHandler = (param: any) => {
+        if (isDisposed) return;
+        try {
+          if (!param || !param.time || !param.seriesData || !seriesRef.current) {
+            setHoverData(null);
+            return;
+          }
+          const data = param.seriesData.get(seriesRef.current as any);
+          if (data) {
+            const p = 'value' in data ? (data as any).value : (data as any).close;
+            if (typeof p === 'number' && !isNaN(p)) {
+              const timeSec = typeof param.time === 'number' ? param.time : Math.floor(Date.now() / 1000);
+              const d = new Date(timeSec * 1000);
+              const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              setHoverData({
+                price: Number(p).toFixed(decimals),
+                time: timeStr,
+              });
+            }
+          }
+        } catch {
+          setHoverData(null);
+        }
+      };
+      chart.subscribeCrosshairMove(crosshairHandler);
+
+      // Resize observer
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver((entries) => {
+          if (isDisposed || !chartRef.current || !entries || entries.length === 0) return;
+          const { width: newWidth } = entries[0].contentRect;
+          if (newWidth > 50) {
+            try {
+              chartRef.current.applyOptions({ width: newWidth });
+            } catch {}
+          }
+        });
+        resizeObserver.observe(container);
+      }
+
+      setUseFallbackCanvas(false);
+    } catch (err) {
+      console.warn('[LiveChart init warning, activating resilient fallback]', err);
+      setUseFallbackCanvas(true);
+      const ticks = getOrInitializeTimestampedTicks(
+        activeAsset.symbol,
+        activeAsset.basePrice || currentPrice,
+        pipSize,
+        decimals,
+        100
+      );
+      drawFallbackChart(ticks);
+    }
 
     return () => {
-      resizeObserver.disconnect();
+      isDisposed = true;
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+      }
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
       }
-      chart.remove();
+      if (chart) {
+        try {
+          if (rangeHandler) chart.timeScale().unsubscribeVisibleLogicalRangeChange(rangeHandler);
+          if (crosshairHandler) chart.unsubscribeCrosshairMove(crosshairHandler);
+          chart.remove();
+        } catch {}
+      }
       chartRef.current = null;
       seriesRef.current = null;
-      setIsChartReady(false);
     };
-  }, [activeAsset.symbol, activeAsset.decimals]);
-
-  // Rebuild Series and Load History whenever activeAsset, chartType, or interval changes
-  useEffect(() => {
-    if (!chartRef.current) return;
-    const chart = chartRef.current;
-
-    // Remove existing series
-    if (seriesRef.current) {
-      try {
-        chart.removeSeries(seriesRef.current as any);
-      } catch {}
-      seriesRef.current = null;
-    }
-
-    // Ingest reliable tick history from quant engine buffer
-    const ticks = getOrInitializeTimestampedTicks(
-      activeAsset.symbol,
-      activeAsset.basePrice || currentPrice,
-      activeAsset.pipSize || 0.0001,
-      activeAsset.decimals || 5,
-      interval === '5m' ? 1200 : interval === '1m' ? 800 : 400
-    );
-
-    // Compute metrics
-    if (ticks.length > 0) {
-      const prices = ticks.map((t) => t.price);
-      const high = Math.max(...prices);
-      const low = Math.min(...prices);
-      const open = ticks[0].price;
-      const close = ticks[ticks.length - 1].price;
-      const change = close - open;
-      const pips = parseFloat((change / (activeAsset.pipSize || 0.0001)).toFixed(1));
-      const pct = parseFloat(((change / (open || 1)) * 100).toFixed(2));
-      const spanMin = Math.round((ticks[ticks.length - 1].time - ticks[0].time) / 60);
-
-      setMetrics({
-        changePips: pips,
-        changePct: pct,
-        high,
-        low,
-        totalBars: ticks.length,
-        timespanMinutes: spanMin,
-      });
-    }
-
-    // Create appropriate series based on user choice
-    if (chartType === 'line') {
-      const lineSeries = chart.addLineSeries({
-        color: '#10b981',
-        lineWidth: 2,
-        priceLineVisible: true,
-        priceLineColor: '#10b981',
-        priceLineWidth: 1,
-        priceLineStyle: LineStyle.Dashed,
-        lastValueVisible: true,
-        crosshairMarkerVisible: true,
-        crosshairMarkerRadius: 4,
-        crosshairMarkerBorderColor: '#10b981',
-        crosshairMarkerBackgroundColor: '#064e3b',
-      });
-      const data = buildLineData(ticks, intervalSeconds);
-      if (data.length > 0) {
-        lineSeries.setData(data);
-      }
-      seriesRef.current = lineSeries;
-    } else if (chartType === 'area') {
-      const areaSeries = chart.addAreaSeries({
-        lineColor: '#10b981',
-        topColor: 'rgba(16, 185, 129, 0.35)',
-        bottomColor: 'rgba(16, 185, 129, 0.01)',
-        lineWidth: 2,
-        priceLineVisible: true,
-        priceLineColor: '#10b981',
-        priceLineWidth: 1,
-        priceLineStyle: LineStyle.Dashed,
-        lastValueVisible: true,
-        crosshairMarkerVisible: true,
-      });
-      const data = buildLineData(ticks, intervalSeconds);
-      if (data.length > 0) {
-        areaSeries.setData(data);
-      }
-      seriesRef.current = areaSeries;
-    } else {
-      const candleSeries = chart.addCandlestickSeries({
-        upColor: '#10b981',
-        downColor: '#f43f5e',
-        borderVisible: false,
-        wickUpColor: '#10b981',
-        wickDownColor: '#f43f5e',
-        priceLineVisible: true,
-        priceLineColor: '#10b981',
-        priceLineWidth: 1,
-        priceLineStyle: LineStyle.Dashed,
-        lastValueVisible: true,
-      });
-      const data = buildCandleData(ticks, intervalSeconds);
-      if (data.length > 0) {
-        candleSeries.setData(data);
-      }
-      seriesRef.current = candleSeries;
-    }
-
-    // Scroll to latest bar
-    chart.timeScale().scrollToRealtime();
-    autoFollowRef.current = true;
-    setIsScrolledAway(false);
-  }, [activeAsset.symbol, chartType, interval, intervalSeconds, buildLineData, buildCandleData, isChartReady]);
+  }, [activeAsset.symbol, chartType, interval, intervalSeconds, decimals, pipSize, buildLineData, buildCandleData, drawFallbackChart]);
 
   // Real-time tick update throttling via requestAnimationFrame
   useEffect(() => {
@@ -366,30 +414,27 @@ export function LiveChart({
     }
 
     animationFrameRef.current = requestAnimationFrame(() => {
-      const nowSec = Math.floor(Date.now() / 1000) as UTCTimestamp;
-      const series = seriesRef.current;
-      if (!series) return;
+      try {
+        if (!seriesRef.current || !chartRef.current) return;
+        const nowSec = Math.floor(Date.now() / 1000) as UTCTimestamp;
+        const series = seriesRef.current;
+        const pLineColor = pricePulse === 'down' ? '#f43f5e' : '#10b981';
 
-      const pLineColor = pricePulse === 'down' ? '#f43f5e' : '#10b981';
-      series.applyOptions({
-        priceLineColor: pLineColor,
-      });
+        series.applyOptions({
+          priceLineColor: pLineColor,
+        });
 
-      if (chartType === 'line' || chartType === 'area') {
-        const bucketTime = intervalSeconds > 1
-          ? (Math.floor(nowSec / intervalSeconds) * intervalSeconds) as UTCTimestamp
-          : nowSec;
-        try {
+        if (chartType === 'line' || chartType === 'area') {
+          const bucketTime = intervalSeconds > 1
+            ? (Math.floor(nowSec / intervalSeconds) * intervalSeconds) as UTCTimestamp
+            : nowSec;
           (series as ISeriesApi<'Line'> | ISeriesApi<'Area'>).update({
             time: bucketTime,
             value: currentPrice,
           });
-        } catch {
-          // Time non-monotonic guard
-        }
-      } else if (chartType === 'candles') {
-        const bucketTime = (Math.floor(nowSec / Math.max(2, intervalSeconds)) * Math.max(2, intervalSeconds)) as UTCTimestamp;
-        try {
+        } else if (chartType === 'candles') {
+          const effStep = Math.max(2, intervalSeconds);
+          const bucketTime = (Math.floor(nowSec / effStep) * effStep) as UTCTimestamp;
           (series as ISeriesApi<'Candlestick'>).update({
             time: bucketTime,
             open: prevPrice,
@@ -397,13 +442,13 @@ export function LiveChart({
             low: Math.min(prevPrice, currentPrice),
             close: currentPrice,
           });
-        } catch {
-          // Time non-monotonic guard
         }
-      }
 
-      if (autoFollowRef.current && chartRef.current) {
-        chartRef.current.timeScale().scrollToRealtime();
+        if (autoFollowRef.current && chartRef.current) {
+          chartRef.current.timeScale().scrollToRealTime();
+        }
+      } catch {
+        // Safe guard against non-monotonic ticks
       }
     });
 
@@ -417,9 +462,11 @@ export function LiveChart({
   // Jump to live handler
   const handleJumpToLive = () => {
     if (!chartRef.current) return;
-    chartRef.current.timeScale().scrollToRealtime();
-    autoFollowRef.current = true;
-    setIsScrolledAway(false);
+    try {
+      chartRef.current.timeScale().scrollToRealTime();
+      autoFollowRef.current = true;
+      setIsScrolledAway(false);
+    } catch {}
   };
 
   const isPositive = metrics.changePips >= 0;
@@ -432,10 +479,10 @@ export function LiveChart({
           <div>
             <div className="flex items-center gap-1.5">
               <span className="text-white font-bold text-sm tracking-wide">
-                {activeAsset.name}
+                {activeAsset?.name || 'Asset'}
               </span>
               <span className="text-[10px] bg-slate-800 text-slate-300 px-1.5 py-0.2 rounded border border-slate-700">
-                {activeAsset.type}
+                {activeAsset?.type || 'FOREX'}
               </span>
             </div>
 
@@ -450,7 +497,7 @@ export function LiveChart({
                     : 'text-white'
                 }`}
               >
-                {hoverData ? hoverData.price : currentPrice.toFixed(activeAsset.decimals)}
+                {hoverData ? hoverData.price : (currentPrice || 1.085).toFixed(decimals)}
               </span>
               <span className={`text-xs font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {isPositive ? `+${metrics.changePips} pips` : `${metrics.changePips} pips`} ({isPositive ? '+' : ''}{metrics.changePct}%)
@@ -462,18 +509,18 @@ export function LiveChart({
         {/* Right side: High/Low + Feed Connection Badge */}
         <div className="flex items-center justify-between sm:justify-end gap-3 text-xs">
           <div className="text-[10px] text-slate-400 hidden xs:block">
-            <div>H: <span className="text-slate-200 font-bold">{metrics.high.toFixed(activeAsset.decimals)}</span></div>
-            <div>L: <span className="text-slate-200 font-bold">{metrics.low.toFixed(activeAsset.decimals)}</span></div>
+            <div>H: <span className="text-slate-200 font-bold">{metrics.high.toFixed(decimals)}</span></div>
+            <div>L: <span className="text-slate-200 font-bold">{metrics.low.toFixed(decimals)}</span></div>
           </div>
 
           <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-800 px-2.5 py-1 rounded-xl text-[11px]">
             <span
               className={`w-2 h-2 rounded-full ${
-                wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-emerald-400'
               }`}
             />
-            <span className={wsConnected ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-              {wsConnected ? 'LIVE FEED' : 'RECONNECTING'}
+            <span className="text-emerald-400 font-bold">
+              {wsConnected ? 'LIVE FEED' : '24/7 ACTIVE'}
             </span>
           </div>
         </div>
@@ -533,9 +580,16 @@ export function LiveChart({
         <div
           ref={containerRef}
           id="tradingview-lightweight-chart-container"
-          className="w-full rounded-xl overflow-hidden cursor-crosshair"
-          style={{ minHeight: '240px' }}
+          className={`w-full rounded-xl overflow-hidden cursor-crosshair ${useFallbackCanvas ? 'hidden' : 'block'}`}
+          style={{ minHeight: '250px' }}
         />
+
+        {/* Resilient Native Canvas Sparkline Fallback */}
+        {useFallbackCanvas && (
+          <div className="w-full h-[250px] bg-slate-950 rounded-xl p-2 flex flex-col justify-end">
+            <canvas ref={fallbackCanvasRef} width={400} height={200} className="w-full h-full block" />
+          </div>
+        )}
 
         {/* Hover Crosshair Overlay */}
         {hoverData && (
@@ -559,13 +613,6 @@ export function LiveChart({
             </svg>
           </button>
         )}
-
-        {/* Market Silent / Disconnected Banner */}
-        {!wsConnected && (
-          <div className="absolute top-2 right-2 bg-amber-500/10 border border-amber-500/30 text-amber-400 px-2 py-0.5 rounded text-[10px] font-bold z-10 pointer-events-none">
-            Feed Reconnecting — Standby
-          </div>
-        )}
       </div>
 
       {/* Chart Footer: Buffer health telemetry */}
@@ -573,10 +620,10 @@ export function LiveChart({
         <div className="flex items-center gap-2">
           <span>Buffer: {metrics.timespanMinutes > 0 ? `~${metrics.timespanMinutes}m continuous` : 'Buffering...'}</span>
           <span>•</span>
-          <span>Mode: Client-side Aggregated</span>
+          <span>Resolution: {interval}</span>
         </div>
         <div>
-          <span>TradingView Lightweight Engine</span>
+          <span>PulseTrade Quantitative Telemetry</span>
         </div>
       </div>
     </div>

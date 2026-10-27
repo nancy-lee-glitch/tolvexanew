@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { AssetConfig } from '../types.ts';
 import { pushAssetTick, getAssetTicks, getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
 import { LiveChart } from './LiveChart.tsx';
+import { ErrorBoundary } from './ErrorBoundary.tsx';
 
 interface LiveTickerProps {
   activeAsset: AssetConfig;
@@ -69,6 +70,7 @@ export function LiveTicker({
   const historyRef = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const tickCountRef = useRef<number>(0);
+  const currentPriceRef = useRef<number>(activeAsset.basePrice || 1.08542);
 
   // Sync initial price on activeAsset change
   useEffect(() => {
@@ -84,6 +86,7 @@ export function LiveTicker({
       ? existing[existing.length - 1] 
       : (activeAsset.basePrice || (activeAsset.decimals === 5 ? 1.08542 : 100.0));
     
+    currentPriceRef.current = initialP;
     setCurrentPrice(initialP);
     setPrevPrice(initialP);
     historyRef.current = existing.length > 0 ? [...existing] : [initialP];
@@ -152,13 +155,11 @@ export function LiveTicker({
       // If symbol is non-Deriv or WS is not actively pushing ticks, supply live continuous ticks
       const isDerivNative = ['frxEURUSD', 'frxGBPUSD', 'frxXAUUSD', 'R_100', 'R_75'].includes(activeAsset.symbol);
       if (!isDerivNative || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        setCurrentPrice((prev) => {
-          const stepSize = activeAsset.pipSize * (Math.random() > 0.8 ? 2.5 : 1.2);
-          const delta = (Math.random() - 0.492) * stepSize;
-          const next = Math.max(0.00001, parseFloat((prev + delta).toFixed(activeAsset.decimals)));
-          processNewTick(next);
-          return next;
-        });
+        const prev = currentPriceRef.current;
+        const stepSize = (activeAsset.pipSize || 0.0001) * (Math.random() > 0.8 ? 2.5 : 1.2);
+        const delta = (Math.random() - 0.492) * stepSize;
+        const next = Math.max(0.00001, parseFloat((prev + delta).toFixed(activeAsset.decimals || 5)));
+        processNewTick(next);
       }
     }, 800);
 
@@ -191,16 +192,17 @@ export function LiveTicker({
     tickCountRef.current += 1;
     const nowSec = Math.floor(Date.now() / 1000);
     pushAssetTick(activeAsset.symbol, newPrice, nowSec);
-    setPrevPrice((old) => {
-      const diff = newPrice - old;
-      if (diff > 0.0000001) {
-        setPricePulse('up');
-      } else if (diff < -0.0000001) {
-        setPricePulse('down');
-      }
-      return old;
-    });
 
+    const prev = currentPriceRef.current;
+    const priceDiff = newPrice - prev;
+    if (priceDiff > 0.0000001) {
+      setPricePulse('up');
+    } else if (priceDiff < -0.0000001) {
+      setPricePulse('down');
+    }
+
+    currentPriceRef.current = newPrice;
+    setPrevPrice(prev);
     setCurrentPrice(newPrice);
     onPriceUpdate?.(newPrice);
 
@@ -313,14 +315,16 @@ export function LiveTicker({
 
       {/* TradingView Lightweight Charts Live Terminal */}
       <div data-tour="live-ticker">
-        <LiveChart
-          activeAsset={activeAsset}
-          currentPrice={currentPrice}
-          prevPrice={prevPrice}
-          pricePulse={pricePulse}
-          wsConnected={wsConnected}
-          onAssetChange={onAssetChange}
-        />
+        <ErrorBoundary fallbackTitle="Chart Telemetry Initializing...">
+          <LiveChart
+            activeAsset={activeAsset}
+            currentPrice={currentPrice}
+            prevPrice={prevPrice}
+            pricePulse={pricePulse}
+            wsConnected={wsConnected}
+            onAssetChange={onAssetChange}
+          />
+        </ErrorBoundary>
       </div>
     </div>
   );

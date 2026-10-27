@@ -25,6 +25,7 @@ import { VipSafeRadarModal } from './components/VipSafeRadarModal.tsx';
 import { GuidedTourCoachMark } from './components/GuidedTourCoachMark.tsx';
 import { PWAInstallButton } from './components/PWAInstallButton.tsx';
 import { FloatingSupportFAB } from './components/FloatingSupportFAB.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import {
   getSiteSettings,
   fetchRemoteSiteSettings,
@@ -545,58 +546,60 @@ export default function App() {
 
         {/* VIEW 2: TRADING COCKPIT (The Mobile-First Cockpit) */}
         {currentPage === 'cockpit' && (
-          <div className="max-w-xl mx-auto space-y-3.5 animate-in fade-in duration-200">
-            {/* Quick Context Bar */}
-            <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
-              <div className="flex items-center gap-2 text-slate-300">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="font-bold text-white">Live Execution Cockpit</span>
+          <ErrorBoundary fallbackTitle="Trading Cockpit Initializing...">
+            <div className="max-w-xl mx-auto space-y-3.5 animate-in fade-in duration-200">
+              {/* Quick Context Bar */}
+              <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="font-bold text-white">Live Execution Cockpit</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">Balance:</span>
+                  <span className="font-black text-emerald-400 font-mono">
+                    {isVIP || user?.is_vip ? 'UNLIMITED' : `${credits} CR`}
+                  </span>
+                  {!isVIP && !user?.is_vip && (
+                    <button
+                      type="button"
+                      onClick={() => setCurrentPage('pricing')}
+                      className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded font-bold hover:bg-emerald-500/30"
+                    >
+                      + Top-Up
+                    </button>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400">Balance:</span>
-                <span className="font-black text-emerald-400 font-mono">
-                  {isVIP || user?.is_vip ? 'UNLIMITED' : `${credits} CR`}
-                </span>
-                {!isVIP && !user?.is_vip && (
-                  <button
-                    type="button"
-                    onClick={() => setCurrentPage('pricing')}
-                    className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded font-bold hover:bg-emerald-500/30"
-                  >
-                    + Top-Up
-                  </button>
-                )}
-              </div>
+
+              {/* Deriv WebSocket Ticker & Asset Switcher */}
+              <LiveTicker
+                activeAsset={activeAsset}
+                onAssetChange={setActiveAsset}
+                onPriceUpdate={setCurrentPrice}
+                onTicksUpdate={setLiveTicks}
+                isVIP={isVIP || Boolean(user?.is_vip)}
+                onOpenVipRadar={() => setIsVipRadarOpen(true)}
+              />
+
+              {/* Multi-Timeframe Algorithmic Signal Engine & Lockout Loop */}
+              <SignalEngine
+                activeAsset={activeAsset}
+                currentPrice={currentPrice}
+                credits={credits}
+                isVIP={isVIP || Boolean(user?.is_vip)}
+                onDeductCredit={handleDeductCredit}
+                onLogOutcome={handleLogOutcome}
+                stats={stats}
+                ticks={liveTicks}
+                user={user}
+                onOpenAuth={(mode) => setAuthModalMode(mode)}
+                onOpenVipRadar={() => setIsVipRadarOpen(true)}
+              />
+
+              {/* Risk Advisor & 2% Stake Protection */}
+              <RiskAdvisor />
             </div>
-
-            {/* Deriv WebSocket Ticker & Asset Switcher */}
-            <LiveTicker
-              activeAsset={activeAsset}
-              onAssetChange={setActiveAsset}
-              onPriceUpdate={setCurrentPrice}
-              onTicksUpdate={setLiveTicks}
-              isVIP={isVIP || Boolean(user?.is_vip)}
-              onOpenVipRadar={() => setIsVipRadarOpen(true)}
-            />
-
-            {/* Multi-Timeframe Algorithmic Signal Engine & Lockout Loop */}
-            <SignalEngine
-              activeAsset={activeAsset}
-              currentPrice={currentPrice}
-              credits={credits}
-              isVIP={isVIP || Boolean(user?.is_vip)}
-              onDeductCredit={handleDeductCredit}
-              onLogOutcome={handleLogOutcome}
-              stats={stats}
-              ticks={liveTicks}
-              user={user}
-              onOpenAuth={(mode) => setAuthModalMode(mode)}
-              onOpenVipRadar={() => setIsVipRadarOpen(true)}
-            />
-
-            {/* Risk Advisor & 2% Stake Protection */}
-            <RiskAdvisor />
-          </div>
+          </ErrorBoundary>
         )}
 
         {/* VIEW 3: EDUCATIONAL BLOG & SEO ACADEMY */}
