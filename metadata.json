@@ -1,0 +1,6 @@
+{
+  "name": "PulseTrade Pro",
+  "description": "Mobile-first real-time trading companion and signal web application with 24/7 continuous tick analysis, live Deriv feed, multi-phase re-checking for 30s and 1m expiries, and capital risk management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
