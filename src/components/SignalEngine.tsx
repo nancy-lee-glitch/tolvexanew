@@ -71,12 +71,14 @@ export function SignalEngine({
     return 'expert_option';
   });
 
-  const currentPlatform = useMemo(() => {
+  const currentPlatform: BrokerPlatformItem = useMemo(() => {
     return platforms.find((p) => p.id === selectedPlatformId) || platforms[0] || {
       id: 'expert_option',
       name: 'ExpertOption',
       profile: 'BINARY_QUICK' as const,
       enabled: true,
+      referralUrl: '',
+      sortOrder: 1,
     };
   }, [platforms, selectedPlatformId]);
 
@@ -481,7 +483,7 @@ export function SignalEngine({
     setActiveTrade((prev) => (prev ? { ...prev, completed: true } : null));
     if (signal) {
       onLogOutcome(outcome, signal);
-      logOutcomeToSupabase(signal, outcome, finalPipDiff);
+      logOutcomeToSupabase(outcome, signal, user?.id || null);
     }
 
     if (signalHistory.length > 0) {
@@ -528,7 +530,7 @@ export function SignalEngine({
   const handleOutcome = (outcome: 'WIN' | 'LOSS') => {
     if (!signal) return;
     onLogOutcome(outcome, signal);
-    logOutcomeToSupabase(signal, outcome, 0);
+    logOutcomeToSupabase(outcome, signal, user?.id || null);
 
     if (signalHistory.length > 0) {
       handleUpdateHistoryOutcome(signalHistory[0].id, outcome);
