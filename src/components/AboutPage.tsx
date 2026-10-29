@@ -105,7 +105,7 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-2">
             <div className="text-amber-400 font-bold text-sm">03. 2% Capital Preservation Guard</div>
             <p className="text-slate-400 leading-relaxed">
-              Martingale staking is mathematically ruinous. Our risk advisor dynamically limits trade sizes to 2% of account balance to guarantee bankroll longevity.
+              Martingale staking is mathematically ruinous. Our risk advisor dynamically limits trade sizes to 2% of account balance to systematically support capital preservation.
             </p>
           </div>
 

@@ -44,8 +44,6 @@ import {
   approveDirectWalletOrder,
   rejectDirectWalletOrder,
 } from '../utils/siteConfigManager.ts';
-import { SupabaseManager } from './SupabaseManager.tsx';
-import { SystemFilesViewer } from './SystemFilesViewer.tsx';
 
 export interface AdminCenterProps {
   user?: UserProfile | null;
@@ -70,7 +68,7 @@ export function AdminCenter({
   onlineUsers = 1,
 }: AdminCenterProps) {
   const [activeTab, setActiveTab] = useState<
-    'users' | 'vip_codes' | 'pending_orders' | 'pricing' | 'branding' | 'nowpayments' | 'broker' | 'blog' | 'abuse' | 'database' | 'system'
+    'users' | 'vip_codes' | 'pending_orders' | 'pricing' | 'branding' | 'nowpayments' | 'broker' | 'blog' | 'abuse'
   >('users');
 
   // Admin Security Gate State
@@ -140,7 +138,7 @@ export function AdminCenter({
   const loadUsers = async () => {
     setUsersLoading(true);
     try {
-      const data = await fetchAdminUsers('7789');
+      const data = await fetchAdminUsers();
       if (Array.isArray(data) && data.length > 0) {
         setUsersList(data);
       } else {
@@ -181,7 +179,7 @@ export function AdminCenter({
       async () => {
         setActionLoadingId(targetUser.id);
         try {
-          const res = await grantUserVip(targetUser.id, 30, '7789');
+          const res = await grantUserVip(targetUser.id, 30);
           if (res.success) {
             showToast(res.message || `Granted 30-Day VIP to ${targetUser.username}`, 'success');
             // Refresh users
@@ -214,7 +212,7 @@ export function AdminCenter({
       async () => {
         setActionLoadingId(targetUser.id);
         try {
-          const res = await revokeUserVip(targetUser.id, '7789');
+          const res = await revokeUserVip(targetUser.id);
           if (res.success) {
             showToast(`Revoked VIP status for ${targetUser.username}`, 'info');
             await loadUsers();
@@ -247,7 +245,7 @@ export function AdminCenter({
     setAdjustCreditsModal((prev) => ({ ...prev, isOpen: false }));
 
     try {
-      const res = await adjustUserCredits(target.id, newCreds, '7789');
+      const res = await adjustUserCredits(target.id, newCreds);
       if (res.success) {
         showToast(`Updated balance for ${target.username} to ${newCreds} CR`, 'success');
         await loadUsers();
@@ -314,7 +312,7 @@ export function AdminCenter({
   const loadVipCodes = async () => {
     setVipCodesLoading(true);
     try {
-      const data = await fetchAdminVipKeys('7789');
+      const data = await fetchAdminVipKeys();
       if (Array.isArray(data) && data.length > 0) {
         setVipCodesList(data);
       } else {
@@ -329,7 +327,7 @@ export function AdminCenter({
           },
           {
             id: 2,
-            code: 'PT-VIP-ALPH7789',
+            code: 'PT-VIP-BETA30',
             duration_days: 30,
             is_active: true,
             is_redeemed: false,
@@ -349,7 +347,7 @@ export function AdminCenter({
     setGeneratingCodes(true);
     try {
       const count = Math.min(50, Math.max(1, bulkCount));
-      const res = await generateVipKeys(count, bulkDays, '7789');
+      const res = await generateVipKeys(count, bulkDays);
       if (res.success) {
         showToast(res.message || `Generated ${count} one-time VIP codes!`, 'success');
         if (res.keys && res.keys.length > 0) {
@@ -378,7 +376,7 @@ export function AdminCenter({
       `Are you sure you want to ${action.toLowerCase()} the VIP code "${codeItem.code}"?`,
       async () => {
         try {
-          const res = await toggleVipKey(codeItem.id, '7789');
+          const res = await toggleVipKey(codeItem.id);
           if (res.success) {
             showToast(`Code "${codeItem.code}" updated.`, 'success');
             await loadVipCodes();
@@ -453,7 +451,7 @@ export function AdminCenter({
       async () => {
         setOrderActionLoading(order.id);
         try {
-          const res = await approveDirectWalletOrder(order.id, '7789');
+          const res = await approveDirectWalletOrder(order.id);
           if (res.success) {
             showToast(res.message, 'success');
             await loadDirectOrders();
@@ -479,7 +477,7 @@ export function AdminCenter({
       async () => {
         setOrderActionLoading(order.id);
         try {
-          const res = await rejectDirectWalletOrder(order.id, '7789');
+          const res = await rejectDirectWalletOrder(order.id);
           if (res.success) {
             showToast(res.message, 'info');
             await loadDirectOrders();
@@ -513,7 +511,7 @@ export function AdminCenter({
   const handleSaveBrokerPlatforms = async () => {
     setPlatformsSaving(true);
     try {
-      const ok = await saveBrokerPlatforms(brokerPlatforms, '7789');
+      const ok = await saveBrokerPlatforms(brokerPlatforms);
       if (ok) {
         showToast('Broker platforms saved and synced sitewide!', 'success');
       } else {
@@ -548,7 +546,7 @@ export function AdminCenter({
   const handleSaveAllPackages = async (updatedList = packagesList) => {
     setPackagesSaving(true);
     try {
-      const res = await savePricingPackages(updatedList, '7789');
+      const res = await savePricingPackages(updatedList);
       if (res.success) {
         showToast(res.message || 'Pricing packages saved! Changes are live on checkout & pricing views.', 'success');
         setPackagesList(updatedList);
@@ -744,7 +742,7 @@ export function AdminCenter({
     setBrokerSaving(true);
     setBrokerSaved(false);
     try {
-      const res = await saveBrokersSettings(brokersSettings, '7789');
+      const res = await saveBrokersSettings(brokersSettings);
       if (res.success) {
         setBrokerSaved(true);
         showToast(res.message, 'success');
@@ -790,18 +788,16 @@ export function AdminCenter({
     if (!editingPost || !editingPost.title) return;
 
     try {
-      let res = await fetch('/api/admin/blog/save', {
+      const res = await fetch('/api/admin/blog/save', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ post: editingPost, adminPin: '7789' }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...(typeof window !== 'undefined' && localStorage.getItem('pulsetrade_session_token')
+            ? { Authorization: `Bearer ${localStorage.getItem('pulsetrade_session_token')}` }
+            : {}),
+        },
+        body: JSON.stringify({ post: editingPost }),
       });
-      if (!res.ok) {
-        res = await fetch('/api.php?action=admin_save_blog_post', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ post: editingPost, adminPin: '7789' }),
-        });
-      }
       if (res.ok) {
         showToast('Blog article saved and published!', 'success');
         setIsBlogModalOpen(false);
@@ -845,19 +841,26 @@ export function AdminCenter({
     setGateLoading(true);
     setGateError(null);
     try {
-      const res = await fetch('/api.php', {
+      const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'admin_login',
-          identity: adminIdentity.trim(),
+          email: adminIdentity.trim(),
           password: adminPasscode.trim(),
         }),
       });
       const data = await res.json();
-      if (data.success && data.user) {
+      if (res.ok && data.success && data.user) {
+        if (data.user.role !== 'ADMIN') {
+          setGateError('Access Denied: Trader account does not have institutional ADMIN role.');
+          return;
+        }
+        if (data.token) {
+          localStorage.setItem('pulsetrade_session_token', data.token);
+        }
+        localStorage.setItem('pulsetrade_auth_user', JSON.stringify(data.user));
         onUserUpdated?.(data.user);
-        showToast('Master Admin credentials verified!', 'success');
+        showToast('Master Admin verified via secure session!', 'success');
       } else {
         setGateError(data.message || 'Access Denied: Invalid Master Administrator credentials.');
       }
@@ -1108,8 +1111,6 @@ export function AdminCenter({
           { id: 'branding', label: '🎨 Site Branding' },
           { id: 'blog', label: '📰 Blog CMS' },
           { id: 'abuse', label: '🛡️ IP Guard' },
-          { id: 'database', label: '🗄️ Database' },
-          { id: 'system', label: '⚙️ Diagnostics' },
         ].map((t) => (
           <button
             key={t.id}
@@ -3215,24 +3216,6 @@ export function AdminCenter({
               </tbody>
             </table>
           </div>
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* TAB 8: SUPABASE & SQL CLOUD DATABASE                                      */}
-      {/* ========================================================================= */}
-      {activeTab === 'database' && (
-        <div className="space-y-4">
-          <SupabaseManager onlineUsers={onlineUsers} onLaunchCockpit={onExitAdmin} />
-        </div>
-      )}
-
-      {/* ========================================================================= */}
-      {/* TAB 9: SYSTEM DIAGNOSTICS & BACKEND SERVER FILES                          */}
-      {/* ========================================================================= */}
-      {activeTab === 'system' && (
-        <div className="space-y-4">
-          <SystemFilesViewer />
         </div>
       )}
     </div>

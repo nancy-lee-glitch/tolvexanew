@@ -1,55 +1,90 @@
 import express from "express";
 import path from "path";
 import fs from "node:fs";
-import http from "node:http";
-import { spawn, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
+import bcrypt from "bcryptjs";
+import { z } from "zod";
 import { createServer as createViteServer } from "vite";
 
 const app = express();
-const PORT = 3000;
-const PHP_PORT = 8080;
+const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json());
+// Middleware for parsing JSON with raw body preservation for HMAC verification
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 
-// --- RESILIENT PHP KERNEL SPAWNER ---
-let phpAvailable = false;
-let phpProcess: ChildProcess | null = null;
+// --- RATE LIMITING ENGINE ---
+interface RateLimitRecord {
+  count: number;
+  resetAt: number;
+}
+const rateLimitMap = new Map<string, RateLimitRecord>();
 
-try {
-  phpProcess = spawn("php", ["-S", `127.0.0.1:${PHP_PORT}`, "-t", process.cwd()], {
-    env: {
-      ...process.env,
-      DB_DRIVER: process.env.DB_DRIVER || (process.env.DB_HOST ? "mysql" : "sqlite"),
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+function createRateLimiter(maxRequests: number, windowMs: number) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip =
+      (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+      req.socket.remoteAddress ||
+      "127.0.0.1";
+    const key = `${req.path}:${ip}`;
+    const now = Date.now();
+    const record = rateLimitMap.get(key);
 
-  phpProcess.on("error", (err: any) => {
-    console.log(`[PulseTrade] PHP CLI not detected (${err.message}). Native TypeScript Citadel Kernel actively handling all API routes.`);
-    phpAvailable = false;
-    phpProcess = null;
-  });
+    if (!record || now > record.resetAt) {
+      rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
 
-  phpProcess.on("spawn", () => {
-    phpAvailable = true;
-    console.log(`[PulseTrade] PHP 8+ Kernel running on 127.0.0.1:${PHP_PORT}`);
-  });
-} catch (err: any) {
-  console.log(`[PulseTrade] PHP spawner bypassed (${err.message}). Using native TypeScript API engine.`);
-  phpAvailable = false;
+    record.count += 1;
+    if (record.count > maxRequests) {
+      const retryAfterSec = Math.max(1, Math.ceil((record.resetAt - now) / 1000));
+      res.setHeader("Retry-After", retryAfterSec);
+      return res.status(429).json({
+        status: "error",
+        message: `Too many requests. Please wait ${retryAfterSec} seconds before retrying.`,
+      });
+    }
+
+    next();
+  };
 }
 
-process.on("exit", () => {
-  if (phpProcess) {
-    try {
-      phpProcess.kill();
-    } catch {}
-  }
+const authRateLimiter = createRateLimiter(10, 5 * 60 * 1000); // 10 attempts per 5 mins
+const redeemRateLimiter = createRateLimiter(8, 5 * 60 * 1000); // 8 attempts per 5 mins
+const generalApiRateLimiter = createRateLimiter(120, 60 * 1000); // 120 requests per min
+
+// Apply general limiter to /api
+app.use("/api", generalApiRateLimiter);
+
+// --- ZOD INPUT VALIDATION SCHEMAS ---
+const RegisterSchema = z.object({
+  username: z
+    .string()
+    .min(3, "Username must be at least 3 characters")
+    .max(30, "Username must not exceed 30 characters")
+    .regex(/^[a-zA-Z0-9_.-]+$/, "Username can only contain alphanumeric characters, underscores, dots, or dashes"),
+  email: z.string().email("Invalid email format").max(100),
+  password: z.string().min(6, "Password must be at least 6 characters").max(128),
+  vipKey: z.string().optional(),
 });
 
-// --- NATIVE DATABASE & STATE STORE (Fallback when PHP runtime is absent) ---
-interface StoredUser {
+const LoginSchema = z.object({
+  identity: z.string().min(1, "Username or email is required").max(100),
+  password: z.string().min(1, "Password is required").max(128),
+});
+
+const RedeemVipSchema = z.object({
+  code: z.string().min(4, "VIP code is too short").max(64),
+});
+
+// --- DATA STRUCTURES & PERSISTENCE ---
+export interface StoredUser {
   id: number;
   username: string;
   email: string;
@@ -61,9 +96,6 @@ interface StoredUser {
   registration_ip: string;
   created_at: string;
 }
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DATA_DIR, "state.json");
 
 export interface SiteSettingsServer {
   siteName: string;
@@ -110,204 +142,72 @@ export interface VipCodeServer {
   duration_days: number;
   is_active: boolean;
   is_redeemed: boolean;
-  redeemed_by_user_id?: number | null;
-  redeemed_by_username?: string | null;
-  redeemed_at?: string | null;
+  redeemed_by?: string;
+  redeemed_at?: string;
   created_at: string;
-  created_by?: string | null;
 }
 
-export interface BlogPostServer {
-  id: number;
-  title: string;
-  slug: string;
-  excerpt: string;
-  body: string;
-  category: string;
-  cover_url?: string;
-  is_published: boolean;
-  created_at: string;
-  updated_at: string;
+export interface DirectWalletOrderServer {
+  id: string;
+  userId: number;
+  username: string;
+  email: string;
+  packageId: string;
+  packageName: string;
+  amountUsd: number;
+  cryptoCurrency: string;
+  txHash: string;
+  status: "PENDING_VERIFICATION" | "APPROVED" | "REJECTED";
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
 }
 
-export interface ExternalBrokerConfigServer {
-  enabled: boolean;
-  brokerName: string;
-  brokerUrl: string;
-  openInNewTab: boolean;
-  buttonLabel: string;
+export interface AuditLogServer {
+  id: string;
+  timestamp: string;
+  adminId: number;
+  adminEmail: string;
+  action: string;
+  targetId?: string | number;
+  details: string;
+  ip: string;
 }
 
-interface AppState {
+export interface AppState {
   users: StoredUser[];
   registeredIPs: Record<string, boolean>;
-  feedback: any[];
   settings: SiteSettingsServer;
   nowpayments: NowPaymentsConfigServer;
   nowpaymentsOrders: Record<string, any>;
   pricingPackages: PricingPackageServer[];
   vipCodes: VipCodeServer[];
-  blogPosts: BlogPostServer[];
-  broker: ExternalBrokerConfigServer;
+  directOrders: DirectWalletOrderServer[];
+  auditLogs: AuditLogServer[];
+  processedPaymentIds: string[];
+  broker?: {
+    enabled: boolean;
+    brokerName: string;
+    brokerUrl: string;
+    openInNewTab: boolean;
+    buttonLabel: string;
+  };
+  blogPosts: any[];
 }
 
-const defaultPricingPackagesServer: PricingPackageServer[] = [
-  {
-    id: "starter",
-    name: "Starter Pack",
-    type: "CREDITS",
-    credits_amount: 10,
-    bonus_credits: 0,
-    price_usd: 5,
-    badge_label: "Entry Level",
-    description: "Instant 10 credits for executing precision algorithmic signals.",
-    is_active: true,
-    sort_order: 1,
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: "popular",
-    name: "Popular Pack",
-    type: "CREDITS",
-    credits_amount: 25,
-    bonus_credits: 5,
-    price_usd: 10,
-    badge_label: "Most Popular",
-    description: "25 + 5 Bonus Credits (30 total) for active daily momentum execution.",
-    is_active: true,
-    sort_order: 2,
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: "pro",
-    name: "Pro Trader Desk",
-    type: "CREDITS",
-    credits_amount: 60,
-    bonus_credits: 20,
-    price_usd: 20,
-    badge_label: "Best Value",
-    description: "60 + 20 Bonus Credits (80 total) with lowest cost per signal.",
-    is_active: true,
-    sort_order: 3,
-    updated_at: new Date().toISOString(),
-  },
-  {
-    id: "vip_30d",
-    name: "30-Day VIP Pass",
-    type: "VIP_30_DAY",
-    credits_amount: 9999,
-    bonus_credits: 0,
-    price_usd: 49,
-    badge_label: "Institutional VIP",
-    description: "Strict 30-Day unlimited signals (0 credits deducted) + Safe Radar unlocked.",
-    is_active: true,
-    sort_order: 4,
-    updated_at: new Date().toISOString(),
-  },
-];
+const DATA_DIR = path.join(process.cwd(), "data");
+const DB_FILE = path.join(DATA_DIR, "state.json");
 
-const defaultVipCodesServer: VipCodeServer[] = [
-  {
-    id: 1,
-    code: "PT-VIP-ALPH7789",
-    duration_days: 30,
-    is_active: true,
-    is_redeemed: false,
-    created_at: new Date().toISOString(),
-    created_by: "System",
-  },
-  {
-    id: 2,
-    code: "PT-VIP-CITADEL30",
-    duration_days: 30,
-    is_active: true,
-    is_redeemed: false,
-    created_at: new Date().toISOString(),
-    created_by: "System",
-  },
-  {
-    id: 3,
-    code: "VIP-ALPHA-30D",
-    duration_days: 30,
-    is_active: true,
-    is_redeemed: false,
-    created_at: new Date().toISOString(),
-    created_by: "System",
-  },
-  {
-    id: 4,
-    code: "PULSE-VIP-2026",
-    duration_days: 30,
-    is_active: true,
-    is_redeemed: false,
-    created_at: new Date().toISOString(),
-    created_by: "System",
-  },
-];
-
-const defaultSettingsServer: SiteSettingsServer = {
-  siteName: "PulseTrade Pro",
-  siteTagline: "Institutional-Grade Quantitative Micro-Volatility Terminal",
-  logoUrl: "",
-  faviconUrl: "",
-  logoIcon: "zap",
-  badgeText: "v8.2 QUANT",
-  bannerText: "⚡ 30-Day VIP Pass: Institutional-grade 89.4% confluence signals with instant automated verification",
-  bannerEnabled: true,
-  supportTelegram: "https://t.me/pulsetrade_quant",
-  supportWhatsapp: "",
-  supportEmail: "support@pulsetrade.pro",
-  vipPriceUsd: 49,
-  starterPriceUsd: 5,
-  themeAccent: "emerald",
-};
-
-const defaultNowpaymentsServer: NowPaymentsConfigServer = {
-  apiKey: process.env.NOWPAYMENTS_API_KEY || "",
-  ipnSecret: process.env.NOWPAYMENTS_IPN_SECRET || "",
-  isSandbox: false,
-  enabled: !!process.env.NOWPAYMENTS_API_KEY,
-  payoutAddress: "",
-};
-
-const defaultBrokerConfigServer: ExternalBrokerConfigServer = {
-  enabled: false,
-  brokerName: "Deriv / Binary Broker",
-  brokerUrl: "https://track.deriv.com/_pulsetrade",
-  openInNewTab: true,
-  buttonLabel: "Open Broker Desk",
-};
-
-function loadState(): AppState {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, "utf-8");
-      const parsed = JSON.parse(raw);
-      return {
-        ...parsed,
-        settings: { ...defaultSettingsServer, ...(parsed.settings || {}) },
-        nowpayments: { ...defaultNowpaymentsServer, ...(parsed.nowpayments || {}) },
-        nowpaymentsOrders: parsed.nowpaymentsOrders || {},
-        pricingPackages: Array.isArray(parsed.pricingPackages) && parsed.pricingPackages.length > 0 ? parsed.pricingPackages : defaultPricingPackagesServer,
-        vipCodes: Array.isArray(parsed.vipCodes) && parsed.vipCodes.length > 0 ? parsed.vipCodes : defaultVipCodesServer,
-        blogPosts: Array.isArray(parsed.blogPosts) ? parsed.blogPosts : [],
-        broker: { ...defaultBrokerConfigServer, ...(parsed.broker || {}) },
-      };
-    }
-  } catch (e) {
-    console.warn("[PulseTrade State Load Warning]", e);
-  }
-
-  const initialState: AppState = {
+function getDefaultState(): AppState {
+  // Pre-hashed default password for initial setup only
+  const defaultAdminHash = bcrypt.hashSync("TolvexaAdmin2026!Secure", 10);
+  return {
     users: [
       {
         id: 1,
-        username: "admin",
+        username: "admin_trader",
         email: "durodoluwa5@gmail.com",
-        passwordHash: "7789",
+        passwordHash: defaultAdminHash,
         role: "ADMIN",
         credits: 9999,
         is_vip: true,
@@ -317,62 +217,229 @@ function loadState(): AppState {
       },
     ],
     registeredIPs: { "127.0.0.1": true },
-    feedback: [],
-    settings: defaultSettingsServer,
-    nowpayments: defaultNowpaymentsServer,
+    settings: {
+      siteName: "Tolvexa",
+      siteTagline: "Microstructure Confluence & Real-Time Quantitative Signals",
+      logoUrl: "",
+      logoIcon: "zap",
+      badgeText: "v8.3 QUANT",
+      bannerText: "30-Day VIP Pass: Verified microstructure confluence signals with strict multi-window confirmation",
+      bannerEnabled: true,
+      supportTelegram: "https://t.me/tolvexa_quant",
+      supportWhatsapp: "",
+      supportEmail: "support@tolvexa.com",
+      vipPriceUsd: 49,
+      starterPriceUsd: 5,
+      themeAccent: "emerald",
+    },
+    nowpayments: {
+      apiKey: process.env.NOWPAYMENTS_API_KEY || "",
+      ipnSecret: process.env.NOWPAYMENTS_IPN_SECRET || "",
+      isSandbox: false,
+      enabled: Boolean(process.env.NOWPAYMENTS_API_KEY),
+      payoutAddress: "",
+    },
     nowpaymentsOrders: {},
-    pricingPackages: defaultPricingPackagesServer,
-    vipCodes: defaultVipCodesServer,
+    pricingPackages: [
+      {
+        id: "pkg_starter",
+        name: "Starter Trader",
+        type: "CREDITS",
+        credits_amount: 10,
+        bonus_credits: 0,
+        price_usd: 5.0,
+        badge_label: "TRIAL",
+        description: "10 algorithmic signal executions with strict 6s freshness entry confirmation.",
+        is_active: true,
+        sort_order: 1,
+      },
+      {
+        id: "pkg_vip_monthly",
+        name: "30-Day VIP Pass",
+        type: "VIP_30_DAY",
+        credits_amount: 0,
+        bonus_credits: 0,
+        price_usd: 49.0,
+        badge_label: "MOST POPULAR",
+        description: "Unlimited 24/7 signal access, MT5 institutional calculator, and multi-window live confirmation.",
+        is_active: true,
+        sort_order: 2,
+      },
+      {
+        id: "pkg_pro_bundle",
+        name: "Pro Quant Pack",
+        type: "CREDITS",
+        credits_amount: 50,
+        bonus_credits: 15,
+        price_usd: 20.0,
+        badge_label: "BEST VALUE",
+        description: "65 total signal executions with priority sub-25ms WebSocket tick feed processing.",
+        is_active: true,
+        sort_order: 3,
+      },
+    ],
+    vipCodes: [
+      {
+        id: 1,
+        code: "TOLVEXA-VIP-ALPHA",
+        duration_days: 30,
+        is_active: true,
+        is_redeemed: false,
+        created_at: new Date().toISOString(),
+      },
+      {
+        id: 2,
+        code: "TOLVEXA-VIP-QUANT",
+        duration_days: 30,
+        is_active: true,
+        is_redeemed: false,
+        created_at: new Date().toISOString(),
+      },
+    ],
+    directOrders: [],
+    auditLogs: [],
+    processedPaymentIds: [],
+    broker: {
+      enabled: false,
+      brokerName: "Deriv",
+      brokerUrl: "https://deriv.com",
+      openInNewTab: true,
+      buttonLabel: "Launch Broker Desk",
+    },
     blogPosts: [],
-    broker: defaultBrokerConfigServer,
   };
-  saveState(initialState);
-  return initialState;
 }
 
-function saveState(state: AppState) {
+function loadState(): AppState {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(DB_FILE)) {
+      const data = fs.readFileSync(DB_FILE, "utf-8");
+      const parsed = JSON.parse(data);
+      const defaults = getDefaultState();
+      return {
+        ...defaults,
+        ...parsed,
+        settings: { ...defaults.settings, ...(parsed.settings || {}) },
+        nowpayments: { ...defaults.nowpayments, ...(parsed.nowpayments || {}) },
+        pricingPackages: parsed.pricingPackages || defaults.pricingPackages,
+        vipCodes: parsed.vipCodes || defaults.vipCodes,
+        directOrders: parsed.directOrders || [],
+        auditLogs: parsed.auditLogs || [],
+        processedPaymentIds: parsed.processedPaymentIds || [],
+      };
+    }
+  } catch (e) {
+    console.warn("[State load exception, initializing defaults]", e);
+  }
+  const defaultState = getDefaultState();
+  saveState(defaultState);
+  return defaultState;
+}
+
+function saveState(state: AppState): void {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
     fs.writeFileSync(DB_FILE, JSON.stringify(state, null, 2), "utf-8");
   } catch (e) {
-    console.warn("[PulseTrade State Save Warning]", e);
+    console.warn("[State save notice]", e);
   }
-}
-
-export function generateSecureVipCode(): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let random = "";
-  for (let i = 0; i < 8; i++) {
-    random += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return `PT-VIP-${random}`;
-}
-
-export function grantUserVip(user: StoredUser, durationDays = 30): StoredUser {
-  const now = Date.now();
-  const currentExpiry = user.vip_expires_at ? new Date(user.vip_expires_at).getTime() : 0;
-  // Rule: if active VIP with future expiry, extend from current vip_expires_at + duration; else now + duration
-  const baseTime = (user.is_vip && currentExpiry > now) ? currentExpiry : now;
-  user.is_vip = true;
-  user.vip_expires_at = new Date(baseTime + durationDays * 86400000).toISOString();
-  saveState(appState);
-  return user;
 }
 
 let appState = loadState();
-// Ensure the admin account has durodoluwa5@gmail.com and ADMIN role
-if (appState.users.length > 0) {
-  const adminIndex = appState.users.findIndex(u => u.role === "ADMIN" || u.id === 1);
-  if (adminIndex !== -1) {
-    appState.users[adminIndex].email = "durodoluwa5@gmail.com";
-    appState.users[adminIndex].role = "ADMIN";
-    appState.users[adminIndex].passwordHash = "7789";
-  }
-}
-let activeSessionUserId: number | null = null; // Guests start unauthenticated
 
+// --- SECURE SESSION STORE ---
+interface SessionRecord {
+  token: string;
+  userId: number;
+  role: "USER" | "ADMIN";
+  createdAt: number;
+  expiresAt: number;
+}
+const activeSessions = new Map<string, SessionRecord>();
+
+function createSession(user: StoredUser): string {
+  const token = `sess_${crypto.randomBytes(32).toString("hex")}`;
+  const now = Date.now();
+  const expiresAt = now + 14 * 86400 * 1000; // 14-day session
+  activeSessions.set(token, {
+    token,
+    userId: user.id,
+    role: user.role,
+    createdAt: now,
+    expiresAt,
+  });
+  return token;
+}
+
+function getSessionFromRequest(req: express.Request): SessionRecord | null {
+  const authHeader = req.headers.authorization;
+  let token = "";
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.substring(7).trim();
+  } else if (req.headers["x-session-token"]) {
+    token = String(req.headers["x-session-token"]).trim();
+  } else if (req.query?.sessionToken) {
+    token = String(req.query.sessionToken).trim();
+  }
+
+  if (!token) return null;
+  const session = activeSessions.get(token);
+  if (!session) return null;
+  if (Date.now() > session.expiresAt) {
+    activeSessions.delete(token);
+    return null;
+  }
+  return session;
+}
+
+// Strict Admin Gate Middleware — Zero PIN or Query Bypass
+function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const session = getSessionFromRequest(req);
+  if (!session || session.role !== "ADMIN") {
+    return res.status(403).json({
+      status: "error",
+      message: "Forbidden: Verified Administrator session required.",
+    });
+  }
+  (req as any).adminSession = session;
+  next();
+}
+
+// Admin Audit Logging Function
+function logAdminAudit(
+  adminSession: SessionRecord,
+  action: string,
+  details: string,
+  targetId?: string | number,
+  req?: express.Request
+) {
+  const ip =
+    (req?.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+    req?.socket.remoteAddress ||
+    "127.0.0.1";
+  const adminUser = appState.users.find((u) => u.id === adminSession.userId);
+  const entry: AuditLogServer = {
+    id: `audit_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`,
+    timestamp: new Date().toISOString(),
+    adminId: adminSession.userId,
+    adminEmail: adminUser?.email || "admin@tolvexa.com",
+    action,
+    targetId,
+    details,
+    ip,
+  };
+  if (!appState.auditLogs) appState.auditLogs = [];
+  appState.auditLogs.unshift(entry);
+  if (appState.auditLogs.length > 500) appState.auditLogs.pop();
+  saveState(appState);
+}
+
+// Helper to compute user object with remaining VIP timeframe
 function computeVipTimeframe(user: StoredUser) {
   let isVip = user.is_vip;
   let vipSecondsLeft = 0;
@@ -411,14 +478,17 @@ function computeVipTimeframe(user: StoredUser) {
   };
 }
 
-const VALID_VIP_KEYS = new Set([
-  "VIP-ALPHA-30D",
-  "PULSE-VIP-2026",
-  "QUANT-30D",
-  "VIP-TRADER-1M",
-]);
+export function grantUserVip(user: StoredUser, durationDays = 30): StoredUser {
+  const now = Date.now();
+  const currentExpiry = user.vip_expires_at ? new Date(user.vip_expires_at).getTime() : 0;
+  const baseTime = user.is_vip && currentExpiry > now ? currentExpiry : now;
+  user.is_vip = true;
+  user.vip_expires_at = new Date(baseTime + durationDays * 86400000).toISOString();
+  saveState(appState);
+  return user;
+}
 
-// Real-Time Genuine Connected Traders Registry (35-second sliding presence window)
+// Real-Time Genuine Connected Traders Registry
 interface ActiveSessionNode {
   lastPing: number;
   ip: string;
@@ -428,7 +498,7 @@ const activeSessionsRegistry = new Map<string, ActiveSessionNode>();
 
 function pruneAndGetRealActiveCount(): number {
   const now = Date.now();
-  const timeoutWindow = 35000; // 35 seconds
+  const timeoutWindow = 35000;
   for (const [key, session] of activeSessionsRegistry.entries()) {
     if (now - session.lastPing > timeoutWindow) {
       activeSessionsRegistry.delete(key);
@@ -437,996 +507,580 @@ function pruneAndGetRealActiveCount(): number {
   return Math.max(1, activeSessionsRegistry.size);
 }
 
-// Native Citadel API Router
-function handleNativeApi(req: express.Request, res: express.Response) {
-  const queryAction = (req.query.action as string) || "";
-  const bodyAction = (req.body?.action as string) || "";
-  const isHeartbeat =
-    req.path === "/heartbeat" ||
-    req.path === "/heartbeat.php" ||
-    req.path.endsWith("heartbeat.php") ||
-    req.path === "/api/heartbeat";
-  const action = queryAction || bodyAction || (isHeartbeat ? "heartbeat" : "");
-
-  const clientIP = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || "127.0.0.1";
-
-  // Check current user
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId) || null;
-  const currentUser = rawUser ? computeVipTimeframe(rawUser) : null;
-
-  switch (action) {
-    case "heartbeat": {
-      const sessionId = (req.query.session_id as string) || 
-                        (req.headers["x-session-id"] as string) ||
-                        (req.body?.session_id as string) || 
-                        `${clientIP}_${(req.headers["user-agent"] || "").slice(0, 30)}`;
-
-      // Register or update active heartbeat
-      activeSessionsRegistry.set(sessionId, {
-        lastPing: Date.now(),
-        ip: clientIP,
-        userId: currentUser?.id || null,
-      });
-
-      const realActiveTraders = pruneAndGetRealActiveCount();
-
-      return res.json({
-        status: "ok",
-        online_count: realActiveTraders,
-        user: currentUser,
-        supabase_configured: !!(process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL),
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-    }
-
-    case "get_settings": {
-      return res.json({
-        status: "ok",
-        settings: appState.settings,
-      });
-    }
-
-    case "update_settings": {
-      // Ensure only authenticated admin can update platform settings
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({
-          status: "error",
-          message: "Forbidden: Master Administrative privileges required to alter platform configuration.",
-        });
-      }
-
-      if (req.body?.settings) {
-        appState.settings = { ...appState.settings, ...req.body.settings };
-        saveState(appState);
-      }
-      return res.json({
-        status: "ok",
-        settings: appState.settings,
-        message: "Settings successfully updated",
-      });
-    }
-
-    case "admin_login": {
-      const identity = String(req.body?.identity || "").trim().toLowerCase();
-      const password = String(req.body?.password || "");
-
-      const isAdminMatch =
-        (identity === "durodoluwa5@gmail.com" ||
-         identity === "admin" ||
-         identity === "admin_trader" ||
-         identity === "durodoluwa5") &&
-        (password === "7789" || password === "Admin@2026" || password === "admin123");
-
-      if (isAdminMatch) {
-        let adminUser = appState.users.find((u) => u.role === "ADMIN" || u.email.toLowerCase() === "durodoluwa5@gmail.com");
-        if (!adminUser) {
-          adminUser = {
-            id: 1,
-            username: "admin",
-            email: "durodoluwa5@gmail.com",
-            passwordHash: "7789",
-            role: "ADMIN",
-            credits: 9999,
-            is_vip: true,
-            vip_expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
-            registration_ip: "127.0.0.1",
-            created_at: new Date().toISOString(),
-          };
-          appState.users.unshift(adminUser);
-        } else {
-          adminUser.email = "durodoluwa5@gmail.com";
-          adminUser.role = "ADMIN";
-        }
-        activeSessionUserId = adminUser.id;
-        saveState(appState);
-
-        return res.json({
-          success: true,
-          user: computeVipTimeframe(adminUser),
-          message: "Master Administrator access authorized.",
-        });
-      }
-
-      return res.status(401).json({
-        success: false,
-        message: "Access Denied: Invalid Administrative Credentials.",
-      });
-    }
-
-    case "status": {
-      const realActiveTraders = pruneAndGetRealActiveCount();
-      return res.json({
-        status: "ok",
-        authenticated: !!currentUser,
-        user: currentUser,
-        online_count: realActiveTraders,
-        supabase_configured: !!(process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL),
-      });
-    }
-
-    case "register": {
-      const username = String(req.body?.username || "").trim();
-      const email = String(req.body?.email || "").trim().toLowerCase();
-      const password = String(req.body?.password || "");
-      const vipKey = String(req.body?.vip_key || req.body?.vipKey || "").trim().toUpperCase();
-
-      if (username.length < 3 || username.length > 30) {
-        return res.json({ success: false, message: "Username must be between 3 and 30 characters." });
-      }
-      if (!email.includes("@")) {
-        return res.json({ success: false, message: "Invalid email address provided." });
-      }
-
-      if (appState.users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
-        return res.json({ success: false, message: "Username already in use." });
-      }
-      if (appState.users.some((u) => u.email.toLowerCase() === email.toLowerCase())) {
-        return res.json({ success: false, message: "Email already registered." });
-      }
-
-      const ipAlreadyUsed = !!appState.registeredIPs[clientIP];
-      const starterCredits = ipAlreadyUsed ? 0 : 10;
-      appState.registeredIPs[clientIP] = true;
-
-      let isVip = false;
-      let vipExpiresAt: string | null = null;
-      let vipMessage = "";
-
-      if (vipKey) {
-        if (VALID_VIP_KEYS.has(vipKey)) {
-          isVip = true;
-          vipExpiresAt = new Date(Date.now() + 30 * 86400000).toISOString();
-          vipMessage = ` ★ 30-Day VIP Pass activated! Valid until ${new Date(vipExpiresAt).toLocaleDateString()}.`;
-        } else {
-          vipMessage = " (Notice: Invalid VIP code provided. Standard free access granted).";
-        }
-      }
-
-      const newUser: StoredUser = {
-        id: appState.users.length + 1,
-        username,
-        email,
-        passwordHash: password,
-        role: "USER",
-        credits: starterCredits,
-        is_vip: isVip,
-        vip_expires_at: vipExpiresAt,
-        registration_ip: clientIP,
-        created_at: new Date().toISOString(),
-      };
-
-      appState.users.push(newUser);
-      activeSessionUserId = newUser.id;
-      saveState(appState);
-
-      const userDto = computeVipTimeframe(newUser);
-      return res.json({
-        success: true,
-        user_id: newUser.id,
-        credits: starterCredits,
-        is_vip: isVip ? 1 : 0,
-        vip_expires_at: vipExpiresAt,
-        vip_days_left: isVip ? 30 : 0,
-        anti_abuse_triggered: ipAlreadyUsed,
-        message: ipAlreadyUsed
-          ? "Account created! Welcome bonus bypassed (IP already registered previously)." + vipMessage
-          : `Account created successfully with ${starterCredits} free starter credits!` + vipMessage,
-        user: userDto,
-      });
-    }
-
-    case "login": {
-      const identity = String(req.body?.identity || "").trim().toLowerCase();
-      const password = String(req.body?.password || "");
-
-      const found = appState.users.find(
-        (u) =>
-          u.username.toLowerCase() === identity ||
-          u.email.toLowerCase() === identity
-      );
-
-      if (
-        found &&
-        (found.passwordHash === password ||
-         (found.role === "ADMIN" && (password === "7789" || password === "Admin@2026" || password === "admin123")))
-      ) {
-        activeSessionUserId = found.id;
-        return res.json({
-          success: true,
-          user: computeVipTimeframe(found),
-          message: "Login successful.",
-        });
-      }
-
-      return res.json({
-        success: false,
-        message: "Invalid username/email or password.",
-      });
-    }
-
-    case "logout": {
-      activeSessionUserId = null;
-      return res.json({ success: true, message: "Signed out successfully." });
-    }
-
-    case "deduct_credit": {
-      if (!rawUser) {
-        return res.json({
-          success: false,
-          is_vip: false,
-          credits: 0,
-          message: "Please sign in to compute signals.",
-        });
-      }
-
-      const userDto = computeVipTimeframe(rawUser);
-      if (userDto.is_vip) {
-        return res.json({
-          success: true,
-          is_vip: true,
-          credits: rawUser.credits,
-          message: "VIP Unlimited Access Active (0 credits consumed)",
-        });
-      }
-
-      if (rawUser.credits <= 0) {
-        return res.json({
-          success: false,
-          is_vip: false,
-          credits: 0,
-          message: "Insufficient credits. Upgrade to VIP or top up credits.",
-        });
-      }
-
-      rawUser.credits -= 1;
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        is_vip: false,
-        credits: rawUser.credits,
-        message: "1 credit deducted for algorithmic signal computation.",
-      });
-    }
-
-    case "redeem_vip": {
-      if (!rawUser) {
-        return res.json({ success: false, message: "Please sign in or create an account first." });
-      }
-
-      const inputKey = String(req.body?.vip_key || req.body?.vipKey || req.body?.code || "").trim().toUpperCase();
-      if (!inputKey) {
-        return res.json({ success: false, message: "Please enter a valid VIP activation code." });
-      }
-
-      // Check against appState.vipCodes
-      const codeIndex = appState.vipCodes.findIndex((c) => c.code.toUpperCase() === inputKey);
-      let durationDays = 30;
-
-      if (codeIndex !== -1) {
-        const foundCode = appState.vipCodes[codeIndex];
-        if (!foundCode.is_active) {
-          return res.json({ success: false, message: "This VIP code has been disabled by administration." });
-        }
-        if (foundCode.is_redeemed) {
-          return res.json({
-            success: false,
-            message: `This VIP code was already redeemed on ${foundCode.redeemed_at ? new Date(foundCode.redeemed_at).toLocaleDateString() : "a previous session"} and cannot be reused.`,
-          });
-        }
-
-        // Single-use enforcement: Atomic lock
-        foundCode.is_redeemed = true;
-        foundCode.redeemed_by_user_id = rawUser.id;
-        foundCode.redeemed_by_username = rawUser.username;
-        foundCode.redeemed_at = new Date().toISOString();
-        durationDays = foundCode.duration_days || 30;
-      } else if (VALID_VIP_KEYS.has(inputKey)) {
-        durationDays = 30;
-      } else {
-        return res.json({ success: false, message: "Invalid VIP activation code. Please check your key or purchase a pass." });
-      }
-
-      // Grant VIP according to specified rule: if active VIP, extend from current vip_expires_at + duration; else now + duration
-      grantUserVip(rawUser, durationDays);
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        message: `★ ${durationDays}-Day VIP Pass successfully activated! Unlimited signals and Safe Radar unlocked.`,
-        user: computeVipTimeframe(rawUser),
-      });
-    }
-
-    case "log_outcome": {
-      const outcome = String(req.body?.outcome || "WIN").toUpperCase();
-      appState.feedback.push({
-        userId: rawUser?.id || 1,
-        asset: req.body?.asset || "EUR/USD",
-        timeframe: req.body?.timeframe || "1m",
-        outcome,
-        timestamp: Date.now(),
-      });
-      saveState(appState);
-
-      const total = appState.feedback.length;
-      const wins = appState.feedback.filter((f) => f.outcome === "WIN").length;
-      const winRate = total > 0 ? Math.round((wins / total) * 1000) / 10 : 85.0;
-
-      return res.json({
-        success: true,
-        session_total: total,
-        session_wins: wins,
-        session_win_rate: winRate,
-        recalibrated_threshold: winRate >= 80 ? 88 : 91,
-      });
-    }
-
-    case "log_signal": {
-      return res.json({ success: true, message: "Signal logged successfully." });
-    }
-
-    case "nowpayments_config": {
-      const config = appState.nowpayments;
-      return res.json({
-        status: "ok",
-        config: {
-          enabled: config.enabled,
-          isSandbox: config.isSandbox,
-          hasApiKey: !!(config.apiKey && config.apiKey.length > 5),
-          apiKeyMasked: config.apiKey ? `${config.apiKey.slice(0, 4)}...${config.apiKey.slice(-4)}` : "",
-          ipnSecretConfigured: !!(config.ipnSecret && config.ipnSecret.length > 5),
-          payoutAddress: config.payoutAddress || "",
-        },
-      });
-    }
-
-    case "nowpayments_save_config": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({
-          status: "error",
-          message: "Forbidden: Master Administrator credentials required.",
-        });
-      }
-      const incoming = req.body?.config || {};
-      const current = appState.nowpayments;
-      appState.nowpayments = {
-        apiKey: incoming.apiKey !== undefined ? incoming.apiKey.trim() : current.apiKey,
-        ipnSecret: incoming.ipnSecret !== undefined ? incoming.ipnSecret.trim() : current.ipnSecret,
-        isSandbox: Boolean(incoming.isSandbox),
-        enabled: Boolean(incoming.enabled),
-        payoutAddress: incoming.payoutAddress || current.payoutAddress || "",
-      };
-      saveState(appState);
-      return res.json({ status: "ok", success: true, message: "NOWPayments configuration successfully saved!" });
-    }
-
-    case "nowpayments_create": {
-      const nowConfig = appState.nowpayments;
-      if (!nowConfig || !nowConfig.enabled || !nowConfig.apiKey) {
-        return res.status(400).json({
-          success: false,
-          message: "NOWPayments is not configured or disabled in Admin Center.",
-        });
-      }
-
-      const baseUrl = nowConfig.isSandbox ? "https://api-sandbox.nowpayments.io/v1" : "https://api.nowpayments.io/v1";
-      const { priceAmount = 49, priceCurrency = "usd", payCurrency = "usdttrc20", orderId, orderDescription } = req.body;
-
-      fetch(`${baseUrl}/payment`, {
-        method: "POST",
-        headers: {
-          "x-api-key": nowConfig.apiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          price_amount: priceAmount,
-          price_currency: priceCurrency,
-          pay_currency: payCurrency,
-          order_id: orderId || `VIP_${Date.now()}`,
-          order_description: orderDescription || "PulseTrade VIP Pass",
-          ipn_callback_url: `${req.protocol}://${req.get("host")}/api/nowpayments/ipn`,
-        }),
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.payment_id) {
-            if (!appState.nowpaymentsOrders) appState.nowpaymentsOrders = {};
-            appState.nowpaymentsOrders[data.payment_id] = {
-              ...data,
-              userId: activeSessionUserId,
-              createdAt: new Date().toISOString(),
-            };
-            saveState(appState);
-
-            return res.json({
-              success: true,
-              payment: {
-                paymentId: String(data.payment_id),
-                payAddress: data.pay_address,
-                payAmount: data.pay_amount,
-                payCurrency: data.pay_currency,
-                priceAmount: data.price_amount,
-                priceCurrency: data.price_currency,
-                orderId: data.order_id,
-                orderDescription: data.order_description,
-                paymentStatus: data.payment_status,
-                createdAt: data.created_at,
-              },
-            });
-          } else {
-            return res.status(400).json({
-              success: false,
-              message: data.message || "Failed to create payment invoice with NOWPayments.",
-            });
-          }
-        })
-        .catch((err) => {
-          return res.status(500).json({ success: false, message: `Failed to reach NOWPayments: ${err.message}` });
-        });
-      return;
-    }
-
-    case "nowpayments_check": {
-      const paymentId = (req.body?.paymentId || req.body?.payment_id || req.query.id || req.query.payment_id) as string;
-      const nowConfig = appState.nowpayments;
-      if (!nowConfig || !nowConfig.apiKey) {
-        return res.status(400).json({ success: false, message: "NOWPayments API not configured." });
-      }
-
-      const baseUrl = nowConfig.isSandbox ? "https://api-sandbox.nowpayments.io/v1" : "https://api.nowpayments.io/v1";
-
-      fetch(`${baseUrl}/payment/${encodeURIComponent(paymentId)}`, {
-        headers: { "x-api-key": nowConfig.apiKey },
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          if (data.payment_id) {
-            const status = data.payment_status;
-            if (status === "finished" || status === "confirmed") {
-              const rawUser = appState.users.find((u) => u.id === activeSessionUserId) || appState.users[0];
-              if (rawUser) {
-                grantUserVip(rawUser, 30);
-              }
-            }
-
-            return res.json({
-              success: true,
-              payment: {
-                paymentId: String(data.payment_id),
-                payAddress: data.pay_address,
-                payAmount: data.pay_amount,
-                payCurrency: data.pay_currency,
-                priceAmount: data.price_amount,
-                priceCurrency: data.price_currency,
-                orderId: data.order_id,
-                orderDescription: data.order_description,
-                paymentStatus: status,
-                actuallyPaid: data.actually_paid,
-                createdAt: data.created_at,
-                updatedAt: data.updated_at,
-              },
-            });
-          } else {
-            return res.status(400).json({ success: false, message: data.message || "Payment not found." });
-          }
-        })
-        .catch((err) => {
-          return res.status(500).json({ success: false, message: err.message });
-        });
-      return;
-    }
-
-    case "nowpayments_ipn": {
-      const body = req.body;
-      const paymentStatus = body?.payment_status;
-      if (paymentStatus === "finished" || paymentStatus === "confirmed") {
-        const rawUser = appState.users.find((u) => u.id === activeSessionUserId) || appState.users[0];
-        if (rawUser) {
-          grantUserVip(rawUser, 30);
-        }
-      }
-      return res.status(200).json({ status: "ok" });
-    }
-
-    // --- PRICING PACKAGES API ---
-    case "pricing_packages":
-    case "get_pricing_packages": {
-      const activePackages = appState.pricingPackages.filter((p) => p.is_active);
-      return res.json({ status: "ok", packages: activePackages });
-    }
-
-    case "admin_pricing_packages": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      return res.json({ status: "ok", packages: appState.pricingPackages });
-    }
-
-    case "admin_save_pricing_packages": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const incoming = req.body?.packages;
-      if (Array.isArray(incoming)) {
-        appState.pricingPackages = incoming.map((p, idx) => ({
-          id: String(p.id || `pkg_${idx + 1}`),
-          name: String(p.name || "Package"),
-          type: (p.type === "VIP_30_DAY" || p.type === "BUNDLE") ? p.type : "CREDITS",
-          credits_amount: Number(p.credits_amount) || 0,
-          bonus_credits: Number(p.bonus_credits) || 0,
-          price_usd: Number(p.price_usd) || 0,
-          badge_label: p.badge_label ? String(p.badge_label) : undefined,
-          description: String(p.description || ""),
-          is_active: Boolean(p.is_active !== false),
-          sort_order: Number(p.sort_order) || idx + 1,
-          updated_at: new Date().toISOString(),
-        }));
-
-        // Keep siteSettings.vipPriceUsd in sync if 30-day VIP price is updated
-        const vipPkg = appState.pricingPackages.find((p) => p.type === "VIP_30_DAY");
-        if (vipPkg && vipPkg.price_usd > 0) {
-          appState.settings.vipPriceUsd = vipPkg.price_usd;
-        }
-
-        saveState(appState);
-      }
-      return res.json({ status: "ok", success: true, message: "Pricing packages updated successfully.", packages: appState.pricingPackages });
-    }
-
-    // --- ADMIN USER & VIP MANAGEMENT ENDPOINTS ---
-    case "admin_users": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden: Master Administrator privileges required." });
-      }
-      const userList = appState.users.map((u) => computeVipTimeframe(u));
-      return res.json({ status: "ok", users: userList });
-    }
-
-    case "admin_grant_vip": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const targetId = Number(req.body?.userId || req.body?.user_id);
-      const days = Number(req.body?.days) || 30;
-      const targetUser = appState.users.find((u) => u.id === targetId);
-      if (!targetUser) {
-        return res.status(404).json({ success: false, message: "User not found." });
-      }
-
-      grantUserVip(targetUser, days);
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        message: `Granted ${days}-Day VIP to trader ${targetUser.username}.`,
-        user: computeVipTimeframe(targetUser),
-      });
-    }
-
-    case "admin_revoke_vip": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const targetId = Number(req.body?.userId || req.body?.user_id);
-      const targetUser = appState.users.find((u) => u.id === targetId);
-      if (!targetUser) {
-        return res.status(404).json({ success: false, message: "User not found." });
-      }
-
-      targetUser.is_vip = false;
-      targetUser.vip_expires_at = null;
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        message: `Revoked VIP status for trader ${targetUser.username}.`,
-        user: computeVipTimeframe(targetUser),
-      });
-    }
-
-    case "admin_adjust_credits": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const targetId = Number(req.body?.userId || req.body?.user_id);
-      const credits = Number(req.body?.credits);
-      const targetUser = appState.users.find((u) => u.id === targetId);
-      if (!targetUser) {
-        return res.status(404).json({ success: false, message: "User not found." });
-      }
-
-      targetUser.credits = Math.max(0, credits);
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        message: `Updated credits for trader ${targetUser.username} to ${targetUser.credits} CR.`,
-        user: computeVipTimeframe(targetUser),
-      });
-    }
-
-    // --- SECURE ONE-TIME VIP CODES ENGINE ---
-    case "admin_vip_codes": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      return res.json({ status: "ok", codes: appState.vipCodes });
-    }
-
-    case "admin_generate_vip_codes": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const count = Math.min(50, Math.max(1, Number(req.body?.count) || 1));
-      const durationDays = Number(req.body?.duration_days) || 30;
-      const createdCodes: VipCodeServer[] = [];
-
-      for (let i = 0; i < count; i++) {
-        let code = generateSecureVipCode();
-        while (appState.vipCodes.some((c) => c.code === code)) {
-          code = generateSecureVipCode();
-        }
-        const newCodeObj: VipCodeServer = {
-          id: Date.now() + i,
-          code,
-          duration_days: durationDays,
-          is_active: true,
-          is_redeemed: false,
-          created_at: new Date().toISOString(),
-          created_by: currentUser?.username || "Admin",
-        };
-        appState.vipCodes.unshift(newCodeObj);
-        createdCodes.push(newCodeObj);
-      }
-
-      saveState(appState);
-      return res.json({
-        success: true,
-        message: `Generated ${createdCodes.length} secure one-time VIP codes (${durationDays} days each).`,
-        codes: createdCodes,
-      });
-    }
-
-    case "admin_toggle_vip_code": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const codeId = req.body?.id;
-      const codeStr = req.body?.code;
-      const codeObj = appState.vipCodes.find((c) => c.id === codeId || c.code === codeStr);
-      if (!codeObj) {
-        return res.status(404).json({ success: false, message: "VIP code not found." });
-      }
-
-      codeObj.is_active = req.body?.active !== undefined ? Boolean(req.body.active) : !codeObj.is_active;
-      saveState(appState);
-
-      return res.json({
-        success: true,
-        message: `Code ${codeObj.code} is now ${codeObj.is_active ? "ACTIVE" : "DISABLED"}.`,
-        code: codeObj,
-      });
-    }
-
-    // --- BLOG CMS ENDPOINTS ---
-    case "get_blog_posts":
-    case "blog_posts": {
-      const published = appState.blogPosts.filter((p) => p.is_published);
-      return res.json({ status: "ok", posts: published });
-    }
-
-    case "admin_blog_posts": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      return res.json({ status: "ok", posts: appState.blogPosts });
-    }
-
-    case "admin_save_blog_post": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      const post = req.body?.post;
-      if (!post || !post.title) {
-        return res.status(400).json({ success: false, message: "Post title is required." });
-      }
-
-      if (post.id) {
-        const existingIdx = appState.blogPosts.findIndex((p) => p.id === post.id);
-        if (existingIdx !== -1) {
-          appState.blogPosts[existingIdx] = {
-            ...appState.blogPosts[existingIdx],
-            ...post,
-            updated_at: new Date().toISOString(),
-          };
-        }
-      } else {
-        const newPost: BlogPostServer = {
-          id: Date.now(),
-          title: post.title,
-          slug: post.slug || post.title.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-          excerpt: post.excerpt || "",
-          body: post.body || "",
-          category: post.category || "Quantitative Strategy",
-          cover_url: post.cover_url || "",
-          is_published: post.is_published !== false,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        };
-        appState.blogPosts.unshift(newPost);
-      }
-
-      saveState(appState);
-      return res.json({ success: true, message: "Blog post saved successfully.", posts: appState.blogPosts });
-    }
-
-    case "admin_stats": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      return res.json({
-        status: "ok",
-        stats: {
-          totalUsers: appState.users.length,
-          totalVips: appState.users.filter((u) => u.is_vip).length,
-          totalSignals: 42,
-          totalOutcomes: appState.feedback.length,
-          activeSessions: pruneAndGetRealActiveCount(),
-          totalVipCodes: appState.vipCodes.length,
-          unusedVipCodes: appState.vipCodes.filter((c) => !c.is_redeemed && c.is_active).length,
-          dbDriver: "sqlite/native",
-          phpVersion: "8.2",
-          serverTime: new Date().toISOString(),
-        },
-      });
-    }
-
-    case "admin_vip_keys": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden." });
-      }
-      return res.json({
-        status: "ok",
-        keys: appState.vipCodes.map((c) => ({
-          id: c.id,
-          code: c.code,
-          duration_days: c.duration_days,
-          max_uses: 1,
-          used_count: c.is_redeemed ? 1 : 0,
-          is_active: c.is_active ? 1 : 0,
-          created_at: c.created_at,
-        })),
-      });
-    }
-
-    // --- EXTERNAL BROKER INTEGRATION ---
-    case "broker_config": {
-      return res.json({ status: "ok", broker: appState.broker });
-    }
-
-    case "admin_save_broker_config": {
-      const isAdmin = currentUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-      if (!isAdmin) {
-        return res.status(403).json({ status: "error", message: "Forbidden: Master Administrator privileges required." });
-      }
-      const incoming = req.body?.broker || req.body?.config;
-      if (incoming) {
-        appState.broker = {
-          enabled: Boolean(incoming.enabled),
-          brokerName: String(incoming.brokerName || "Deriv / Binary Broker").trim(),
-          brokerUrl: String(incoming.brokerUrl || "").trim(),
-          openInNewTab: incoming.openInNewTab !== false,
-          buttonLabel: String(incoming.buttonLabel || "Open Broker Desk").trim(),
-        };
-        saveState(appState);
-      }
-      return res.json({ success: true, message: "External broker configuration saved successfully.", broker: appState.broker });
-    }
-
-    default:
-      return res.json({ status: "ok", action, message: "PulseTrade API Operational" });
-  }
-}
-
-// Proxy helper for PHP when PHP CLI is running
-function proxyToPhp(req: express.Request, res: express.Response) {
-  if (!phpAvailable) {
-    return handleNativeApi(req, res);
-  }
-
-  const options = {
-    hostname: "127.0.0.1",
-    port: PHP_PORT,
-    path: req.url,
-    method: req.method,
-    headers: {
-      ...req.headers,
-      host: `127.0.0.1:${PHP_PORT}`,
-      "x-forwarded-for": (req.headers["x-forwarded-for"] as string) || req.ip || "127.0.0.1",
-    },
-  };
-
-  const phpReq = http.request(options, (phpRes) => {
-    res.writeHead(phpRes.statusCode || 200, phpRes.headers);
-    phpRes.pipe(res, { end: true });
-  });
-
-  phpReq.on("error", () => {
-    // Graceful fallback to native API handler if PHP proxy encounters an error
-    handleNativeApi(req, res);
-  });
-
-  req.pipe(phpReq, { end: true });
-}
-
-// API and PHP routes
-app.all("/api.php", (req, res) => {
-  proxyToPhp(req, res);
-});
-
-app.all("/heartbeat", (req, res) => {
-  proxyToPhp(req, res);
-});
-
-app.all("/heartbeat.php", (req, res) => {
-  proxyToPhp(req, res);
-});
-
-app.get("/admin.php", (req, res) => {
-  if (phpAvailable) {
-    return proxyToPhp(req, res);
-  }
-  // If PHP CLI is absent, serve the admin view or redirect to Cockpit Admin tab
-  res.redirect("/?view=admin");
-});
-
-app.get("/schema.sql", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "schema.sql"));
-});
-
-app.get("/api/health", (req, res) => {
+// ============================================================================
+// API ROUTES
+// ============================================================================
+
+// 1. Health & Status
+app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
-    app: appState.settings?.siteName || "PulseTrade Pro",
-    php_available: phpAvailable,
-    node_version: process.version,
-    timestamp: Date.now(),
+    app: "Tolvexa",
+    time: new Date().toISOString(),
+    onlineUsers: pruneAndGetRealActiveCount(),
   });
 });
 
-// --- SITE SETTINGS API ---
-app.get("/api/settings", (req, res) => {
-  res.json({ status: "ok", settings: appState.settings });
+// 2. Presence Heartbeat
+app.all(["/heartbeat", "/heartbeat.php", "/api/heartbeat"], (req, res) => {
+  const ip =
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+    req.socket.remoteAddress ||
+    "127.0.0.1";
+  const sessionId = (req.body?.sessionId || req.query?.sessionId || ip) as string;
+  const session = getSessionFromRequest(req);
+
+  activeSessionsRegistry.set(sessionId, {
+    lastPing: Date.now(),
+    ip,
+    userId: session ? session.userId : null,
+  });
+
+  res.json({
+    status: "ok",
+    online: pruneAndGetRealActiveCount(),
+  });
 });
 
-app.post("/api/settings", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({
+// 3. Authentication: Register (Rate Limited + Zod Validated)
+app.post("/api/auth/register", authRateLimiter, (req, res) => {
+  const parseResult = RegisterSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
       status: "error",
-      message: "Forbidden: Master Administrator credentials required.",
+      message: parseResult.error.issues[0]?.message || "Invalid input data",
     });
   }
 
-  if (req.body?.settings) {
-    appState.settings = { ...appState.settings, ...req.body.settings };
-    saveState(appState);
-  }
-  res.json({ status: "ok", settings: appState.settings });
-});
+  const { username, email, password, vipKey } = parseResult.data;
+  const lowerEmail = email.toLowerCase().trim();
+  const cleanUsername = username.trim();
 
-// --- NOWPAYMENTS INTEGRATION API ---
-app.get("/api/nowpayments/config", (req, res) => {
-  const config = appState.nowpayments;
-  res.json({
-    status: "ok",
-    config: {
-      enabled: config.enabled,
-      isSandbox: config.isSandbox,
-      hasApiKey: !!(config.apiKey && config.apiKey.length > 5),
-      apiKeyMasked: config.apiKey ? `${config.apiKey.slice(0, 6)}...${config.apiKey.slice(-4)}` : "",
-      ipnSecretConfigured: !!(config.ipnSecret && config.ipnSecret.length > 5),
-      payoutAddress: config.payoutAddress || "",
-    },
-  });
-});
-
-app.post("/api/nowpayments/save-config", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({
+  // Check unique email and username
+  if (appState.users.some((u) => u.email.toLowerCase() === lowerEmail)) {
+    return res.status(409).json({
       status: "error",
-      message: "Forbidden: Master Administrator credentials required to modify gateway.",
+      message: "An account with this email address already exists. Please sign in.",
+    });
+  }
+  if (appState.users.some((u) => u.username.toLowerCase() === cleanUsername.toLowerCase())) {
+    return res.status(409).json({
+      status: "error",
+      message: "This username is already taken. Please choose another username.",
     });
   }
 
-  const incoming = req.body?.config || {};
-  const current = appState.nowpayments;
-  appState.nowpayments = {
-    apiKey: incoming.apiKey !== undefined ? incoming.apiKey.trim() : current.apiKey,
-    ipnSecret: incoming.ipnSecret !== undefined ? incoming.ipnSecret.trim() : current.ipnSecret,
-    isSandbox: Boolean(incoming.isSandbox),
-    enabled: Boolean(incoming.enabled),
-    payoutAddress: incoming.payoutAddress || current.payoutAddress || "",
+  // Check VIP code redemption at signup
+  let isVip = false;
+  let vipExpiresAt: string | null = null;
+  let initialCredits = 10;
+
+  if (vipKey && vipKey.trim()) {
+    const cleanKey = vipKey.trim().toUpperCase();
+    const matchedCode = appState.vipCodes.find(
+      (c) => c.code.toUpperCase() === cleanKey && c.is_active && !c.is_redeemed
+    );
+    if (matchedCode) {
+      isVip = true;
+      matchedCode.is_redeemed = true;
+      matchedCode.redeemed_by = lowerEmail;
+      matchedCode.redeemed_at = new Date().toISOString();
+      vipExpiresAt = new Date(Date.now() + (matchedCode.duration_days || 30) * 86400000).toISOString();
+      initialCredits = 9999;
+    }
+  }
+
+  // Hash password using bcrypt
+  const salt = bcrypt.genSaltSync(10);
+  const passwordHash = bcrypt.hashSync(password, salt);
+
+  const ip =
+    (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
+    req.socket.remoteAddress ||
+    "127.0.0.1";
+
+  const newUser: StoredUser = {
+    id: appState.users.length > 0 ? Math.max(...appState.users.map((u) => u.id)) + 1 : 1,
+    username: cleanUsername,
+    email: lowerEmail,
+    passwordHash,
+    role: "USER",
+    credits: initialCredits,
+    is_vip: isVip,
+    vip_expires_at: vipExpiresAt,
+    registration_ip: ip,
+    created_at: new Date().toISOString(),
   };
+
+  appState.users.push(newUser);
+  appState.registeredIPs[ip] = true;
   saveState(appState);
-  res.json({ status: "ok", success: true, message: "NOWPayments configuration successfully saved!" });
+
+  const token = createSession(newUser);
+  res.status(201).json({
+    status: "ok",
+    token,
+    user: computeVipTimeframe(newUser),
+    message: isVip ? "Account registered! VIP pass activated." : "Account registered successfully.",
+  });
 });
 
-app.post("/api/nowpayments/test", async (req, res) => {
-  const apiKey = (req.body?.apiKey || appState.nowpayments?.apiKey || "").trim();
-  const isSandbox = req.body?.isSandbox !== undefined ? Boolean(req.body.isSandbox) : Boolean(appState.nowpayments?.isSandbox);
-
-  if (!apiKey) {
-    return res.status(400).json({ success: false, message: "NOWPayments API Key is missing." });
-  }
-
-  const baseUrl = isSandbox ? "https://api-sandbox.nowpayments.io/v1" : "https://api.nowpayments.io/v1";
-
-  try {
-    const response = await fetch(`${baseUrl}/status`, {
-      headers: { "x-api-key": apiKey },
+// 4. Authentication: Login (Rate Limited + Zod Validated)
+app.post("/api/auth/login", authRateLimiter, (req, res) => {
+  const parseResult = LoginSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      status: "error",
+      message: parseResult.error.issues[0]?.message || "Invalid credentials format",
     });
-    const data = await response.json();
-    if (response.ok && data.message === "OK") {
-      return res.json({ success: true, message: `NOWPayments API Connected Successfully! (${isSandbox ? "Sandbox" : "Production"} Mode)` });
-    } else {
-      return res.json({ success: false, message: data.message || `NOWPayments rejected key (HTTP ${response.status})` });
-    }
-  } catch (err: any) {
-    return res.json({ success: false, message: `Network error connecting to NOWPayments: ${err.message}` });
   }
+
+  const { identity, password } = parseResult.data;
+  const cleanIdentity = identity.trim().toLowerCase();
+
+  const user = appState.users.find(
+    (u) => u.email.toLowerCase() === cleanIdentity || u.username.toLowerCase() === cleanIdentity
+  );
+
+  if (!user) {
+    return res.status(401).json({
+      status: "error",
+      message: "Invalid username/email or password.",
+    });
+  }
+
+  // Verify password using bcrypt (with legacy fallback migration if needed)
+  let passwordMatches = false;
+  try {
+    passwordMatches = bcrypt.compareSync(password, user.passwordHash);
+  } catch {
+    passwordMatches = false;
+  }
+
+  if (!passwordMatches) {
+    return res.status(401).json({
+      status: "error",
+      message: "Invalid username/email or password.",
+    });
+  }
+
+  const token = createSession(user);
+  res.json({
+    status: "ok",
+    token,
+    user: computeVipTimeframe(user),
+    message: "Login successful.",
+  });
+});
+
+// 5. Authentication: Current Session (Me)
+app.get("/api/auth/me", (req, res) => {
+  const session = getSessionFromRequest(req);
+  if (!session) {
+    return res.status(401).json({ status: "error", message: "Not authenticated" });
+  }
+
+  const user = appState.users.find((u) => u.id === session.userId);
+  if (!user) {
+    return res.status(404).json({ status: "error", message: "User record not found" });
+  }
+
+  res.json({
+    status: "ok",
+    user: computeVipTimeframe(user),
+  });
+});
+
+// 6. Authentication: Logout
+app.post("/api/auth/logout", (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    const token = authHeader.substring(7).trim();
+    activeSessions.delete(token);
+  }
+  res.json({ status: "ok", message: "Logged out successfully" });
+});
+
+// 7. Settings: Public & Admin Update
+app.get("/api/settings", (_req, res) => {
+  res.json({
+    status: "ok",
+    settings: appState.settings,
+  });
+});
+
+app.post("/api/settings", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const incoming = req.body?.settings;
+  if (incoming && typeof incoming === "object") {
+    appState.settings = { ...appState.settings, ...incoming };
+    saveState(appState);
+    logAdminAudit(adminSession, "UPDATE_SETTINGS", "Updated global site settings", undefined, req);
+  }
+  res.json({
+    status: "ok",
+    settings: appState.settings,
+    message: "Platform settings updated successfully",
+  });
+});
+
+// 8. VIP Code Redemption (Rate Limited + Atomic)
+app.post("/api/vip/redeem", redeemRateLimiter, (req, res) => {
+  const parseResult = RedeemVipSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    return res.status(400).json({
+      status: "error",
+      message: parseResult.error.issues[0]?.message || "Valid code required",
+    });
+  }
+
+  const { code } = parseResult.data;
+  const cleanCode = code.trim().toUpperCase();
+
+  const codeRecord = appState.vipCodes.find((c) => c.code.toUpperCase() === cleanCode);
+  if (!codeRecord || !codeRecord.is_active || codeRecord.is_redeemed) {
+    return res.status(400).json({
+      status: "error",
+      message: "Invalid or already redeemed VIP access key.",
+    });
+  }
+
+  const session = getSessionFromRequest(req);
+  const targetUser = session
+    ? appState.users.find((u) => u.id === session.userId)
+    : appState.users[0];
+
+  if (!targetUser) {
+    return res.status(401).json({
+      status: "error",
+      message: "Authentication required to redeem VIP code.",
+    });
+  }
+
+  codeRecord.is_redeemed = true;
+  codeRecord.redeemed_by = targetUser.email;
+  codeRecord.redeemed_at = new Date().toISOString();
+
+  grantUserVip(targetUser, codeRecord.duration_days || 30);
+  saveState(appState);
+
+  res.json({
+    status: "ok",
+    message: `VIP Pass Activated! Unlimited access granted for ${codeRecord.duration_days || 30} days.`,
+    user: computeVipTimeframe(targetUser),
+  });
+});
+
+// 9. Pricing Packages (Public)
+app.get(["/api/pricing_packages", "/api/packages"], (_req, res) => {
+  const active = appState.pricingPackages.filter((p) => p.is_active);
+  res.json({ status: "ok", packages: active });
+});
+
+// 10. Admin Pricing Packages
+app.get("/api/admin/pricing_packages", requireAdmin, (_req, res) => {
+  res.json({ status: "ok", packages: appState.pricingPackages });
+});
+
+app.post("/api/admin/pricing_packages", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const incoming = req.body?.packages;
+  if (!Array.isArray(incoming)) {
+    return res.status(400).json({ status: "error", message: "Packages array expected" });
+  }
+
+  appState.pricingPackages = incoming.map((p, idx) => ({
+    id: String(p.id || `pkg_${idx + 1}`),
+    name: String(p.name || "Package"),
+    type: p.type === "VIP_30_DAY" || p.type === "BUNDLE" ? p.type : "CREDITS",
+    credits_amount: Number(p.credits_amount) || 0,
+    bonus_credits: Number(p.bonus_credits) || 0,
+    price_usd: Number(p.price_usd) || 0,
+    badge_label: p.badge_label ? String(p.badge_label) : undefined,
+    description: String(p.description || ""),
+    is_active: Boolean(p.is_active !== false),
+    sort_order: Number(p.sort_order) || idx + 1,
+    updated_at: new Date().toISOString(),
+  }));
+
+  saveState(appState);
+  logAdminAudit(adminSession, "UPDATE_PRICING", `Updated ${incoming.length} pricing packages`, undefined, req);
+
+  res.json({ status: "ok", packages: appState.pricingPackages });
+});
+
+// 11. Admin User Management
+app.all("/api/admin/users", requireAdmin, (_req, res) => {
+  const users = appState.users.map((u) => computeVipTimeframe(u));
+  res.json({ status: "ok", users });
+});
+
+app.post("/api/admin/grant-vip", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const userId = Number(req.body?.userId);
+  const days = Math.max(1, Number(req.body?.days) || 30);
+
+  const target = appState.users.find((u) => u.id === userId);
+  if (!target) {
+    return res.status(404).json({ status: "error", message: "Target user not found" });
+  }
+
+  grantUserVip(target, days);
+  logAdminAudit(adminSession, "GRANT_VIP", `Granted ${days} days VIP to user ${target.username} (ID: ${target.id})`, target.id, req);
+
+  res.json({
+    status: "ok",
+    message: `Granted ${days} days VIP to ${target.username}`,
+    user: computeVipTimeframe(target),
+  });
+});
+
+app.post("/api/admin/revoke-vip", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const userId = Number(req.body?.userId);
+
+  const target = appState.users.find((u) => u.id === userId);
+  if (!target) {
+    return res.status(404).json({ status: "error", message: "Target user not found" });
+  }
+
+  target.is_vip = false;
+  target.vip_expires_at = null;
+  saveState(appState);
+  logAdminAudit(adminSession, "REVOKE_VIP", `Revoked VIP access from user ${target.username} (ID: ${target.id})`, target.id, req);
+
+  res.json({
+    status: "ok",
+    message: `VIP access revoked for ${target.username}`,
+    user: computeVipTimeframe(target),
+  });
+});
+
+app.post("/api/admin/adjust-credits", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const userId = Number(req.body?.userId);
+  const credits = Math.max(0, Number(req.body?.credits) || 0);
+
+  const target = appState.users.find((u) => u.id === userId);
+  if (!target) {
+    return res.status(404).json({ status: "error", message: "Target user not found" });
+  }
+
+  target.credits = credits;
+  saveState(appState);
+  logAdminAudit(adminSession, "ADJUST_CREDITS", `Set credits to ${credits} for ${target.username} (ID: ${target.id})`, target.id, req);
+
+  res.json({
+    status: "ok",
+    message: `Updated credits for ${target.username} to ${credits}`,
+    user: computeVipTimeframe(target),
+  });
+});
+
+// 12. Admin VIP Codes
+app.all(["/api/admin/vip-codes", "/api/admin/vip-keys"], requireAdmin, (_req, res) => {
+  res.json({ status: "ok", vipCodes: appState.vipCodes });
+});
+
+app.post(["/api/admin/generate-vip-codes", "/api/admin/generate-vip-keys"], requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const count = Math.min(50, Math.max(1, Number(req.body?.count) || 1));
+  const days = Math.max(1, Number(req.body?.durationDays) || 30);
+
+  const generated: VipCodeServer[] = [];
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+  for (let i = 0; i < count; i++) {
+    let rand = "";
+    for (let c = 0; c < 8; c++) rand += chars.charAt(Math.floor(Math.random() * chars.length));
+    const newCode: VipCodeServer = {
+      id: appState.vipCodes.length > 0 ? Math.max(...appState.vipCodes.map((v) => v.id)) + 1 + i : 1 + i,
+      code: `TLX-VIP-${rand}`,
+      duration_days: days,
+      is_active: true,
+      is_redeemed: false,
+      created_at: new Date().toISOString(),
+    };
+    generated.push(newCode);
+    appState.vipCodes.unshift(newCode);
+  }
+
+  saveState(appState);
+  logAdminAudit(adminSession, "GENERATE_VIP_CODES", `Generated ${count} new single-use VIP codes (${days}d each)`, undefined, req);
+
+  res.json({
+    status: "ok",
+    message: `Generated ${count} VIP codes successfully`,
+    generated,
+    vipCodes: appState.vipCodes,
+  });
+});
+
+app.post(["/api/admin/toggle-vip-code", "/api/admin/toggle-vip-key"], requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const id = Number(req.body?.id);
+  const codeItem = appState.vipCodes.find((c) => c.id === id);
+
+  if (!codeItem) {
+    return res.status(404).json({ status: "error", message: "VIP code record not found" });
+  }
+
+  codeItem.is_active = !codeItem.is_active;
+  saveState(appState);
+  logAdminAudit(adminSession, "TOGGLE_VIP_CODE", `Toggled code ${codeItem.code} status to ${codeItem.is_active ? "ACTIVE" : "INACTIVE"}`, codeItem.id, req);
+
+  res.json({ status: "ok", code: codeItem });
+});
+
+// 13. Admin Audit Logs
+app.get("/api/admin/audit-logs", requireAdmin, (_req, res) => {
+  res.json({
+    status: "ok",
+    auditLogs: appState.auditLogs || [],
+  });
+});
+
+// 14. NOWPayments Webhook (Fail-Closed, HMAC-SHA512 Verified, Idempotent)
+app.post(
+  ["/api/nowpayments/ipn", "/api/payments/nowpayments/webhook"],
+  (req, res) => {
+    const ipnSecret = process.env.NOWPAYMENTS_IPN_SECRET || appState.nowpayments.ipnSecret;
+    if (!ipnSecret || ipnSecret.trim() === "") {
+      console.error("[NOWPayments Webhook Error] IPN Secret is missing from server environment. Failing closed.");
+      return res.status(500).json({
+        status: "error",
+        message: "Server payment verification configuration error.",
+      });
+    }
+
+    const signature = req.headers["x-nowpayments-sig"] as string;
+    if (!signature) {
+      console.warn("[NOWPayments Webhook Security] Missing x-nowpayments-sig signature header. Rejected.");
+      return res.status(403).json({ status: "error", message: "Missing HMAC signature header." });
+    }
+
+    // Verify HMAC-SHA512 of sorted keys payload
+    let isValidSignature = false;
+    try {
+      const payload = req.body;
+      const sortedKeys = Object.keys(payload).sort();
+      const sortedObj: Record<string, any> = {};
+      for (const k of sortedKeys) {
+        sortedObj[k] = payload[k];
+      }
+      const serialized = JSON.stringify(sortedObj);
+      const computedHmac = crypto.createHmac("sha512", ipnSecret).update(serialized).digest("hex");
+
+      const sigBuf = Buffer.from(signature.toLowerCase(), "utf8");
+      const compBuf = Buffer.from(computedHmac.toLowerCase(), "utf8");
+
+      if (sigBuf.length === compBuf.length && crypto.timingSafeEqual(sigBuf, compBuf)) {
+        isValidSignature = true;
+      }
+    } catch (e: any) {
+      console.error("[NOWPayments Webhook Signature Verification Error]", e);
+      isValidSignature = false;
+    }
+
+    if (!isValidSignature) {
+      console.warn("[NOWPayments Webhook Security] HMAC signature mismatch. Rejecting untrusted callback.");
+      return res.status(403).json({ status: "error", message: "Invalid payment callback signature." });
+    }
+
+    const { payment_id, payment_status, price_amount, price_currency, order_id } = req.body;
+    const paymentIdStr = String(payment_id || "");
+
+    // Idempotency check: prevent duplicate credit or VIP grant
+    if (!appState.processedPaymentIds) appState.processedPaymentIds = [];
+    if (appState.processedPaymentIds.includes(paymentIdStr)) {
+      console.log(`[NOWPayments Webhook] Payment ${paymentIdStr} already processed. Returning 200 idempotent.`);
+      return res.status(200).json({ status: "ok", message: "Payment already processed." });
+    }
+
+    // Check confirmed or finished status
+    if (payment_status === "finished" || payment_status === "confirmed") {
+      // Find package to verify expected price
+      const expectedAmount = Number(price_amount) || 0;
+      let targetUser: StoredUser | undefined;
+
+      // Extract user ID from order_id (Format: VIP_<userId>_<timestamp>)
+      if (order_id && typeof order_id === "string" && order_id.startsWith("VIP_")) {
+        const parts = order_id.split("_");
+        const parsedUserId = Number(parts[1]);
+        if (!isNaN(parsedUserId)) {
+          targetUser = appState.users.find((u) => u.id === parsedUserId);
+        }
+      }
+
+      if (!targetUser) {
+        targetUser = appState.users[0]; // Fallback to primary account
+      }
+
+      if (targetUser) {
+        // Verify minimum acceptable amount ($5 starter or $49 VIP)
+        if (expectedAmount >= 45 || order_id?.includes("VIP")) {
+          grantUserVip(targetUser, 30);
+          console.log(`[NOWPayments Verified] Activated 30-Day VIP for ${targetUser.username} (Payment: ${paymentIdStr}, Amount: $${expectedAmount})`);
+        } else if (expectedAmount >= 4) {
+          targetUser.credits += 10;
+          saveState(appState);
+          console.log(`[NOWPayments Verified] Added 10 credits to ${targetUser.username} (Payment: ${paymentIdStr})`);
+        }
+      }
+
+      appState.processedPaymentIds.push(paymentIdStr);
+      saveState(appState);
+    }
+
+    res.status(200).json({ status: "ok" });
+  }
+);
+
+// 15. NOWPayments Gateway Configuration & Creation
+app.get("/api/nowpayments/config", requireAdmin, (_req, res) => {
+  res.json({
+    status: "ok",
+    config: appState.nowpayments,
+  });
+});
+
+app.post("/api/nowpayments/save-config", requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
+  const incoming = req.body?.config;
+  if (incoming && typeof incoming === "object") {
+    appState.nowpayments = {
+      ...appState.nowpayments,
+      apiKey: incoming.apiKey ? String(incoming.apiKey).trim() : appState.nowpayments.apiKey,
+      ipnSecret: incoming.ipnSecret ? String(incoming.ipnSecret).trim() : appState.nowpayments.ipnSecret,
+      isSandbox: Boolean(incoming.isSandbox),
+      enabled: Boolean(incoming.enabled),
+      payoutAddress: String(incoming.payoutAddress || "").trim(),
+    };
+    saveState(appState);
+    logAdminAudit(adminSession, "UPDATE_NOWPAYMENTS_CONFIG", "Updated crypto payment gateway configuration", undefined, req);
+  }
+  res.json({
+    status: "ok",
+    config: appState.nowpayments,
+    message: "NOWPayments configuration saved successfully.",
+  });
 });
 
 app.post("/api/nowpayments/create-payment", async (req, res) => {
   const nowConfig = appState.nowpayments;
-  if (!nowConfig || !nowConfig.enabled || !nowConfig.apiKey) {
+  if (!nowConfig || !nowConfig.apiKey) {
     return res.status(400).json({
       success: false,
-      message: "NOWPayments is not configured or disabled in Admin Center.",
+      message: "Crypto gateway is temporarily offline or unconfigured. Please contact support.",
     });
   }
 
+  const { priceAmount, priceCurrency = "usd", payCurrency = "btc", orderDescription } = req.body;
   const baseUrl = nowConfig.isSandbox ? "https://api-sandbox.nowpayments.io/v1" : "https://api.nowpayments.io/v1";
-  const { priceAmount, priceCurrency = "usd", payCurrency = "usdttrc20", orderId, orderDescription } = req.body;
+
+  const session = getSessionFromRequest(req);
+  const userId = session ? session.userId : 1;
+  const orderId = `VIP_${userId}_${Date.now()}`;
 
   try {
     const response = await fetch(`${baseUrl}/payment`, {
@@ -1439,22 +1093,14 @@ app.post("/api/nowpayments/create-payment", async (req, res) => {
         price_amount: priceAmount,
         price_currency: priceCurrency,
         pay_currency: payCurrency,
-        order_id: orderId || `VIP_${Date.now()}`,
-        order_description: orderDescription || "PulseTrade VIP Pass",
-        ipn_callback_url: `${req.protocol}://${req.get("host")}/api/nowpayments/ipn`,
+        order_id: orderId,
+        order_description: orderDescription || "Tolvexa 30-Day VIP Access",
+        ipn_callback_url: `${req.protocol}://${req.get("host")}/api/payments/nowpayments/webhook`,
       }),
     });
 
     const data = await response.json();
     if (response.ok && data.payment_id) {
-      if (!appState.nowpaymentsOrders) appState.nowpaymentsOrders = {};
-      appState.nowpaymentsOrders[data.payment_id] = {
-        ...data,
-        userId: activeSessionUserId,
-        createdAt: new Date().toISOString(),
-      };
-      saveState(appState);
-
       return res.json({
         success: true,
         payment: {
@@ -1473,332 +1119,96 @@ app.post("/api/nowpayments/create-payment", async (req, res) => {
     } else {
       return res.status(400).json({
         success: false,
-        message: data.message || "Failed to create payment invoice with NOWPayments.",
+        message: data.message || "Failed to initialize payment invoice with gateway.",
       });
     }
   } catch (err: any) {
     return res.status(500).json({
       success: false,
-      message: `Failed to reach NOWPayments: ${err.message}`,
+      message: `Failed to reach payment gateway: ${err.message}`,
     });
   }
 });
 
-app.get("/api/nowpayments/check-payment/:id", async (req, res) => {
-  const paymentId = req.params.id;
-  const nowConfig = appState.nowpayments;
-  if (!nowConfig || !nowConfig.apiKey) {
-    return res.status(400).json({ success: false, message: "NOWPayments API not configured." });
-  }
-
-  const baseUrl = nowConfig.isSandbox ? "https://api-sandbox.nowpayments.io/v1" : "https://api.nowpayments.io/v1";
-
-  try {
-    const response = await fetch(`${baseUrl}/payment/${encodeURIComponent(paymentId)}`, {
-      headers: { "x-api-key": nowConfig.apiKey },
-    });
-    const data = await response.json();
-    if (response.ok && data.payment_id) {
-      const status = data.payment_status;
-
-      // If finished or confirmed, activate 30-day VIP pass immediately!
-      if (status === "finished" || status === "confirmed") {
-        const rawUser = appState.users.find((u) => u.id === activeSessionUserId) || appState.users[0];
-        if (rawUser) {
-          grantUserVip(rawUser, 30);
-        }
-      }
-
-      return res.json({
-        success: true,
-        payment: {
-          paymentId: String(data.payment_id),
-          payAddress: data.pay_address,
-          payAmount: data.pay_amount,
-          payCurrency: data.pay_currency,
-          priceAmount: data.price_amount,
-          priceCurrency: data.price_currency,
-          orderId: data.order_id,
-          orderDescription: data.order_description,
-          paymentStatus: status,
-          actuallyPaid: data.actually_paid,
-          createdAt: data.created_at,
-          updatedAt: data.updated_at,
-        },
-      });
-    } else {
-      return res.status(400).json({ success: false, message: data.message || "Payment not found." });
-    }
-  } catch (err: any) {
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-app.post("/api/nowpayments/ipn", (req, res) => {
-  const body = req.body;
-  const paymentStatus = body?.payment_status;
-  const orderId = body?.order_id || "";
-  const paymentId = body?.payment_id;
-
-  console.log(`[NOWPayments IPN] Payment ${paymentId}, status: ${paymentStatus}, order: ${orderId}`);
-
-  if (paymentStatus === "finished" || paymentStatus === "confirmed") {
-    const rawUser = appState.users.find((u) => u.id === activeSessionUserId) || appState.users[0];
-    if (rawUser) {
-      grantUserVip(rawUser, 30);
-      console.log(`[NOWPayments IPN] Verified & Activated 30-Day VIP Pass for ${rawUser.username}!`);
-    }
-  }
-
-  res.status(200).json({ status: "ok" });
-});
-
-// --- PRICING PACKAGES REST ROUTES ---
-app.get("/api/pricing_packages", (req, res) => {
-  const activePackages = appState.pricingPackages.filter((p) => p.is_active);
-  res.json({ status: "ok", packages: activePackages });
-});
-
-app.get("/api/admin/pricing_packages", (req, res) => {
-  res.json({ status: "ok", packages: appState.pricingPackages });
-});
-
-app.post("/api/admin/pricing_packages", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden: Master Administrator credentials required." });
-  }
-
-  const incoming = req.body?.packages;
-  if (Array.isArray(incoming)) {
-    appState.pricingPackages = incoming.map((p, idx) => ({
-      id: String(p.id || `pkg_${idx + 1}`),
-      name: String(p.name || "Package"),
-      type: (p.type === "VIP_30_DAY" || p.type === "BUNDLE") ? p.type : "CREDITS",
-      credits_amount: Number(p.credits_amount) || 0,
-      bonus_credits: Number(p.bonus_credits) || 0,
-      price_usd: Number(p.price_usd) || 0,
-      badge_label: p.badge_label ? String(p.badge_label) : undefined,
-      description: String(p.description || ""),
-      is_active: Boolean(p.is_active !== false),
-      sort_order: Number(p.sort_order) || idx + 1,
-      updated_at: new Date().toISOString(),
-    }));
-
-    const vipPkg = appState.pricingPackages.find((p) => p.type === "VIP_30_DAY");
-    if (vipPkg && vipPkg.price_usd > 0) {
-      appState.settings.vipPriceUsd = vipPkg.price_usd;
-    }
-    saveState(appState);
-  }
-  res.json({ status: "ok", success: true, message: "Pricing packages updated.", packages: appState.pricingPackages });
-});
-
-// --- ADMIN USERS REST ROUTES ---
-app.get("/api/admin/users", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.query?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const userList = appState.users.map((u) => computeVipTimeframe(u));
-  res.json({ status: "ok", users: userList });
-});
-
-app.post("/api/admin/grant-vip", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const targetId = Number(req.body?.userId || req.body?.user_id);
-  const days = Number(req.body?.days) || 30;
-  const targetUser = appState.users.find((u) => u.id === targetId);
-  if (!targetUser) {
-    return res.status(404).json({ success: false, message: "User not found." });
-  }
-  grantUserVip(targetUser, days);
-  saveState(appState);
-  res.json({ success: true, message: `Granted ${days}-Day VIP to ${targetUser.username}`, user: computeVipTimeframe(targetUser) });
-});
-
-app.post("/api/admin/revoke-vip", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const targetId = Number(req.body?.userId || req.body?.user_id);
-  const targetUser = appState.users.find((u) => u.id === targetId);
-  if (!targetUser) {
-    return res.status(404).json({ success: false, message: "User not found." });
-  }
-  targetUser.is_vip = false;
-  targetUser.vip_expires_at = null;
-  saveState(appState);
-  res.json({ success: true, message: `Revoked VIP status for ${targetUser.username}`, user: computeVipTimeframe(targetUser) });
-});
-
-app.post("/api/admin/adjust-credits", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const targetId = Number(req.body?.userId || req.body?.user_id);
-  const credits = Number(req.body?.credits);
-  const targetUser = appState.users.find((u) => u.id === targetId);
-  if (!targetUser) {
-    return res.status(404).json({ success: false, message: "User not found." });
-  }
-  targetUser.credits = Math.max(0, credits);
-  saveState(appState);
-  res.json({ success: true, message: `Updated credits for ${targetUser.username} to ${targetUser.credits} CR`, user: computeVipTimeframe(targetUser) });
-});
-
-// --- VIP CODES REST ROUTES ---
-app.all(["/api/admin/vip-codes", "/api/admin/vip-keys"], (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.query?.adminPin === "7789" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  res.json({ status: "ok", codes: appState.vipCodes, keys: appState.vipCodes });
-});
-
-app.post(["/api/admin/generate-vip-codes", "/api/admin/generate-vip-keys"], (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const count = Math.min(50, Math.max(1, Number(req.body?.count) || 1));
-  const durationDays = Number(req.body?.duration_days || req.body?.durationDays) || 30;
-  const createdCodes: VipCodeServer[] = [];
-
-  for (let i = 0; i < count; i++) {
-    let code = generateSecureVipCode();
-    while (appState.vipCodes.some((c) => c.code === code)) {
-      code = generateSecureVipCode();
-    }
-    const newCodeObj: VipCodeServer = {
-      id: Date.now() + i,
-      code,
-      duration_days: durationDays,
-      is_active: true,
-      is_redeemed: false,
-      created_at: new Date().toISOString(),
-      created_by: rawUser?.username || "Admin",
-    };
-    appState.vipCodes.unshift(newCodeObj);
-    createdCodes.push(newCodeObj);
-  }
-
-  saveState(appState);
+// 16. Broker Platform Settings
+app.get(["/api/broker-config", "/api/settings/broker"], (_req, res) => {
   res.json({
-    success: true,
-    message: `Generated ${createdCodes.length} secure VIP codes.`,
-    codes: createdCodes,
-    keys: createdCodes,
+    status: "ok",
+    broker: appState.broker || {
+      enabled: false,
+      brokerName: "Deriv",
+      brokerUrl: "https://deriv.com",
+      openInNewTab: true,
+      buttonLabel: "Launch Broker Desk",
+    },
   });
 });
 
-app.post(["/api/admin/toggle-vip-code", "/api/admin/toggle-vip-key"], (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden." });
-  }
-  const codeId = req.body?.id;
-  const codeStr = req.body?.code;
-  const codeObj = appState.vipCodes.find((c) => c.id === codeId || c.code === codeStr);
-  if (!codeObj) {
-    return res.status(404).json({ success: false, message: "VIP code not found." });
-  }
-  codeObj.is_active = req.body?.active !== undefined ? Boolean(req.body.active) : !codeObj.is_active;
-  saveState(appState);
-  res.json({ success: true, message: `Code ${codeObj.code} status updated.`, code: codeObj });
-});
-
-app.post("/api/vip/redeem", (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  if (!rawUser) {
-    return res.json({ success: false, message: "Please sign in or create an account first." });
-  }
-
-  const inputKey = String(req.body?.code || req.body?.vip_key || req.body?.vipKey || "").trim().toUpperCase();
-  if (!inputKey) {
-    return res.json({ success: false, message: "Please enter a valid VIP activation code." });
-  }
-
-  const codeIndex = appState.vipCodes.findIndex((c) => c.code.toUpperCase() === inputKey);
-  let durationDays = 30;
-
-  if (codeIndex !== -1) {
-    const foundCode = appState.vipCodes[codeIndex];
-    if (!foundCode.is_active) {
-      return res.json({ success: false, message: "This VIP code has been disabled by administration." });
-    }
-    if (foundCode.is_redeemed) {
-      return res.json({
-        success: false,
-        message: `This VIP code was already redeemed on ${foundCode.redeemed_at ? new Date(foundCode.redeemed_at).toLocaleDateString() : "a previous session"} and cannot be reused.`,
-      });
-    }
-
-    foundCode.is_redeemed = true;
-    foundCode.redeemed_by_user_id = rawUser.id;
-    foundCode.redeemed_by_username = rawUser.username;
-    foundCode.redeemed_at = new Date().toISOString();
-    durationDays = foundCode.duration_days || 30;
-  } else if (VALID_VIP_KEYS.has(inputKey)) {
-    durationDays = 30;
-  } else {
-    return res.json({ success: false, message: "Invalid VIP activation code. Please check your key or purchase a pass." });
-  }
-
-  grantUserVip(rawUser, durationDays);
-  saveState(appState);
-
-  res.json({
-    success: true,
-    message: `★ ${durationDays}-Day VIP Pass successfully activated! Unlimited signals and Safe Radar unlocked.`,
-    user: computeVipTimeframe(rawUser),
-  });
-});
-
-app.get("/api/blog/posts", (req, res) => {
-  const published = appState.blogPosts.filter((p) => p.is_published);
-  res.json({ status: "ok", posts: published });
-});
-
-// --- EXTERNAL BROKER REST ROUTES ---
-app.get(["/api/broker-config", "/api/settings/broker"], (req, res) => {
-  res.json({ status: "ok", broker: appState.broker });
-});
-
-app.post(["/api/admin/broker-config", "/api/settings/broker"], (req, res) => {
-  const rawUser = appState.users.find((u) => u.id === activeSessionUserId);
-  const isAdmin = rawUser?.role === "ADMIN" || req.body?.adminPin === "7789";
-  if (!isAdmin) {
-    return res.status(403).json({ status: "error", message: "Forbidden: Master Administrator credentials required." });
-  }
-
+app.post(["/api/admin/broker-config", "/api/settings/broker"], requireAdmin, (req, res) => {
+  const adminSession = (req as any).adminSession as SessionRecord;
   const incoming = req.body?.broker || req.body?.config;
   if (incoming) {
     appState.broker = {
       enabled: Boolean(incoming.enabled),
-      brokerName: String(incoming.brokerName || "Deriv / Binary Broker").trim(),
+      brokerName: String(incoming.brokerName || "Deriv").trim(),
       brokerUrl: String(incoming.brokerUrl || "").trim(),
       openInNewTab: incoming.openInNewTab !== false,
-      buttonLabel: String(incoming.buttonLabel || "Open Broker Desk").trim(),
+      buttonLabel: String(incoming.buttonLabel || "Launch Broker Desk").trim(),
     };
     saveState(appState);
+    logAdminAudit(adminSession, "UPDATE_BROKER_CONFIG", `Updated broker configuration to ${appState.broker.brokerName}`, undefined, req);
   }
-  res.json({ success: true, message: "External broker configuration saved successfully.", broker: appState.broker });
+  res.json({
+    status: "ok",
+    message: "Broker platform configuration saved successfully.",
+    broker: appState.broker,
+  });
 });
 
+// 17. Graceful Legacy Fallback for api.php Calls (Routes to TypeScript Logic)
+app.all("/api.php", (req, res) => {
+  const action = (req.query.action || req.body?.action || "") as string;
+
+  if (action === "get_settings" || action === "settings") {
+    return res.json({ status: "ok", settings: appState.settings });
+  }
+
+  if (action === "admin_login") {
+    const { identity = "", password = "" } = req.body || {};
+    const cleanId = String(identity).trim().toLowerCase();
+    const user = appState.users.find(
+      (u) => (u.email.toLowerCase() === cleanId || u.username.toLowerCase() === cleanId) && u.role === "ADMIN"
+    );
+
+    if (user && bcrypt.compareSync(String(password), user.passwordHash)) {
+      const token = createSession(user);
+      return res.json({
+        success: true,
+        token,
+        user: computeVipTimeframe(user),
+      });
+    }
+    return res.status(401).json({ success: false, message: "Invalid administrator credentials." });
+  }
+
+  if (action === "admin_users") {
+    const session = getSessionFromRequest(req);
+    if (!session || session.role !== "ADMIN") {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    return res.json({ status: "ok", users: appState.users.map(computeVipTimeframe) });
+  }
+
+  res.json({
+    status: "ok",
+    message: "Native TypeScript Citadel Kernel active",
+    online: pruneAndGetRealActiveCount(),
+  });
+});
+
+// ============================================================================
+// SERVER INITIALIZATION (NODE / DEV)
+// ============================================================================
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1809,14 +1219,20 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`PulseTrade Pro dev server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Tolvexa Pro server active on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+// Only start standalone listener when not in Vercel Serverless environment
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
+export { app };

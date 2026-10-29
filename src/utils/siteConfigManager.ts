@@ -14,6 +14,17 @@ import type {
 } from '../types.ts';
 import { getSupabaseClient } from './supabaseClient.ts';
 
+export function getAuthHeaders(): Record<string, string> {
+  let token = '';
+  if (typeof window !== 'undefined') {
+    token = localStorage.getItem('pulsetrade_session_token') || sessionStorage.getItem('pulsetrade_session_token') || '';
+  }
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
 export const DEFAULT_PRICING_PACKAGES: PricingPackage[] = [
   {
     id: 1,
@@ -80,17 +91,17 @@ export const DEFAULT_PRICING_PACKAGES: PricingPackage[] = [
 const STORAGE_KEY_PACKAGES = 'pulsetrade_pricing_packages';
 
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
-  siteName: 'PulseTrade Pro',
-  siteTagline: 'Institutional-Grade Quantitative Micro-Volatility Terminal',
+  siteName: 'Tolvexa',
+  siteTagline: 'Quantitative Micro-Volatility Trading Signal Companion',
   logoUrl: '',
   faviconUrl: '',
   logoIcon: 'zap',
   badgeText: 'v8.2 QUANT',
-  bannerText: '⚡ 30-Day VIP Pass: Institutional-grade 89.4% confluence signals with instant automated verification',
+  bannerText: '⚡ 30-Day VIP Pass: Multi-window live confirmation with 24/7 verified Deriv feeds',
   bannerEnabled: true,
   supportTelegram: 'https://t.me/pulsetrade_quant',
   supportWhatsapp: '',
-  supportEmail: 'support@pulsetrade.pro',
+  supportEmail: 'support@tolvexa.com',
   vipPriceUsd: 49,
   starterPriceUsd: 5,
   themeAccent: 'emerald',
@@ -542,7 +553,7 @@ export async function fetchPricingPackages(): Promise<PricingPackage[]> {
  */
 export async function savePricingPackages(
   packages: PricingPackage[],
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   localStorage.setItem(STORAGE_KEY_PACKAGES, JSON.stringify(packages));
   window.dispatchEvent(new CustomEvent('pulsetrade_packages_changed', { detail: packages }));
@@ -596,8 +607,8 @@ export async function savePricingPackages(
   try {
     await fetch('/api/admin/pricing_packages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ packages, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ packages }),
     });
   } catch {}
 
@@ -617,7 +628,7 @@ export async function savePricingPackages(
 /**
  * Fetch all registered users for Admin Dashboard from live online Supabase DB
  */
-export async function fetchAdminUsers(adminPin: string = '7789'): Promise<AdminUserItem[]> {
+export async function fetchAdminUsers(_adminPin?: string): Promise<AdminUserItem[]> {
   const supabase = getSupabaseClient();
 
   if (supabase) {
@@ -672,8 +683,8 @@ export async function fetchAdminUsers(adminPin: string = '7789'): Promise<AdminU
   try {
     const res = await fetch('/api/admin/users', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({}),
     });
     if (res.ok) {
       const data = await res.json();
@@ -695,7 +706,7 @@ export async function fetchAdminUsers(adminPin: string = '7789'): Promise<AdminU
 export async function grantUserVip(
   userId: string | number,
   days: number = 30,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
   const supabase = getSupabaseClient();
   let updatedRecord: any = null;
@@ -742,8 +753,8 @@ export async function grantUserVip(
   try {
     await fetch('/api/admin/grant-vip', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, days, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ userId, days }),
     });
   } catch {}
 
@@ -759,8 +770,8 @@ export async function grantUserVip(
   try {
     const res = await fetch('/api/admin/grant-vip', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, days, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ userId, days }),
     });
     const data = await res.json();
     return {
@@ -778,7 +789,7 @@ export async function grantUserVip(
  */
 export async function revokeUserVip(
   userId: string | number,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
   const supabase = getSupabaseClient();
   let updatedRecord: any = null;
@@ -809,8 +820,8 @@ export async function revokeUserVip(
   try {
     await fetch('/api/admin/revoke-vip', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ userId }),
     });
   } catch {}
 
@@ -827,7 +838,7 @@ export async function revokeUserVip(
 export async function adjustUserCredits(
   userId: string | number,
   credits: number,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
   const supabase = getSupabaseClient();
   let updatedRecord: any = null;
@@ -856,8 +867,8 @@ export async function adjustUserCredits(
   try {
     await fetch('/api/admin/adjust-credits', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId, credits, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ userId, credits }),
     });
   } catch {}
 
@@ -898,7 +909,7 @@ function saveLocalVipCodes(codes: VipCodeItem[]) {
 /**
  * Fetch all VIP codes for Admin from Supabase DB, Server API, and Local Cache
  */
-export async function fetchAdminVipKeys(adminPin: string = '7789'): Promise<VipCodeItem[]> {
+export async function fetchAdminVipKeys(_adminPin?: string): Promise<VipCodeItem[]> {
   const codeMap = new Map<string, VipCodeItem>();
 
   // 1. Load from local cache first (instant availability)
@@ -965,28 +976,23 @@ export async function fetchAdminVipKeys(adminPin: string = '7789'): Promise<VipC
     }
   }
 
-  // 3. Query Node / Express Backend API
+  // 3. Query Node / Express Backend API with session authorization
   try {
-    let res = await fetch(`/api/admin/vip-codes?adminPin=${encodeURIComponent(adminPin)}`);
+    let res = await fetch('/api/admin/vip-codes', {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) {
       res = await fetch('/api/admin/vip-codes', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminPin }),
+        headers: getAuthHeaders(),
+        body: JSON.stringify({}),
       });
     }
     if (!res.ok) {
       res = await fetch('/api/admin/vip-keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminPin }),
-      });
-    }
-    if (!res.ok) {
-      res = await fetch('/api.php?action=admin_vip_codes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ adminPin }),
+        headers: getAuthHeaders(),
+        body: JSON.stringify({}),
       });
     }
 
@@ -1035,7 +1041,7 @@ export async function fetchAdminVipKeys(adminPin: string = '7789'): Promise<VipC
 export async function generateVipKeys(
   count: number = 1,
   durationDays: number = 30,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; keys?: VipCodeItem[]; message: string }> {
   const newCodes: VipCodeItem[] = [];
   const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -1114,21 +1120,14 @@ export async function generateVipKeys(
   try {
     let res = await fetch('/api/admin/generate-vip-codes', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ count, duration_days: durationDays, adminPin, codes: newCodes }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ count, duration_days: durationDays, codes: newCodes }),
     });
     if (!res.ok) {
       res = await fetch('/api/admin/generate-vip-keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count, durationDays, adminPin, codes: newCodes }),
-      });
-    }
-    if (!res.ok) {
-      res = await fetch('/api.php?action=admin_generate_vip_codes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count, duration_days: durationDays, adminPin, codes: newCodes }),
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ count, durationDays, codes: newCodes }),
       });
     }
 
@@ -1177,7 +1176,7 @@ export async function generateVipKeys(
  */
 export async function toggleVipKey(
   id: string | number,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   // Update local storage first
   const current = getLocalVipCodes();
@@ -1215,14 +1214,14 @@ export async function toggleVipKey(
   try {
     let res = await fetch('/api/admin/toggle-vip-code', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ id }),
     });
     if (!res.ok) {
-      res = await fetch('/api/admin/toggle-vip-key', {
+      await fetch('/api/admin/toggle-vip-key', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, adminPin }),
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ id }),
       });
     }
   } catch {}
@@ -1379,7 +1378,7 @@ export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]
 
 export async function saveBrokerPlatforms(
   platforms: BrokerPlatformItem[],
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   if (typeof window !== 'undefined') {
     localStorage.setItem(STORAGE_KEY_PLATFORMS, JSON.stringify(platforms));
@@ -1398,6 +1397,14 @@ export async function saveBrokerPlatforms(
       console.warn('[Supabase Platforms Save Error]', err);
     }
   }
+
+  try {
+    await fetch('/api/admin/broker-platforms', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ platforms }),
+    });
+  } catch {}
 
   return { success: true, message: 'Broker platforms saved to database successfully!' };
 }
@@ -1526,7 +1533,7 @@ export async function fetchDirectWalletOrders(): Promise<DirectWalletOrder[]> {
 
 export async function approveDirectWalletOrder(
   orderId: string,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   const orders = await fetchDirectWalletOrders();
   const order = orders.find((o) => o.id === orderId);
@@ -1537,7 +1544,7 @@ export async function approveDirectWalletOrder(
 
   // Grant VIP or Credits based on package_type
   if (order.package_type === 'VIP_30_DAY') {
-    await grantUserVip(order.user_id, 30, adminPin);
+    await grantUserVip(order.user_id, 30);
   } else {
     const supabase = getSupabaseClient();
     let currentCredits = 10;
@@ -1548,7 +1555,7 @@ export async function approveDirectWalletOrder(
       } catch {}
     }
     const newCredits = currentCredits + (order.credits_amount || 25);
-    await adjustUserCredits(order.user_id, newCredits, adminPin);
+    await adjustUserCredits(order.user_id, newCredits);
   }
 
   order.status = 'approved';
@@ -1577,6 +1584,14 @@ export async function approveDirectWalletOrder(
     } catch {}
   }
 
+  try {
+    await fetch('/api/admin/approve-wallet-order', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ orderId }),
+    });
+  } catch {}
+
   return {
     success: true,
     message: `Order #${orderId} approved! ${order.package_name} granted to ${order.username || order.email}.`,
@@ -1585,7 +1600,7 @@ export async function approveDirectWalletOrder(
 
 export async function rejectDirectWalletOrder(
   orderId: string,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   const orders = await fetchDirectWalletOrders();
   const order = orders.find((o) => o.id === orderId);
@@ -1617,6 +1632,14 @@ export async function rejectDirectWalletOrder(
     } catch {}
   }
 
+  try {
+    await fetch('/api/admin/reject-wallet-order', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ orderId }),
+    });
+  } catch {}
+
   return {
     success: true,
     message: `Order #${orderId} marked as rejected. No credits or VIP granted.`,
@@ -1628,7 +1651,7 @@ export async function rejectDirectWalletOrder(
  */
 export async function deleteVipKey(
   id: string | number,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   const supabase = getSupabaseClient();
   if (supabase) {
@@ -1645,8 +1668,8 @@ export async function deleteVipKey(
   try {
     const res = await fetch('/api/admin/delete-vip-key', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ id }),
     });
     const data = await res.json();
     return { success: Boolean(data.success), message: data.message || 'VIP key deleted.' };
@@ -1790,7 +1813,7 @@ export async function fetchRemoteBrokerConfig(): Promise<ExternalBrokerConfig> {
 
 export async function saveBrokersSettings(
   newSettings: BrokersSettings,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   // Validate Deriv URL if enabled
   if (newSettings.brokers.deriv.enabled && newSettings.brokers.deriv.referralUrl) {
@@ -1832,8 +1855,8 @@ export async function saveBrokersSettings(
   try {
     await fetch('/api/settings/brokers', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ brokersSettings: newSettings, adminPin }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ brokersSettings: newSettings }),
     });
   } catch {}
 
@@ -1845,7 +1868,7 @@ export async function saveBrokersSettings(
 
 export async function saveBrokerConfig(
   newConfig: ExternalBrokerConfig,
-  adminPin: string = '7789'
+  _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
   const current = getBrokersSettings();
   current.brokers.deriv = {
@@ -1854,6 +1877,6 @@ export async function saveBrokerConfig(
     referralUrl: newConfig.brokerUrl,
     openInNewTab: newConfig.openInNewTab,
   };
-  return saveBrokersSettings(current, adminPin);
+  return saveBrokersSettings(current);
 }
 

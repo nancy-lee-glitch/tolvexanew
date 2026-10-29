@@ -24,7 +24,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     icon: '⚡',
     accent: 'emerald',
     description:
-      'Welcome to the Tolvexa Citadel Cockpit. Our algorithmic terminal interfaces directly with live market feeds to compute micro-volatility opportunities with sub-25ms execution latency.',
+      'Welcome to the Tolvexa Citadel Cockpit. Our algorithmic terminal interfaces directly with live market feeds to compute micro-volatility opportunities in real time.',
     bulletPoints: [
       {
         title: '6-Second Execution Window',

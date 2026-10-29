@@ -615,7 +615,7 @@ export function SignalEngine({
           </div>
 
           <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between">
-            <span className="text-slate-400">Order Flow:</span>
+            <span className="text-slate-400" title="Tick-direction imbalance proxy calculated from tick delta across window (no true volume in broker feed)">Tick Imbalance (Proxy):</span>
             <span className="font-bold text-teal-400">
               {liveAudit.orderFlowBuyPct}% Buy / {liveAudit.orderFlowSellPct}% Sell
             </span>

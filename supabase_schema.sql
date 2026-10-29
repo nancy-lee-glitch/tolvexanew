@@ -123,7 +123,6 @@ CREATE INDEX IF NOT EXISTS idx_vip_codes_redeemed ON public.vip_codes(is_redeeme
 -- Seed initial high-security single-use VIP codes
 INSERT INTO public.vip_codes (code, duration_days, is_active, is_redeemed)
 VALUES 
-    ('PT-VIP-ALPH7789', 30, TRUE, FALSE),
     ('PT-VIP-QUANT2026', 30, TRUE, FALSE),
     ('PT-VIP-DERIV30D', 30, TRUE, FALSE),
     ('PT-VIP-INST9942', 30, TRUE, FALSE),
@@ -326,6 +325,11 @@ ALTER TABLE public.blog_posts ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "Public Read Users" ON public.users;
 DROP POLICY IF EXISTS "Public Upsert Users" ON public.users;
 DROP POLICY IF EXISTS "Public Update Users" ON public.users;
+DROP POLICY IF EXISTS "Users Read Own Row" ON public.users;
+DROP POLICY IF EXISTS "Users Insert Self" ON public.users;
+DROP POLICY IF EXISTS "Users Update Self" ON public.users;
+DROP POLICY IF EXISTS "Service Role Users Manage" ON public.users;
+
 DROP POLICY IF EXISTS "Public Read Active Sessions" ON public.active_sessions;
 DROP POLICY IF EXISTS "Public Upsert Active Sessions" ON public.active_sessions;
 DROP POLICY IF EXISTS "Public Read VIP Codes" ON public.vip_codes;
@@ -346,47 +350,123 @@ DROP POLICY IF EXISTS "Public Upsert Orders" ON public.payment_orders;
 DROP POLICY IF EXISTS "Public Read Blog" ON public.blog_posts;
 DROP POLICY IF EXISTS "Public Upsert Blog" ON public.blog_posts;
 
--- Users policies: allow read, insert, update
-CREATE POLICY "Public Read Users" ON public.users FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Users" ON public.users FOR INSERT WITH CHECK (true);
-CREATE POLICY "Public Update Users" ON public.users FOR UPDATE USING (true) WITH CHECK (true);
+-- 1. USERS TABLE RLS
+-- Users can only read their own profile row, or service_role / master admin can read all
+CREATE POLICY "Users Read Own Profile" ON public.users
+    FOR SELECT USING (
+        auth.uid() = auth_user_id
+        OR auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- Active sessions: public select & upsert for presence counter
+-- Users can insert their own initial profile during registration
+CREATE POLICY "Users Register Self" ON public.users
+    FOR INSERT WITH CHECK (
+        auth.uid() = auth_user_id
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+-- Sensitive fields (role, credits, is_vip, vip_expires_at) can ONLY be altered by service_role / backend API
+CREATE POLICY "Service Role Modify Sensitive User Fields" ON public.users
+    FOR UPDATE USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    ) WITH CHECK (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
+
+-- 2. ACTIVE SESSIONS TABLE
 CREATE POLICY "Public Read Active Sessions" ON public.active_sessions FOR SELECT USING (true);
 CREATE POLICY "Public Upsert Active Sessions" ON public.active_sessions FOR ALL USING (true) WITH CHECK (true);
 
--- VIP Codes: public read, update (for atomic redemption) and insert (for admin generation)
-CREATE POLICY "Public Read VIP Codes" ON public.vip_codes FOR SELECT USING (true);
-CREATE POLICY "Public Update VIP Codes" ON public.vip_codes FOR UPDATE USING (true) WITH CHECK (true);
-CREATE POLICY "Public Insert VIP Codes" ON public.vip_codes FOR INSERT WITH CHECK (true);
+-- 3. VIP CODES TABLE (Only readable/writable via service role or admin, not public anon)
+CREATE POLICY "Admin or Service Read VIP Codes" ON public.vip_codes
+    FOR SELECT USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- VIP Keys (legacy)
-CREATE POLICY "Public Read VIP Keys" ON public.vip_keys FOR SELECT USING (is_active = TRUE);
-CREATE POLICY "Public Update VIP Keys" ON public.vip_keys FOR UPDATE USING (true) WITH CHECK (true);
+CREATE POLICY "Admin or Service Manage VIP Codes" ON public.vip_codes
+    FOR ALL USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- Pricing packages: public read and admin upsert
+-- 4. PRICING PACKAGES TABLE (Public read-only, admin/service write)
 CREATE POLICY "Public Read Pricing Packages" ON public.pricing_packages FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Pricing Packages" ON public.pricing_packages FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Admin Manage Pricing Packages" ON public.pricing_packages
+    FOR ALL USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- Signals: public read & insert
+-- 5. SIGNALS & OUTCOMES
 CREATE POLICY "Public Read Signals" ON public.signals FOR SELECT USING (true);
-CREATE POLICY "Public Insert Signals" ON public.signals FOR INSERT WITH CHECK (true);
+CREATE POLICY "Users or Server Insert Signals" ON public.signals FOR INSERT WITH CHECK (true);
 
--- Trade outcomes: public read & insert
 CREATE POLICY "Public Read Outcomes" ON public.trade_outcomes FOR SELECT USING (true);
-CREATE POLICY "Public Insert Outcomes" ON public.trade_outcomes FOR INSERT WITH CHECK (true);
+CREATE POLICY "Users or Server Insert Outcomes" ON public.trade_outcomes FOR INSERT WITH CHECK (true);
 
--- App Settings: public read and admin upsert
+-- 6. APP SETTINGS (Public read, admin/service write only)
 CREATE POLICY "Public Read Settings" ON public.app_settings FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Settings" ON public.app_settings FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Admin Manage Settings" ON public.app_settings
+    FOR ALL USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- Payment orders: public read and upsert
-CREATE POLICY "Public Read Orders" ON public.payment_orders FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Orders" ON public.payment_orders FOR ALL USING (true) WITH CHECK (true);
+-- 7. PAYMENT ORDERS (Users read own orders, service_role manages settlements)
+CREATE POLICY "Users Read Own Orders" ON public.payment_orders
+    FOR SELECT USING (
+        auth.uid() IS NOT NULL
+        OR auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
--- Blog posts: public read published, admin manage
-CREATE POLICY "Public Read Blog" ON public.blog_posts FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Blog" ON public.blog_posts FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY "Service Role Manage Payment Orders" ON public.payment_orders
+    FOR ALL USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
+
+-- 8. BLOG POSTS (Public read published, admin/service manage)
+CREATE POLICY "Public Read Blog" ON public.blog_posts FOR SELECT USING (is_published = true OR auth.jwt()->>'role' = 'service_role');
+CREATE POLICY "Admin Manage Blog" ON public.blog_posts
+    FOR ALL USING (
+        auth.jwt()->>'role' = 'service_role'
+        OR EXISTS (
+            SELECT 1 FROM public.users admin_u
+            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
+        )
+    );
 
 -- 13. ENABLE REALTIME BROADCASTING
 DO $$

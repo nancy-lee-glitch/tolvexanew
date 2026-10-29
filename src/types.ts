@@ -453,6 +453,19 @@ export interface NowPaymentsPayment {
   actuallyPaid?: number;
 }
 
-export type PageView = 'landing' | 'cockpit' | 'blog' | 'about' | 'pricing' | 'admin' | 'files' | 'supabase';
+export type PageView =
+  | 'landing'
+  | 'cockpit'
+  | 'blog'
+  | 'about'
+  | 'pricing'
+  | 'admin'
+  | 'performance'
+  | 'terms'
+  | 'privacy'
+  | 'risk'
+  | 'cookies'
+  | 'files'
+  | 'supabase';
 
 export type AuthModalMode = 'login' | 'register' | 'profile' | 'redeem-vip' | null;

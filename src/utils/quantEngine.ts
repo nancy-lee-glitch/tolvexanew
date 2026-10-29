@@ -885,7 +885,7 @@ export function evaluateQuickConfluence(params: {
 
   factors.push({
     id: 'volume',
-    name: 'Order Flow Delta (OFI Context)',
+    name: 'Tick-Direction Imbalance (OFI Proxy)',
     status: ofiStatus,
     detail: ofiDetail,
     severity: 'CONTEXT',
@@ -1224,7 +1224,7 @@ export function evaluateMT5Confluence(params: {
     severity: 'CORE',
     isAdvanced: true,
   });
-  if (volStatus === 'FAIL') failReasons.push(`Volume Profile: ${volDetail}`);
+  if (volStatus === 'FAIL') failReasons.push(`Price-Distribution Proxy: ${volDetail}`);
 
   // Factor 4: Institutional Liquidity Sweep (CORE / Strict Gate)
   let sweepStatus: 'PASS' | 'FAIL' | 'UNSURE' = 'UNSURE';

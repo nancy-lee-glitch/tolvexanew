@@ -16,7 +16,9 @@ import { LiveTicker, ASSETS } from './components/LiveTicker.tsx';
 import { SignalEngine } from './components/SignalEngine.tsx';
 import { RiskAdvisor } from './components/RiskAdvisor.tsx';
 import { CryptoCheckout } from './components/CryptoCheckout.tsx';
-import { AdminCenter } from './components/AdminCenter.tsx';
+const AdminCenter = React.lazy(() =>
+  import('./components/AdminCenter.tsx').then((m) => ({ default: m.AdminCenter }))
+);
 import { LandingPage } from './components/LandingPage.tsx';
 import { BlogSection } from './components/BlogSection.tsx';
 import { AboutPage } from './components/AboutPage.tsx';
@@ -633,26 +635,25 @@ export default function App() {
         )}
 
         {/* VIEW 6: MASTER ADMIN COMMAND CENTER (RESTRICTED GATEWAY) */}
-        {currentPage === 'admin' && (
+        {(currentPage === 'admin' || currentPage === 'files' || currentPage === 'supabase') && (
           <div className="max-w-5xl mx-auto animate-in fade-in duration-200">
-            <AdminCenter
-              user={user}
-              onUserUpdated={handleUserUpdated}
-              onExitAdmin={() => setCurrentPage('cockpit')}
-              onlineUsers={onlineUsers}
-            />
-          </div>
-        )}
-
-        {/* Redirect for deprecated legacy views */}
-        {(currentPage === 'files' || currentPage === 'supabase') && (
-          <div className="max-w-5xl mx-auto animate-in fade-in duration-200">
-            <AdminCenter
-              user={user}
-              onUserUpdated={handleUserUpdated}
-              onExitAdmin={() => setCurrentPage('cockpit')}
-              onlineUsers={onlineUsers}
-            />
+            <React.Suspense
+              fallback={
+                <div className="flex items-center justify-center min-h-[360px] text-slate-400 font-mono text-xs">
+                  <div className="flex items-center gap-2.5 p-4 rounded-2xl bg-slate-900 border border-slate-800">
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+                    <span>Loading Admin Controls...</span>
+                  </div>
+                </div>
+              }
+            >
+              <AdminCenter
+                user={user}
+                onUserUpdated={handleUserUpdated}
+                onExitAdmin={() => setCurrentPage('cockpit')}
+                onlineUsers={onlineUsers}
+              />
+            </React.Suspense>
           </div>
         )}
       </main>

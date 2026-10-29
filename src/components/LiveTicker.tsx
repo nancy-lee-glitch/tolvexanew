@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { AssetConfig } from '../types.ts';
 import { pushAssetTick, getAssetTicks, getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
 import { LiveChart } from './LiveChart.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
+
+export type FeedHealthStatus = 'LIVE' | 'RECONNECTING' | 'OFFLINE' | 'STALE' | 'NO_DATA';
 
 interface LiveTickerProps {
   activeAsset: AssetConfig;
@@ -11,10 +13,13 @@ interface LiveTickerProps {
   onTicksUpdate?: (ticks: number[]) => void;
   onOpenVipRadar?: () => void;
   isVIP?: boolean;
+  isDemoMode?: boolean;
+  onToggleDemoMode?: (isDemo: boolean) => void;
+  onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus) => void;
 }
 
 export const ASSETS: AssetConfig[] = [
-  // Forex Majors
+  // Forex Majors (Native Deriv WebSocket Feed)
   { symbol: 'frxEURUSD', name: 'EUR/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 1.08542 },
   { symbol: 'frxGBPUSD', name: 'GBP/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 1.29420 },
   { symbol: 'frxUSDJPY', name: 'USD/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 154.250 },
@@ -23,33 +28,19 @@ export const ASSETS: AssetConfig[] = [
   { symbol: 'frxGBPJPY', name: 'GBP/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 198.650 },
   { symbol: 'frxEURJPY', name: 'EUR/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 167.420 },
 
-  // Crypto Coins
+  // Crypto Coins (Native Deriv WebSocket Feed)
   { symbol: 'cryBTCUSD', name: 'BTC/USD', type: 'CRYPTO', decimals: 2, pipSize: 1.0, basePrice: 88450.00 },
   { symbol: 'cryETHUSD', name: 'ETH/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.1, basePrice: 3240.50 },
-  { symbol: 'crySOLUSD', name: 'SOL/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.01, basePrice: 184.75 },
-  { symbol: 'cryXRPUSD', name: 'XRP/USD', type: 'CRYPTO', decimals: 4, pipSize: 0.0001, basePrice: 2.1450 },
-  { symbol: 'cryDOGEUSD', name: 'DOGE/USD', type: 'CRYPTO', decimals: 4, pipSize: 0.0001, basePrice: 0.2450 },
-  { symbol: 'cryBNBUSD', name: 'BNB/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.1, basePrice: 620.40 },
-  { symbol: 'cryADAUSD', name: 'ADA/USD', type: 'CRYPTO', decimals: 4, pipSize: 0.0001, basePrice: 0.7850 },
-  { symbol: 'cryAVAXUSD', name: 'AVAX/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.01, basePrice: 34.20 },
-  { symbol: 'cryLINKUSD', name: 'LINK/USD', type: 'CRYPTO', decimals: 3, pipSize: 0.01, basePrice: 17.850 },
 
-  // US Stocks
-  { symbol: 'stkAAPL', name: 'Apple (AAPL)', type: 'STOCK', decimals: 2, pipSize: 0.01, basePrice: 232.50 },
-  { symbol: 'stkTSLA', name: 'Tesla (TSLA)', type: 'STOCK', decimals: 2, pipSize: 0.01, basePrice: 248.80 },
-  { symbol: 'stkNVDA', name: 'Nvidia (NVDA)', type: 'STOCK', decimals: 2, pipSize: 0.01, basePrice: 128.40 },
-  { symbol: 'stkMSFT', name: 'Microsoft (MSFT)', type: 'STOCK', decimals: 2, pipSize: 0.01, basePrice: 428.15 },
-  { symbol: 'stkAMZN', name: 'Amazon (AMZN)', type: 'STOCK', decimals: 2, pipSize: 0.01, basePrice: 186.20 },
-
-  // Commodities & Indices
+  // Commodities & Indices (Native Deriv WebSocket Feed)
   { symbol: 'frxXAUUSD', name: 'GOLD (XAU)', type: 'COMMODITY', decimals: 2, pipSize: 0.01, basePrice: 2684.50 },
-  { symbol: 'oilUSOIL', name: 'US OIL', type: 'COMMODITY', decimals: 2, pipSize: 0.01, basePrice: 71.40 },
-  { symbol: 'idxSPX500', name: 'S&P 500', type: 'INDEX', decimals: 2, pipSize: 0.1, basePrice: 5860.20 },
-  { symbol: 'idxNAS100', name: 'NASDAQ 100', type: 'INDEX', decimals: 2, pipSize: 0.1, basePrice: 20450.80 },
 
-  // Deriv Volatility Synthetics
+  // Deriv Volatility Synthetics (24/7 Guaranteed Live Ticks)
   { symbol: 'R_100', name: 'VOL 100', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 2415.80 },
   { symbol: 'R_75', name: 'VOL 75', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 48920.40 },
+  { symbol: 'R_50', name: 'VOL 50', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 341.20 },
+  { symbol: 'R_25', name: 'VOL 25', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 1820.60 },
+  { symbol: '1HZ100V', name: 'VOL 100 (1s)', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 840.10 },
 ];
 
 export function LiveTicker({
@@ -59,18 +50,26 @@ export function LiveTicker({
   onTicksUpdate,
   onOpenVipRadar,
   isVIP,
+  isDemoMode = false,
+  onToggleDemoMode,
+  onFeedStatusChange,
 }: LiveTickerProps) {
   const [currentPrice, setCurrentPrice] = useState<number>(activeAsset.basePrice || 1.08542);
   const [prevPrice, setPrevPrice] = useState<number>(activeAsset.basePrice || 1.08542);
   const [pricePulse, setPricePulse] = useState<'up' | 'down' | null>(null);
-  const [wsConnected, setWsConnected] = useState<boolean>(false);
-  const [tickVelocity, setTickVelocity] = useState<string>('Normal (6 t/s)');
-  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'CRYPTO' | 'STOCK' | 'FOREX' | 'SYNTH'>('ALL');
-  
+  const [feedStatus, setFeedStatus] = useState<FeedHealthStatus>('RECONNECTING');
+  const [lastTickAgoMs, setLastTickAgoMs] = useState<number>(0);
+  const [tickVelocity, setTickVelocity] = useState<string>('Normal');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'CRYPTO' | 'FOREX' | 'SYNTH'>('ALL');
+
   const historyRef = useRef<number[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const tickCountRef = useRef<number>(0);
   const currentPriceRef = useRef<number>(activeAsset.basePrice || 1.08542);
+  const lastTickTimestampRef = useRef<number>(Date.now());
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const backoffMsRef = useRef<number>(1000);
+  const isMountedRef = useRef<boolean>(true);
 
   // Sync initial price on activeAsset change
   useEffect(() => {
@@ -82,10 +81,10 @@ export function LiveTicker({
       600
     );
     const existing = getAssetTicks(activeAsset.symbol);
-    const initialP = existing.length > 0 
-      ? existing[existing.length - 1] 
+    const initialP = existing.length > 0
+      ? existing[existing.length - 1]
       : (activeAsset.basePrice || (activeAsset.decimals === 5 ? 1.08542 : 100.0));
-    
+
     currentPriceRef.current = initialP;
     setCurrentPrice(initialP);
     setPrevPrice(initialP);
@@ -96,99 +95,8 @@ export function LiveTicker({
     }
   }, [activeAsset.symbol]);
 
-  // Initialize Deriv WebSocket feed or fallback tick engine
-  useEffect(() => {
-    let isMounted = true;
-    const existing = getAssetTicks(activeAsset.symbol);
-    historyRef.current = existing.length > 0 ? [...existing] : [];
-
-    const connectWS = () => {
-      try {
-        if (wsRef.current) {
-          wsRef.current.close();
-        }
-        const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          if (!isMounted) return;
-          setWsConnected(true);
-          // Subscribe to active asset if Deriv symbol
-          ws.send(JSON.stringify({ forget_all: 'ticks' }));
-          ws.send(JSON.stringify({ ticks: activeAsset.symbol, subscribe: 1 }));
-        };
-
-        ws.onmessage = (event) => {
-          if (!isMounted) return;
-          try {
-            const data = JSON.parse(event.data);
-            if (data.tick && data.tick.symbol === activeAsset.symbol) {
-              const quote = parseFloat(data.tick.quote);
-              if (!isNaN(quote)) {
-                processNewTick(quote);
-              }
-            }
-          } catch {
-            // Ignore parse errors
-          }
-        };
-
-        ws.onclose = () => {
-          if (!isMounted) return;
-          setWsConnected(false);
-          // Auto-reconnect after 3s
-          setTimeout(connectWS, 3000);
-        };
-
-        ws.onerror = () => {
-          // Handled silently
-        };
-      } catch (e) {
-        console.warn('WS Init notice', e);
-      }
-    };
-
-    connectWS();
-
-    // High frequency realistic tick pulse generator (works 24/7 for all assets including Crypto and Stocks)
-    const simTimer = setInterval(() => {
-      // If symbol is non-Deriv or WS is not actively pushing ticks, supply live continuous ticks
-      const isDerivNative = ['frxEURUSD', 'frxGBPUSD', 'frxXAUUSD', 'R_100', 'R_75'].includes(activeAsset.symbol);
-      if (!isDerivNative || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-        const prev = currentPriceRef.current;
-        const stepSize = (activeAsset.pipSize || 0.0001) * (Math.random() > 0.8 ? 2.5 : 1.2);
-        const delta = (Math.random() - 0.492) * stepSize;
-        const next = Math.max(0.00001, parseFloat((prev + delta).toFixed(activeAsset.decimals || 5)));
-        processNewTick(next);
-      }
-    }, 800);
-
-    return () => {
-      isMounted = false;
-      clearInterval(simTimer);
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, [activeAsset.symbol, activeAsset.decimals, activeAsset.pipSize]);
-
-  // Tick Velocity tracking loop
-  useEffect(() => {
-    const velInterval = setInterval(() => {
-      const count = tickCountRef.current;
-      tickCountRef.current = 0;
-      if (count > 8) {
-        setTickVelocity(`Surge (${count * 2} t/s)`);
-      } else if (count > 3) {
-        setTickVelocity(`High (${count * 2} t/s)`);
-      } else {
-        setTickVelocity(`Normal (${Math.max(count * 2, 4)} t/s)`);
-      }
-    }, 1000);
-    return () => clearInterval(velInterval);
-  }, []);
-
-  const processNewTick = (newPrice: number) => {
+  const processNewTick = useCallback((newPrice: number, isSimulated: boolean = false) => {
+    lastTickTimestampRef.current = Date.now();
     tickCountRef.current += 1;
     const nowSec = Math.floor(Date.now() / 1000);
     pushAssetTick(activeAsset.symbol, newPrice, nowSec);
@@ -211,32 +119,219 @@ export function LiveTicker({
       historyRef.current.shift();
     }
     onTicksUpdate?.([...historyRef.current]);
-  };
 
-  const diff = currentPrice - prevPrice;
+    if (!isSimulated) {
+      setFeedStatus('LIVE');
+      onFeedStatusChange?.(true, 'LIVE');
+    }
+  }, [activeAsset.symbol, onPriceUpdate, onTicksUpdate, onFeedStatusChange]);
+
+  // Connect WebSocket with Exponential Backoff
+  useEffect(() => {
+    isMountedRef.current = true;
+    backoffMsRef.current = 1000;
+
+    const connectWS = () => {
+      if (!isMountedRef.current) return;
+
+      try {
+        if (wsRef.current) {
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        }
+
+        setFeedStatus('RECONNECTING');
+        onFeedStatusChange?.(false, 'RECONNECTING');
+
+        const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (!isMountedRef.current) return;
+          backoffMsRef.current = 1000; // Reset backoff on successful connect
+          setFeedStatus('LIVE');
+          onFeedStatusChange?.(true, 'LIVE');
+
+          // Subscribe to active asset ticks
+          ws.send(JSON.stringify({ forget_all: 'ticks' }));
+          ws.send(JSON.stringify({ ticks: activeAsset.symbol, subscribe: 1 }));
+        };
+
+        ws.onmessage = (event) => {
+          if (!isMountedRef.current) return;
+          try {
+            const data = JSON.parse(event.data);
+            if (data.tick && data.tick.symbol === activeAsset.symbol) {
+              const quote = parseFloat(data.tick.quote);
+              if (!isNaN(quote)) {
+                processNewTick(quote, false);
+              }
+            }
+          } catch {
+            // Ignore parse errors
+          }
+        };
+
+        ws.onclose = () => {
+          if (!isMountedRef.current) return;
+          setFeedStatus('RECONNECTING');
+          onFeedStatusChange?.(false, 'RECONNECTING');
+
+          const delay = backoffMsRef.current;
+          backoffMsRef.current = Math.min(16000, backoffMsRef.current * 2); // Exponential backoff up to 16s
+
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = setTimeout(connectWS, delay);
+        };
+
+        ws.onerror = () => {
+          if (!isMountedRef.current) return;
+          setFeedStatus('OFFLINE');
+          onFeedStatusChange?.(false, 'OFFLINE');
+        };
+      } catch (e) {
+        console.warn('WS Init notice', e);
+        setFeedStatus('OFFLINE');
+        onFeedStatusChange?.(false, 'OFFLINE');
+      }
+    };
+
+    connectWS();
+
+    return () => {
+      isMountedRef.current = false;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        wsRef.current.close();
+      }
+    };
+  }, [activeAsset.symbol, processNewTick, onFeedStatusChange]);
+
+  // Stale-Tick Watchdog (>2000ms without tick marks feed as STALE / NO LIVE DATA)
+  useEffect(() => {
+    const watchdogInterval = setInterval(() => {
+      const msSinceLastTick = Date.now() - lastTickTimestampRef.current;
+      setLastTickAgoMs(msSinceLastTick);
+
+      if (isDemoMode) {
+        return; // Demo mode handles its own ticker
+      }
+
+      if (msSinceLastTick > 2000) {
+        setFeedStatus((prev) => {
+          if (prev === 'LIVE') {
+            onFeedStatusChange?.(false, 'STALE');
+            return 'STALE';
+          }
+          return prev;
+        });
+      }
+    }, 500);
+
+    return () => clearInterval(watchdogInterval);
+  }, [isDemoMode, onFeedStatusChange]);
+
+  // DEMO MODE ONLY: Simulated tick generator for testing/offline simulation
+  // Strict rule: ONLY runs when isDemoMode === true! In production LIVE mode, Math.random ticks are 100% disabled.
+  useEffect(() => {
+    if (!isDemoMode) return;
+
+    const simTimer = setInterval(() => {
+      const prev = currentPriceRef.current;
+      const stepSize = (activeAsset.pipSize || 0.0001) * (Math.random() > 0.8 ? 2.2 : 1.1);
+      const delta = (Math.random() - 0.495) * stepSize;
+      const next = Math.max(0.00001, parseFloat((prev + delta).toFixed(activeAsset.decimals || 5)));
+      processNewTick(next, true);
+    }, 750);
+
+    return () => clearInterval(simTimer);
+  }, [isDemoMode, activeAsset.pipSize, activeAsset.decimals, processNewTick]);
+
+  // Tick Velocity tracking loop
+  useEffect(() => {
+    const velInterval = setInterval(() => {
+      const count = tickCountRef.current;
+      tickCountRef.current = 0;
+      if (count > 6) {
+        setTickVelocity(`High (${count * 2} t/s)`);
+      } else if (count > 2) {
+        setTickVelocity(`Active (${count * 2} t/s)`);
+      } else {
+        setTickVelocity(`Steady (${count * 2} t/s)`);
+      }
+    }, 1000);
+    return () => clearInterval(velInterval);
+  }, []);
+
+  const isFeedActive = isDemoMode || (feedStatus === 'LIVE' && lastTickAgoMs <= 2000);
 
   // Filter assets by category
   const filteredAssets = ASSETS.filter((a) => {
     if (categoryFilter === 'ALL') return true;
     if (categoryFilter === 'CRYPTO') return a.type === 'CRYPTO';
-    if (categoryFilter === 'STOCK') return a.type === 'STOCK';
     if (categoryFilter === 'FOREX') return a.type === 'FOREX';
-    if (categoryFilter === 'SYNTH') return a.type === 'SYNTH' || a.type === 'COMMODITY' || a.type === 'INDEX';
+    if (categoryFilter === 'SYNTH') return a.type === 'SYNTH' || a.type === 'COMMODITY';
     return true;
   });
 
   return (
     <div id="live-ticker-container" className="space-y-2">
+      {/* DEMO MODE WARNING BANNER */}
+      {isDemoMode && (
+        <div className="bg-amber-950/70 border border-amber-500/40 rounded-xl p-2.5 text-xs font-mono text-amber-200 flex items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
+            <span>
+              <strong>SIMULATED DATA (DEMO MODE)</strong> — Replaying simulated volatility for test execution.
+              Outcomes are NOT recorded to live performance ledger.
+            </span>
+          </div>
+          {onToggleDemoMode && (
+            <button
+              type="button"
+              onClick={() => onToggleDemoMode(false)}
+              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-[11px] shrink-0"
+            >
+              Switch to Live Feed
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* FEED STALE / NO LIVE DATA ALERT */}
+      {!isDemoMode && !isFeedActive && (
+        <div className="bg-rose-950/70 border border-rose-500/40 rounded-xl p-2.5 text-xs font-mono text-rose-200 flex items-center justify-between gap-3 shadow-md">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping shrink-0" />
+            <div>
+              <strong>NO LIVE DATA</strong> — Deriv WebSocket feed for {activeAsset.name} is {feedStatus.toLowerCase()} (last tick: {(lastTickAgoMs / 1000).toFixed(1)}s ago).
+              Signal generation is paused to protect capital.
+            </div>
+          </div>
+          {onToggleDemoMode && (
+            <button
+              type="button"
+              onClick={() => onToggleDemoMode(true)}
+              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] shrink-0 font-bold"
+            >
+              Enable Demo Mode
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Top Bar: Feed Status & Category Selector + VIP Screener Trigger */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         {/* Category Filter Pills */}
         <div className="flex items-center gap-1 overflow-x-auto pb-1 sm:pb-0 scrollbar-none text-[11px] font-mono">
           {[
-            { id: 'ALL', label: 'All (24)' },
-            { id: 'CRYPTO', label: 'Crypto (9)' },
-            { id: 'STOCK', label: 'Stocks (5)' },
+            { id: 'ALL', label: 'All (15)' },
             { id: 'FOREX', label: 'Forex (7)' },
-            { id: 'SYNTH', label: 'Indices (4)' },
+            { id: 'CRYPTO', label: 'Crypto (2)' },
+            { id: 'SYNTH', label: 'Synthetics & Gold (6)' },
           ].map((cat) => (
             <button
               key={cat.id}
@@ -253,7 +348,7 @@ export function LiveTicker({
           ))}
         </div>
 
-        {/* Right side: VIP Screener button + Stream status */}
+        {/* Right side: VIP Screener button + Stream status + Live/Demo Toggle */}
         <div className="flex items-center gap-2">
           {onOpenVipRadar && (
             <button
@@ -262,27 +357,68 @@ export function LiveTicker({
               data-tour="radar-control"
               onClick={onOpenVipRadar}
               className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-gradient-to-r from-amber-500/20 to-amber-400/20 hover:from-amber-500/30 hover:to-amber-400/30 border border-amber-500/40 text-amber-400 font-mono text-xs font-black shadow-md shadow-amber-500/10 transition"
-              title="Open 24/7 VIP Real-Time Safe Trade Radar"
+              title="Open Real-Time Trade Screener"
             >
-              <svg className="w-3.5 h-3.5 text-amber-400 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
               </svg>
-              <span>VIP SAFE TRADE RADAR</span>
+              <span>VIP RADAR</span>
             </button>
           )}
 
-          <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400 bg-slate-900/80 px-2.5 py-1 rounded-xl border border-slate-800">
+          {/* Honest Connection Health Indicator */}
+          <div className="flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded-xl border bg-slate-900/80 border-slate-800">
             <span
               className={`w-2 h-2 rounded-full ${
-                wsConnected ? 'bg-emerald-400 animate-pulse' : 'bg-emerald-400'
+                isDemoMode
+                  ? 'bg-amber-400'
+                  : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
+                  ? 'bg-emerald-400 animate-pulse'
+                  : feedStatus === 'RECONNECTING'
+                  ? 'bg-amber-400 animate-pulse'
+                  : 'bg-rose-500'
               }`}
             />
-            <span className="text-emerald-400 font-bold">24/7 LIVE</span>
+            <span
+              className={`font-bold ${
+                isDemoMode
+                  ? 'text-amber-300'
+                  : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
+                  ? 'text-emerald-400'
+                  : feedStatus === 'RECONNECTING'
+                  ? 'text-amber-400'
+                  : 'text-rose-400'
+              }`}
+            >
+              {isDemoMode
+                ? 'SIMULATED DEMO'
+                : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
+                ? 'DERIV LIVE'
+                : feedStatus === 'RECONNECTING'
+                ? 'RECONNECTING'
+                : 'NO LIVE DATA'}
+            </span>
           </div>
+
+          {/* Mode Switcher (Live vs Demo) */}
+          {onToggleDemoMode && (
+            <button
+              type="button"
+              onClick={() => onToggleDemoMode(!isDemoMode)}
+              className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border transition ${
+                isDemoMode
+                  ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+              title="Toggle Simulated Demo Mode for practice"
+            >
+              {isDemoMode ? '🧪 DEMO' : '⚡ LIVE'}
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Asset Grid Selection - Scrollable & Multi-instrument */}
+      {/* Asset Grid Selection */}
       <div className="overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-slate-800">
         <div className="flex items-center gap-1.5 min-w-max" id="asset-selector-tabs" data-tour="asset-selector">
           {filteredAssets.map((asset) => {
@@ -321,7 +457,7 @@ export function LiveTicker({
             currentPrice={currentPrice}
             prevPrice={prevPrice}
             pricePulse={pricePulse}
-            wsConnected={wsConnected}
+            wsConnected={isFeedActive}
             onAssetChange={onAssetChange}
           />
         </ErrorBoundary>

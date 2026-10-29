@@ -39,7 +39,7 @@ export function LandingPage({
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <span>Deriv WebSocket Real-Time Telemetry</span>
           <span className="text-slate-600 hidden sm:inline">•</span>
-          <span className="text-slate-300 hidden sm:inline">Sub-25ms Execution Latency</span>
+          <span className="text-slate-300 hidden sm:inline">Real-Time Streaming Telemetry</span>
         </div>
 
         {/* Hero Title & Subtitle */}
@@ -317,7 +317,7 @@ export function LandingPage({
                 <span className="text-xs text-slate-400 ml-2">10 Starter Credits</span>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Test the live signals and experience the 6-second radial execution window risk-free.
+                Test the live signals and experience the 6-second radial execution window without financial commitment.
               </p>
               <ul className="space-y-2.5 text-xs text-slate-300 font-mono pt-2">
                 <li className="flex items-center gap-2">
@@ -554,7 +554,7 @@ export function LandingPage({
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-2">
             <h4 className="text-sm font-bold text-white">How is the VIP 30-day timeframe strictly enforced?</h4>
             <p className="text-xs text-slate-400 leading-relaxed">
-              To prevent unauthorized accounts from taking VIP slots and to guarantee fairness, VIP status is bound to a verified cryptographic activation code or confirmed crypto transaction. Each VIP period is timestamped in the database for exactly 30 calendar days (720 hours). Once the 30-day window expires, the system automatically revokes VIP access and resets to standard credits to prevent exceeding the allowed timeframe.
+              To prevent unauthorized accounts from taking VIP slots and to ensure systematic access, VIP status is bound to a verified cryptographic activation code or confirmed crypto transaction. Each VIP period is timestamped in the database for exactly 30 calendar days (720 hours). Once the 30-day window expires, the system automatically revokes VIP access and resets to standard credits to prevent exceeding the allowed timeframe.
             </p>
           </div>
 

@@ -30,7 +30,7 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="live-ticker"]'],
     title: '2. Real-Time Tick Stream & Velocity',
     description:
-      'Sub-25ms WebSocket price telemetry direct from the institutional interbank feed. Displays live bid/ask quotes, pip spread, micro-price velocity, and momentum bursts.',
+      'Real-time WebSocket price telemetry direct from live market feeds. Displays live bid/ask quotes, pip spread, micro-price velocity, and momentum bursts.',
     tip: 'Rapid tick acceleration gives you early confirmation of impending volatility expansions.',
     badge: 'Step 2 of 9 • Telemetry',
     shape: 'box',
