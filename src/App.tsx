@@ -22,6 +22,8 @@ const AdminCenter = React.lazy(() =>
 import { LandingPage } from './components/LandingPage.tsx';
 import { BlogSection } from './components/BlogSection.tsx';
 import { AboutPage } from './components/AboutPage.tsx';
+import { PerformancePage } from './components/PerformancePage.tsx';
+import { LegalPages } from './components/LegalPages.tsx';
 import { AuthModal } from './components/AuthModal.tsx';
 import { VipSafeRadarModal } from './components/VipSafeRadarModal.tsx';
 import { GuidedTourCoachMark } from './components/GuidedTourCoachMark.tsx';
@@ -108,6 +110,9 @@ export default function App() {
   const [credits, setCredits] = useState<number>(10);
   const [isVIP, setIsVIP] = useState<boolean>(false);
   const [onlineUsers, setOnlineUsers] = useState<number>(1);
+  const [isFeedActive, setIsFeedActive] = useState<boolean>(true);
+  const [feedHealthStatus, setFeedHealthStatus] = useState<string>('CONNECTING');
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
 
   const [stats, setStats] = useState<SessionStats>({
     total: 0,
@@ -289,7 +294,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-950 text-slate-100 font-sans antialiased selection:bg-emerald-500 selection:text-slate-950 flex flex-col justify-between">
+    <div className="min-h-screen min-h-dvh w-full max-w-full overflow-x-hidden bg-slate-950 text-slate-100 font-sans antialiased selection:bg-emerald-500 selection:text-slate-950 flex flex-col justify-between">
       {/* Top Announcement Banner (Configurable in Admin) */}
       {siteSettings.bannerEnabled && siteSettings.bannerText && !bannerDismissed && (
         <div className="bg-gradient-to-r from-amber-500/20 via-emerald-500/20 to-amber-500/20 border-b border-amber-500/30 px-3 py-1.5 text-xs font-mono flex items-center justify-between text-amber-200">
@@ -310,8 +315,8 @@ export default function App() {
       {/* Top Floating Market Radar */}
       <MarketRadar />
 
-      {/* Global Navigation Header */}
-      <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-3.5 sm:px-6 py-3">
+      {/* Global Navigation Header (Safe-Area Aware) */}
+      <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800/80 px-3.5 sm:px-6 py-3 pt-[max(env(safe-area-inset-top,0px),12px)]">
         <div className="max-w-6xl mx-auto flex items-center justify-between gap-3">
           {/* Logo & Brand Identity */}
           <div
@@ -405,6 +410,15 @@ export default function App() {
               }`}
             >
               About &amp; Science
+            </button>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('performance')}
+              className={`px-3 py-1.5 rounded-lg transition ${
+                currentPage === 'performance' ? 'bg-slate-800 text-white font-bold' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Performance
             </button>
             <button
               type="button"
@@ -581,6 +595,12 @@ export default function App() {
                 onTicksUpdate={setLiveTicks}
                 isVIP={isVIP || Boolean(user?.is_vip)}
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
+                onFeedStatusChange={(active, status) => {
+                  setIsFeedActive(active);
+                  setFeedHealthStatus(status);
+                }}
+                isDemoMode={isDemoMode}
+                onToggleDemoMode={() => setIsDemoMode((d) => !d)}
               />
 
               {/* Multi-Timeframe Algorithmic Signal Engine & Lockout Loop */}
@@ -596,6 +616,8 @@ export default function App() {
                 user={user}
                 onOpenAuth={(mode) => setAuthModalMode(mode)}
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
+                isFeedActive={isFeedActive}
+                isDemoMode={isDemoMode}
               />
 
               {/* Risk Advisor & 2% Stake Protection */}
@@ -622,7 +644,23 @@ export default function App() {
           />
         )}
 
-        {/* VIEW 5: VIP & PRICING (Crypto Checkout & 30-Day VIP Pass) */}
+        {/* VIEW 5: MEASURED PERFORMANCE & STATISTICAL AUDIT */}
+        {currentPage === 'performance' && (
+          <PerformancePage
+            onLaunchCockpit={() => setCurrentPage('cockpit')}
+            onGetStarted={() => setAuthModalMode('register')}
+          />
+        )}
+
+        {/* VIEW 6: LEGAL POLICIES (Terms, Privacy, Risk Disclosure, Cookies) */}
+        {(currentPage === 'terms' || currentPage === 'privacy' || currentPage === 'risk' || currentPage === 'cookies') && (
+          <LegalPages
+            initialTab={currentPage as any}
+            onBack={() => setCurrentPage('landing')}
+          />
+        )}
+
+        {/* VIEW 7: VIP & PRICING (Crypto Checkout & 30-Day VIP Pass) */}
         {currentPage === 'pricing' && (
           <div className="max-w-xl mx-auto space-y-4 animate-in fade-in duration-200">
             <CryptoCheckout
@@ -727,10 +765,50 @@ export default function App() {
             <span>•</span>
             <button
               type="button"
+              onClick={() => setCurrentPage('performance')}
+              className="hover:text-emerald-400 font-bold transition text-emerald-300"
+            >
+              Measured Performance
+            </button>
+            <span>•</span>
+            <button
+              type="button"
               onClick={() => setCurrentPage('pricing')}
               className="hover:text-white transition"
             >
               VIP Access
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('terms')}
+              className="hover:text-white transition"
+            >
+              Terms
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('privacy')}
+              className="hover:text-white transition"
+            >
+              Privacy
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('risk')}
+              className="hover:text-rose-400 transition"
+            >
+              Risk Disclosure
+            </button>
+            <span>•</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage('cookies')}
+              className="hover:text-white transition"
+            >
+              Cookies
             </button>
             {user?.role === 'ADMIN' && (
               <>
@@ -797,7 +875,7 @@ export default function App() {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" d="M13 10V3L4 14h7v7l9-11h-7z" />
           </svg>
-          <span className="text-[10px] tracking-tight mt-0.5">Cockpit</span>
+          <span className="text-xs tracking-tight mt-0.5">Cockpit</span>
         </button>
 
         {/* 2. Safe Radar (with VIP indicator) */}
@@ -813,11 +891,11 @@ export default function App() {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
           </svg>
-          <span className="text-[10px] tracking-tight mt-0.5">Radar</span>
+          <span className="text-xs tracking-tight mt-0.5">Radar</span>
           {(!user?.is_vip && !isVIP) ? (
             <span className="absolute top-1.5 right-4 w-2 h-2 rounded-full bg-amber-400 ring-2 ring-slate-950 animate-pulse" />
           ) : (
-            <span className="absolute top-1.5 right-4 text-[8px] bg-amber-500/30 text-amber-300 px-1 rounded font-bold">★</span>
+            <span className="absolute top-1.5 right-4 text-[10px] bg-amber-500/30 text-amber-300 px-1 rounded font-bold">★</span>
           )}
         </button>
 
@@ -837,7 +915,7 @@ export default function App() {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span className="text-[10px] tracking-tight mt-0.5">Pricing</span>
+          <span className="text-xs tracking-tight mt-0.5">Pricing</span>
         </button>
 
         {/* 4. Profile / Sign In */}
@@ -852,7 +930,7 @@ export default function App() {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
           </svg>
-          <span className="text-[10px] tracking-tight mt-0.5">{user ? 'Profile' : 'Sign In'}</span>
+          <span className="text-xs tracking-tight mt-0.5">{user ? 'Profile' : 'Sign In'}</span>
         </button>
 
         {/* 5. More / Menu */}
@@ -868,7 +946,7 @@ export default function App() {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
           </svg>
-          <span className="text-[10px] tracking-tight mt-0.5">More</span>
+          <span className="text-xs tracking-tight mt-0.5">More</span>
         </button>
       </nav>
 
@@ -944,6 +1022,38 @@ export default function App() {
               >
                 <span>🔬</span>
                 <span>Methodology</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentPage('performance');
+                  setIsMobileMoreOpen(false);
+                }}
+                className={`p-3 rounded-xl border flex items-center gap-2.5 transition ${
+                  currentPage === 'performance'
+                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 font-bold'
+                    : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                }`}
+              >
+                <span>📊</span>
+                <span>Performance</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setCurrentPage('terms');
+                  setIsMobileMoreOpen(false);
+                }}
+                className={`p-3 rounded-xl border flex items-center gap-2.5 transition ${
+                  currentPage === 'terms' || currentPage === 'privacy' || currentPage === 'risk' || currentPage === 'cookies'
+                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 font-bold'
+                    : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                }`}
+              >
+                <span>⚖️</span>
+                <span>Legal &amp; Risk</span>
               </button>
 
               <button

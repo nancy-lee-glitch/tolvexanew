@@ -108,6 +108,33 @@ export function calculateRSI(prices: number[], period: number = 14): number {
 }
 
 /**
+ * Moving Average Convergence Divergence (MACD 12, 26, 9)
+ */
+export function calculateMACD(
+  prices: number[],
+  fastPeriod: number = 12,
+  slowPeriod: number = 26,
+  signalPeriod: number = 9
+): { macdLine: number; signalLine: number; histogram: number } {
+  if (prices.length === 0) return { macdLine: 0, signalLine: 0, histogram: 0 };
+  const emaFast = calculateEMA(prices, fastPeriod);
+  const emaSlow = calculateEMA(prices, slowPeriod);
+  const macdLine = parseFloat((emaFast - emaSlow).toFixed(5));
+
+  const macdSeries: number[] = [];
+  const minSamples = Math.min(prices.length, 30);
+  for (let i = prices.length - minSamples; i < prices.length; i++) {
+    const sub = prices.slice(0, i + 1);
+    const f = calculateEMA(sub, fastPeriod);
+    const s = calculateEMA(sub, slowPeriod);
+    macdSeries.push(f - s);
+  }
+  const signalLine = parseFloat(calculateEMA(macdSeries, signalPeriod).toFixed(5));
+  const histogram = parseFloat((macdLine - signalLine).toFixed(5));
+  return { macdLine, signalLine, histogram };
+}
+
+/**
  * Bollinger Bands
  */
 export function calculateBollingerBands(

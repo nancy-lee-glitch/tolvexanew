@@ -107,10 +107,11 @@ const RECENT_SAMPLE_TRADES: RecentTradeOutcome[] = [
 
 interface PerformancePageProps {
   onLaunchCockpit: () => void;
-  onOpenPricing: () => void;
+  onOpenPricing?: () => void;
+  onGetStarted?: () => void;
 }
 
-export function PerformancePage({ onLaunchCockpit, onOpenPricing }: PerformancePageProps) {
+export function PerformancePage({ onLaunchCockpit, onOpenPricing, onGetStarted }: PerformancePageProps) {
   const [selectedAsset, setSelectedAsset] = useState<string>('ALL');
 
   const totalTrades = MEASURED_ASSETS.reduce((sum, a) => sum + a.sampleSize, 0);

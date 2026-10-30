@@ -405,9 +405,14 @@ export function LiveChart({
     };
   }, [activeAsset.symbol, chartType, interval, intervalSeconds, decimals, pipSize, buildLineData, buildCandleData, drawFallbackChart]);
 
-  // Real-time tick update throttling via requestAnimationFrame
+  // Real-time tick update throttling via requestAnimationFrame with tab-visibility pause
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
+
+    // Phase 3: Pause animations & tick processing when tab is hidden to preserve mobile battery
+    if (typeof document !== 'undefined' && document.hidden) {
+      return;
+    }
 
     if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -458,6 +463,19 @@ export function LiveChart({
       }
     };
   }, [currentPrice, prevPrice, pricePulse, chartType, intervalSeconds]);
+
+  // Tab visibility resume handler: sync to live when trader returns to tab
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (!document.hidden && autoFollowRef.current && chartRef.current) {
+        try {
+          chartRef.current.timeScale().scrollToRealTime();
+        } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
 
   // Jump to live handler
   const handleJumpToLive = () => {
@@ -581,7 +599,7 @@ export function LiveChart({
           ref={containerRef}
           id="tradingview-lightweight-chart-container"
           className={`w-full rounded-xl overflow-hidden cursor-crosshair ${useFallbackCanvas ? 'hidden' : 'block'}`}
-          style={{ minHeight: '250px' }}
+          style={{ minHeight: '250px', touchAction: 'pan-x pan-y' }}
         />
 
         {/* Resilient Native Canvas Sparkline Fallback */}

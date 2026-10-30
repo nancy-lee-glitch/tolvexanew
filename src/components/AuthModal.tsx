@@ -48,6 +48,7 @@ export function AuthModal({
   const [password, setPassword] = useState('');
   const [identity, setIdentity] = useState('');
   const [vipKey, setVipKey] = useState('');
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [referralCode, setReferralCode] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -65,6 +66,10 @@ export function AuthModal({
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!ageConfirmed) {
+      setErrorMessage('You must confirm you are at least 18 years old and in an eligible jurisdiction to continue.');
+      return;
+    }
     setLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -325,9 +330,23 @@ export function AuthModal({
               </p>
             </div>
 
+            {/* Age & Jurisdiction Confirmation */}
+            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-950/60 border border-slate-800 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                required
+                checked={ageConfirmed}
+                onChange={(e) => setAgeConfirmed(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500 bg-slate-900"
+              />
+              <span className="text-xs text-slate-300 leading-relaxed font-sans">
+                I confirm I am at least <strong className="text-white">18 years old</strong> and reside in an eligible jurisdiction where trading digital contracts is permitted by local law.
+              </span>
+            </label>
+
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !ageConfirmed}
               className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm font-mono rounded-xl transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
             >
               {loading

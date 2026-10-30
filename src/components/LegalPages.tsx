@@ -5,11 +5,13 @@ export type LegalTab = 'terms' | 'privacy' | 'risk' | 'cookies';
 interface LegalPagesProps {
   initialTab?: LegalTab;
   onClose?: () => void;
+  onBack?: () => void;
   onLaunchCockpit?: () => void;
 }
 
-export function LegalPages({ initialTab = 'terms', onClose, onLaunchCockpit }: LegalPagesProps) {
+export function LegalPages({ initialTab = 'terms', onClose, onBack, onLaunchCockpit }: LegalPagesProps) {
   const [activeTab, setActiveTab] = useState<LegalTab>(initialTab);
+  const handleExit = onBack || onClose || onLaunchCockpit;
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 font-mono text-xs animate-in fade-in duration-200">

@@ -1,12 +1,12 @@
 {
   "id": "/",
-  "name": "PulseTrade Pro Quantitative Terminal",
-  "short_name": "PulseTrade",
-  "description": "Institutional-grade quantitative micro-volatility trading terminal with real-time algorithmic confluence.",
+  "name": "Tolvexa Quantitative Terminal",
+  "short_name": "Tolvexa",
+  "description": "Real-time algorithmic confluence and quantitative risk management companion.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
+  "orientation": "any",
   "background_color": "#020617",
   "theme_color": "#020617",
   "icons": [

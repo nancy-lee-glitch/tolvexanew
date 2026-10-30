@@ -37,6 +37,8 @@ interface SignalEngineProps {
   user?: UserProfile | null;
   onOpenAuth?: (mode: 'login' | 'register') => void;
   onOpenVipRadar?: () => void;
+  isFeedActive?: boolean;
+  isDemoMode?: boolean;
 }
 
 export const TIMEFRAMES = [
@@ -60,6 +62,8 @@ export function SignalEngine({
   user,
   onOpenAuth,
   onOpenVipRadar,
+  isFeedActive = true,
+  isDemoMode = false,
 }: SignalEngineProps) {
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
   const [platforms] = useState<BrokerPlatformItem[]>(() => getBrokerPlatforms());
@@ -212,6 +216,28 @@ export function SignalEngine({
     }
 
     if (isLocked || isRechecking || activeTrade) return;
+
+    // Live Feed Health Check: Block signal generation if WebSocket feed is dead or stale
+    if (!isFeedActive && !isDemoMode) {
+      const blockedSignal: SignalData = {
+        asset: activeAsset?.name || 'EUR/USD',
+        timeframe: selectedTf,
+        direction: 'WAIT',
+        confidence: 0,
+        trend: 'Neutral',
+        velocity: 'Feed Offline',
+        generatedAt: Date.now(),
+        status: 'ANALYSIS_BLOCKED',
+        blockedReason: 'NO LIVE DATA: Market WebSocket stream is offline or tick feed is stale (>2s).',
+        plainLanguageReason: 'Signal generation is paused to protect capital. PulseTrade never generates signals from interrupted or estimated feeds. No credits deducted.',
+        riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
+        gatePassed: false,
+        confluenceFactorsList: [],
+      };
+      setSignal(blockedSignal);
+      setCreditNotice('No credits deducted for unconfirmed/offline live market feed.');
+      return;
+    }
 
     // 2) Instrument & Timeframe check
     if (!activeAsset || !activeAsset.symbol) {
@@ -481,7 +507,8 @@ export function SignalEngine({
     if (!activeTrade) return;
 
     setActiveTrade((prev) => (prev ? { ...prev, completed: true } : null));
-    if (signal) {
+    // Live Data Integrity: Never write demo outcomes to persistent history or stats
+    if (signal && !isDemoMode) {
       onLogOutcome(outcome, signal);
       logOutcomeToSupabase(outcome, signal, user?.id || null);
     }
@@ -529,8 +556,11 @@ export function SignalEngine({
   // Handle post-trade feedback
   const handleOutcome = (outcome: 'WIN' | 'LOSS') => {
     if (!signal) return;
-    onLogOutcome(outcome, signal);
-    logOutcomeToSupabase(outcome, signal, user?.id || null);
+    // Live Data Integrity: Never write demo outcomes to persistent history or stats
+    if (!isDemoMode) {
+      onLogOutcome(outcome, signal);
+      logOutcomeToSupabase(outcome, signal, user?.id || null);
+    }
 
     if (signalHistory.length > 0) {
       handleUpdateHistoryOutcome(signalHistory[0].id, outcome);
@@ -561,11 +591,22 @@ export function SignalEngine({
 
   return (
     <div className="space-y-4" id="signal-engine-cockpit">
+      {/* 0. DATA INTEGRITY WARNING BANNER */}
+      {!isFeedActive && !isDemoMode && (
+        <div className="bg-rose-950/80 border border-rose-500/80 rounded-2xl p-3.5 flex items-center gap-3 text-rose-200 font-mono text-xs shadow-xl animate-pulse">
+          <span className="w-3 h-3 rounded-full bg-rose-500 shrink-0 ring-4 ring-rose-500/30" />
+          <div className="flex-1">
+            <strong className="text-white block font-bold text-sm">NO LIVE DATA &bull; WEBSOCKET FEED OFFLINE / STALE</strong>
+            Live tick stream is unavailable or exceeds 2-second staleness threshold. Signal generation is strictly disabled to prevent capital risk.
+          </div>
+        </div>
+      )}
+
       {/* 1. TOP STATUS BAR: Live Quantitative Telemetry */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-xl font-mono text-xs">
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
           <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className={`w-2.5 h-2.5 rounded-full ${isFeedActive || isDemoMode ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
             <span className="font-bold text-white text-xs sm:text-sm">
               Live Quant Gate &bull; {activeAsset?.name || 'EUR/USD'}
             </span>
@@ -1543,9 +1584,11 @@ export function SignalEngine({
           id="btn-analyse-trigger"
           data-tour="generate-signal"
           onClick={handleTriggerAnalysis}
-          disabled={isLocked || isRechecking || Boolean(activeTrade)}
+          disabled={isLocked || isRechecking || Boolean(activeTrade) || (!isFeedActive && !isDemoMode)}
           className={`w-full py-3.5 px-4 rounded-2xl font-black font-mono text-xs sm:text-sm uppercase tracking-wider shadow-2xl transition-all duration-200 flex items-center justify-center gap-2 ${
-            isLocked || Boolean(activeTrade)
+            !isFeedActive && !isDemoMode
+              ? 'bg-rose-950/40 text-rose-300 border border-rose-500/50 cursor-not-allowed opacity-80'
+              : isLocked || Boolean(activeTrade)
               ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
               : isRechecking
               ? 'bg-emerald-500/20 text-emerald-300 border-2 border-emerald-400 cursor-wait'
@@ -1554,7 +1597,9 @@ export function SignalEngine({
               : 'bg-gradient-to-r from-blue-500 via-indigo-500 to-blue-400 hover:from-blue-400 hover:to-indigo-400 text-white shadow-blue-500/30 active:scale-98 cursor-pointer'
           }`}
         >
-          {isRechecking ? (
+          {!isFeedActive && !isDemoMode ? (
+            <span>⚠️ NO LIVE DATA — FEED OFFLINE / STALE</span>
+          ) : isRechecking ? (
             <>
               <svg className="animate-spin h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />

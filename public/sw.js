@@ -1,5 +1,5 @@
-// PulseTrade Pro - Production Progressive Web App Service Worker
-const CACHE_NAME = 'pulsetrade-shell-v1';
+// Tolvexa - Production Progressive Web App Service Worker
+const CACHE_NAME = 'tolvexa-pwa-v3';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',
