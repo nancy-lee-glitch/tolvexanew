@@ -409,6 +409,11 @@ export function LiveChart({
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
 
+    // Requirement UI #3: Chart updates only from live ticks when LIVE; if offline, freeze last buffer
+    if (!wsConnected) {
+      return;
+    }
+
     // Phase 3: Pause animations & tick processing when tab is hidden to preserve mobile battery
     if (typeof document !== 'undefined' && document.hidden) {
       return;
@@ -462,7 +467,7 @@ export function LiveChart({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [currentPrice, prevPrice, pricePulse, chartType, intervalSeconds]);
+  }, [currentPrice, prevPrice, pricePulse, chartType, intervalSeconds, wsConnected]);
 
   // Tab visibility resume handler: sync to live when trader returns to tab
   useEffect(() => {
@@ -615,6 +620,14 @@ export function LiveChart({
             <span>Price: <strong className="text-emerald-400">{hoverData.price}</strong></span>
             <span className="mx-1.5 text-slate-600">|</span>
             <span>Time: <strong>{hoverData.time}</strong></span>
+          </div>
+        )}
+
+        {/* Frozen buffer indicator when offline / reconnecting */}
+        {!wsConnected && (
+          <div className="absolute top-2 right-2 bg-slate-950/90 border border-amber-500/50 rounded-lg px-2.5 py-1 text-[11px] font-mono text-amber-300 pointer-events-none shadow-md z-10 flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span>FEED PAUSED &bull; FROZEN BUFFER</span>
           </div>
         )}
 

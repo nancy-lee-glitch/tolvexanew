@@ -13,6 +13,7 @@ import type {
 } from './types.ts';
 import { MarketRadar } from './components/MarketRadar.tsx';
 import { LiveTicker, ASSETS } from './components/LiveTicker.tsx';
+import { getDefaultActiveAsset } from './services/symbolMap.ts';
 import { SignalEngine } from './components/SignalEngine.tsx';
 import { RiskAdvisor } from './components/RiskAdvisor.tsx';
 import { CryptoCheckout } from './components/CryptoCheckout.tsx';
@@ -104,8 +105,8 @@ export default function App() {
   const [bannerDismissed, setBannerDismissed] = useState<boolean>(false);
 
   // Trading engine states
-  const [activeAsset, setActiveAsset] = useState<AssetConfig>(ASSETS[0]);
-  const [currentPrice, setCurrentPrice] = useState<number>(1.08542);
+  const [activeAsset, setActiveAsset] = useState<AssetConfig>(() => getDefaultActiveAsset());
+  const [currentPrice, setCurrentPrice] = useState<number>(() => activeAsset?.basePrice || 1.08542);
   const [liveTicks, setLiveTicks] = useState<number[]>([]);
   const [credits, setCredits] = useState<number>(10);
   const [isVIP, setIsVIP] = useState<boolean>(false);
@@ -567,8 +568,17 @@ export default function App() {
               {/* Quick Context Bar */}
               <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="font-bold text-white">Live Execution Cockpit</span>
+                  <span className={`w-2 h-2 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : feedHealthStatus === 'MARKET_CLOSED' ? 'bg-amber-400' : 'bg-rose-500 animate-ping'}`} />
+                  <span className="font-bold text-white">Execution Cockpit</span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-md font-mono font-bold ${
+                    isFeedActive
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                      : feedHealthStatus === 'MARKET_CLOSED'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                  }`}>
+                    {isFeedActive ? 'LIVE' : feedHealthStatus === 'MARKET_CLOSED' ? 'WEEKEND CLOSED' : feedHealthStatus}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-slate-400">Balance:</span>
@@ -673,7 +683,7 @@ export default function App() {
         )}
 
         {/* VIEW 6: MASTER ADMIN COMMAND CENTER (RESTRICTED GATEWAY) */}
-        {(currentPage === 'admin' || currentPage === 'files' || currentPage === 'supabase') && (
+        {currentPage === 'admin' && (
           <div className="max-w-5xl mx-auto animate-in fade-in duration-200">
             <React.Suspense
               fallback={

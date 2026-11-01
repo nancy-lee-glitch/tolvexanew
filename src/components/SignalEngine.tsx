@@ -121,6 +121,15 @@ export function SignalEngine({
       if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
     };
   }, []);
+
+  // Stop auto-scan if live feed is interrupted (Requirement #4)
+  useEffect(() => {
+    if (!isFeedActive && !isDemoMode) {
+      if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
+      setAutoScanSecondsRemaining(0);
+      setAutoScanAttempt(0);
+    }
+  }, [isFeedActive, isDemoMode]);
   
   // Signal State
   const [signal, setSignal] = useState<SignalData | null>(null);
@@ -448,8 +457,8 @@ export function SignalEngine({
           setCreditNotice('No credit charged for WAIT state — only actionable setups consume credits.');
         }
 
-        // AUTO-SCAN RULE: If autoScanEnabled and attempt < MAX_AUTO_SCAN_ATTEMPTS, schedule 8s countdown
-        if (autoScanEnabled && autoScanAttempt < MAX_AUTO_SCAN_ATTEMPTS) {
+        // AUTO-SCAN RULE: If autoScanEnabled and attempt < MAX_AUTO_SCAN_ATTEMPTS, schedule 8s countdown ONLY if feed is LIVE
+        if (autoScanEnabled && autoScanAttempt < MAX_AUTO_SCAN_ATTEMPTS && (isFeedActive || isDemoMode)) {
           if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
           let remaining = 8;
           setAutoScanSecondsRemaining(remaining);
@@ -591,17 +600,6 @@ export function SignalEngine({
 
   return (
     <div className="space-y-4" id="signal-engine-cockpit">
-      {/* 0. DATA INTEGRITY WARNING BANNER */}
-      {!isFeedActive && !isDemoMode && (
-        <div className="bg-rose-950/80 border border-rose-500/80 rounded-2xl p-3.5 flex items-center gap-3 text-rose-200 font-mono text-xs shadow-xl animate-pulse">
-          <span className="w-3 h-3 rounded-full bg-rose-500 shrink-0 ring-4 ring-rose-500/30" />
-          <div className="flex-1">
-            <strong className="text-white block font-bold text-sm">NO LIVE DATA &bull; WEBSOCKET FEED OFFLINE / STALE</strong>
-            Live tick stream is unavailable or exceeds 2-second staleness threshold. Signal generation is strictly disabled to prevent capital risk.
-          </div>
-        </div>
-      )}
-
       {/* 1. TOP STATUS BAR: Live Quantitative Telemetry */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-xl font-mono text-xs">
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
@@ -717,6 +715,11 @@ export function SignalEngine({
                 </svg>
               </div>
             </div>
+
+            {/* Honest UX Subtitle (No private EO scraping claims) */}
+            <p className="text-[11px] text-slate-400 mt-1.5 leading-tight">
+              Live prices: <span className="text-emerald-400 font-bold">Deriv public market feed</span> &bull; Strategy profile: <span className="text-slate-200 font-bold">{currentPlatform.name} ({analysisProfile === 'MT5' ? 'MetaTrader 5 SL/TP' : 'Binary Option CALL/PUT'})</span>
+            </p>
           </div>
 
           {/* Auto-Scan After WAIT Toggle */}
@@ -1215,14 +1218,25 @@ export function SignalEngine({
 
             {/* Execute On Broker CTA */}
             {!activeTrade && !isExpired && signal.direction !== 'WAIT' && (
-              <button
-                type="button"
-                onClick={handleExecuteTrade}
-                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black font-mono text-xs sm:text-sm shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-2"
-              >
-                <span>EXECUTE {signal.direction} ON BROKER ({signal.timeframe.toUpperCase()})</span>
-                <span className="text-xs opacity-80">&rarr; Track Live Win</span>
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono">
+                <a
+                  href={currentPlatform.referralUrl || 'https://expertoption.com/?ref=TOLVEXA'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs sm:text-sm shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-1.5 active:scale-98"
+                >
+                  <span>TRADE ON {currentPlatform.name.toUpperCase()}</span>
+                  <span className="text-xs">↗</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={handleExecuteTrade}
+                  className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 text-emerald-400 border border-emerald-500/40 hover:border-emerald-400 font-black text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+                >
+                  <span>TRACK LIVE DELTA ({signal.timeframe.toUpperCase()})</span>
+                  <span>⚡</span>
+                </button>
+              </div>
             )}
 
             {/* Plain language risk note */}
@@ -1578,7 +1592,7 @@ export function SignalEngine({
       )}
 
       {/* 8. PRIMARY TRIGGER SCAN BUTTON (Sticky / Mobile-Optimized) */}
-      <div className="sticky bottom-16 md:static z-20 pt-1 pb-2">
+      <div className="sticky bottom-[calc(env(safe-area-inset-bottom)+56px)] md:static z-20 pt-2 pb-2 bg-slate-950/90 md:bg-transparent backdrop-blur-md md:backdrop-blur-none -mx-1 px-1">
         <button
           type="button"
           id="btn-analyse-trigger"
@@ -1598,7 +1612,7 @@ export function SignalEngine({
           }`}
         >
           {!isFeedActive && !isDemoMode ? (
-            <span>⚠️ NO LIVE DATA — FEED OFFLINE / STALE</span>
+            <span>⚠️ RECONNECTING TO LIVE FEED...</span>
           ) : isRechecking ? (
             <>
               <svg className="animate-spin h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24">

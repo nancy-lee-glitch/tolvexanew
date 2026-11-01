@@ -3,8 +3,16 @@ import type { AssetConfig } from '../types.ts';
 import { pushAssetTick, getAssetTicks, getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
 import { LiveChart } from './LiveChart.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
+import { ASSETS, getAssetConfigBySymbol } from '../services/symbolMap.ts';
+import {
+  DerivFeedService,
+  type FeedHealthStatus,
+  ACTIVE_APP_ID,
+  IS_CUSTOM_APP_ID_CONFIGURED,
+} from '../services/derivFeed.ts';
 
-export type FeedHealthStatus = 'LIVE' | 'RECONNECTING' | 'OFFLINE' | 'STALE' | 'NO_DATA';
+export type { FeedHealthStatus };
+export { ASSETS, getAssetConfigBySymbol };
 
 interface LiveTickerProps {
   activeAsset: AssetConfig;
@@ -17,31 +25,6 @@ interface LiveTickerProps {
   onToggleDemoMode?: (isDemo: boolean) => void;
   onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus) => void;
 }
-
-export const ASSETS: AssetConfig[] = [
-  // Forex Majors (Native Deriv WebSocket Feed)
-  { symbol: 'frxEURUSD', name: 'EUR/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 1.08542 },
-  { symbol: 'frxGBPUSD', name: 'GBP/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 1.29420 },
-  { symbol: 'frxUSDJPY', name: 'USD/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 154.250 },
-  { symbol: 'frxAUDUSD', name: 'AUD/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 0.65410 },
-  { symbol: 'frxUSDCAD', name: 'USD/CAD', type: 'FOREX', decimals: 5, pipSize: 0.0001, basePrice: 1.38240 },
-  { symbol: 'frxGBPJPY', name: 'GBP/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 198.650 },
-  { symbol: 'frxEURJPY', name: 'EUR/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01, basePrice: 167.420 },
-
-  // Crypto Coins (Native Deriv WebSocket Feed)
-  { symbol: 'cryBTCUSD', name: 'BTC/USD', type: 'CRYPTO', decimals: 2, pipSize: 1.0, basePrice: 88450.00 },
-  { symbol: 'cryETHUSD', name: 'ETH/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.1, basePrice: 3240.50 },
-
-  // Commodities & Indices (Native Deriv WebSocket Feed)
-  { symbol: 'frxXAUUSD', name: 'GOLD (XAU)', type: 'COMMODITY', decimals: 2, pipSize: 0.01, basePrice: 2684.50 },
-
-  // Deriv Volatility Synthetics (24/7 Guaranteed Live Ticks)
-  { symbol: 'R_100', name: 'VOL 100', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 2415.80 },
-  { symbol: 'R_75', name: 'VOL 75', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 48920.40 },
-  { symbol: 'R_50', name: 'VOL 50', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 341.20 },
-  { symbol: 'R_25', name: 'VOL 25', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 1820.60 },
-  { symbol: '1HZ100V', name: 'VOL 100 (1s)', type: 'SYNTH', decimals: 2, pipSize: 0.01, basePrice: 840.10 },
-];
 
 export function LiveTicker({
   activeAsset,
@@ -58,18 +41,16 @@ export function LiveTicker({
   const [prevPrice, setPrevPrice] = useState<number>(activeAsset.basePrice || 1.08542);
   const [pricePulse, setPricePulse] = useState<'up' | 'down' | null>(null);
   const [feedStatus, setFeedStatus] = useState<FeedHealthStatus>('RECONNECTING');
-  const [lastTickAgoMs, setLastTickAgoMs] = useState<number>(0);
-  const [tickVelocity, setTickVelocity] = useState<string>('Normal');
+  const [lastTickAgeSec, setLastTickAgeSec] = useState<number>(0);
+  const [activeEndpointUrl, setActiveEndpointUrl] = useState<string>('');
+  const [tickVelocity, setTickVelocity] = useState<string>('Steady');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'CRYPTO' | 'FOREX' | 'SYNTH'>('ALL');
+  const [showAppIdNotice, setShowAppIdNotice] = useState<boolean>(false);
 
   const historyRef = useRef<number[]>([]);
-  const wsRef = useRef<WebSocket | null>(null);
   const tickCountRef = useRef<number>(0);
   const currentPriceRef = useRef<number>(activeAsset.basePrice || 1.08542);
-  const lastTickTimestampRef = useRef<number>(Date.now());
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const backoffMsRef = useRef<number>(1000);
-  const isMountedRef = useRef<boolean>(true);
+  const feedServiceRef = useRef<DerivFeedService | null>(null);
 
   // Sync initial price on activeAsset change
   useEffect(() => {
@@ -95,8 +76,8 @@ export function LiveTicker({
     }
   }, [activeAsset.symbol]);
 
-  const processNewTick = useCallback((newPrice: number, isSimulated: boolean = false) => {
-    lastTickTimestampRef.current = Date.now();
+  // Process live incoming tick
+  const handleLiveTick = useCallback((newPrice: number, isSimulated: boolean = false) => {
     tickCountRef.current += 1;
     const nowSec = Math.floor(Date.now() / 1000);
     pushAssetTick(activeAsset.symbol, newPrice, nowSec);
@@ -122,133 +103,80 @@ export function LiveTicker({
 
     if (!isSimulated) {
       setFeedStatus('LIVE');
+      setLastTickAgeSec(0);
       onFeedStatusChange?.(true, 'LIVE');
     }
   }, [activeAsset.symbol, onPriceUpdate, onTicksUpdate, onFeedStatusChange]);
 
-  // Connect WebSocket with Exponential Backoff
+  // Connect Deriv WebSocket Feed
   useEffect(() => {
-    isMountedRef.current = true;
-    backoffMsRef.current = 1000;
+    if (feedServiceRef.current) {
+      feedServiceRef.current.setSymbol(activeAsset.symbol);
+      return;
+    }
 
-    const connectWS = () => {
-      if (!isMountedRef.current) return;
+    feedServiceRef.current = new DerivFeedService(activeAsset.symbol, {
+      onTick: (event) => {
+        handleLiveTick(event.price, false);
+      },
+      onHistory: (historyEvent) => {
+        const { prices, times } = historyEvent;
+        if (prices.length > 0) {
+          // Prefill internal buffer
+          const safeHistory = prices.slice(-120);
+          historyRef.current = safeHistory;
+          onTicksUpdate?.([...safeHistory]);
 
-      try {
-        if (wsRef.current) {
-          wsRef.current.onclose = null;
-          wsRef.current.onerror = null;
-          wsRef.current.close();
-        }
+          const latest = prices[prices.length - 1];
+          currentPriceRef.current = latest;
+          setCurrentPrice(latest);
+          onPriceUpdate?.(latest);
 
-        setFeedStatus('RECONNECTING');
-        onFeedStatusChange?.(false, 'RECONNECTING');
-
-        const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089');
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          if (!isMountedRef.current) return;
-          backoffMsRef.current = 1000; // Reset backoff on successful connect
-          setFeedStatus('LIVE');
-          onFeedStatusChange?.(true, 'LIVE');
-
-          // Subscribe to active asset ticks
-          ws.send(JSON.stringify({ forget_all: 'ticks' }));
-          ws.send(JSON.stringify({ ticks: activeAsset.symbol, subscribe: 1 }));
-        };
-
-        ws.onmessage = (event) => {
-          if (!isMountedRef.current) return;
-          try {
-            const data = JSON.parse(event.data);
-            if (data.tick && data.tick.symbol === activeAsset.symbol) {
-              const quote = parseFloat(data.tick.quote);
-              if (!isNaN(quote)) {
-                processNewTick(quote, false);
-              }
-            }
-          } catch {
-            // Ignore parse errors
+          // Populate timestamped ticks in quantEngine
+          for (let i = 0; i < prices.length; i++) {
+            const t = times[i] || (Math.floor(Date.now() / 1000) - (prices.length - i));
+            pushAssetTick(activeAsset.symbol, prices[i], t);
           }
-        };
-
-        ws.onclose = () => {
-          if (!isMountedRef.current) return;
-          setFeedStatus('RECONNECTING');
-          onFeedStatusChange?.(false, 'RECONNECTING');
-
-          const delay = backoffMsRef.current;
-          backoffMsRef.current = Math.min(16000, backoffMsRef.current * 2); // Exponential backoff up to 16s
-
-          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-          reconnectTimeoutRef.current = setTimeout(connectWS, delay);
-        };
-
-        ws.onerror = () => {
-          if (!isMountedRef.current) return;
-          setFeedStatus('OFFLINE');
-          onFeedStatusChange?.(false, 'OFFLINE');
-        };
-      } catch (e) {
-        console.warn('WS Init notice', e);
-        setFeedStatus('OFFLINE');
-        onFeedStatusChange?.(false, 'OFFLINE');
-      }
-    };
-
-    connectWS();
+        }
+      },
+      onStatusChange: (status, ageSec, endpoint) => {
+        setFeedStatus(status);
+        setLastTickAgeSec(ageSec);
+        setActiveEndpointUrl(endpoint);
+        const isLive = status === 'LIVE' && ageSec <= 10;
+        onFeedStatusChange?.(isLive, status);
+      },
+    });
 
     return () => {
-      isMountedRef.current = false;
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.onerror = null;
-        wsRef.current.close();
+      if (feedServiceRef.current) {
+        feedServiceRef.current.destroy();
+        feedServiceRef.current = null;
       }
     };
-  }, [activeAsset.symbol, processNewTick, onFeedStatusChange]);
+  }, [activeAsset.symbol, handleLiveTick, onFeedStatusChange, onPriceUpdate, onTicksUpdate]);
 
-  // Stale-Tick Watchdog (>2000ms without tick marks feed as STALE / NO LIVE DATA)
-  useEffect(() => {
-    const watchdogInterval = setInterval(() => {
-      const msSinceLastTick = Date.now() - lastTickTimestampRef.current;
-      setLastTickAgoMs(msSinceLastTick);
+  // Manual Reconnect Trigger
+  const handleManualRetry = () => {
+    if (feedServiceRef.current) {
+      feedServiceRef.current.manualRetry();
+    }
+  };
 
-      if (isDemoMode) {
-        return; // Demo mode handles its own ticker
-      }
-
-      if (msSinceLastTick > 2000) {
-        setFeedStatus((prev) => {
-          if (prev === 'LIVE') {
-            onFeedStatusChange?.(false, 'STALE');
-            return 'STALE';
-          }
-          return prev;
-        });
-      }
-    }, 500);
-
-    return () => clearInterval(watchdogInterval);
-  }, [isDemoMode, onFeedStatusChange]);
-
-  // DEMO MODE ONLY: Simulated tick generator for testing/offline simulation
-  // Strict rule: ONLY runs when isDemoMode === true! In production LIVE mode, Math.random ticks are 100% disabled.
+  // Optional Simulated Demo Ticker (ONLY when isDemoMode === true)
   useEffect(() => {
     if (!isDemoMode) return;
 
     const simTimer = setInterval(() => {
       const prev = currentPriceRef.current;
-      const stepSize = (activeAsset.pipSize || 0.0001) * (Math.random() > 0.8 ? 2.2 : 1.1);
+      const stepSize = (activeAsset.pipSize || 0.0001) * (Math.random() > 0.8 ? 2.0 : 1.0);
       const delta = (Math.random() - 0.495) * stepSize;
       const next = Math.max(0.00001, parseFloat((prev + delta).toFixed(activeAsset.decimals || 5)));
-      processNewTick(next, true);
-    }, 750);
+      handleLiveTick(next, true);
+    }, 800);
 
     return () => clearInterval(simTimer);
-  }, [isDemoMode, activeAsset.pipSize, activeAsset.decimals, processNewTick]);
+  }, [isDemoMode, activeAsset.pipSize, activeAsset.decimals, handleLiveTick]);
 
   // Tick Velocity tracking loop
   useEffect(() => {
@@ -266,7 +194,8 @@ export function LiveTicker({
     return () => clearInterval(velInterval);
   }, []);
 
-  const isFeedActive = isDemoMode || (feedStatus === 'LIVE' && lastTickAgoMs <= 2000);
+  // Honest staleness check: LIVE if tick age <= 10s (not 2s)
+  const isFeedActive = isDemoMode || (feedStatus === 'LIVE' && lastTickAgeSec <= 10);
 
   // Filter assets by category
   const filteredAssets = ASSETS.filter((a) => {
@@ -274,26 +203,27 @@ export function LiveTicker({
     if (categoryFilter === 'CRYPTO') return a.type === 'CRYPTO';
     if (categoryFilter === 'FOREX') return a.type === 'FOREX';
     if (categoryFilter === 'SYNTH') return a.type === 'SYNTH' || a.type === 'COMMODITY';
+    if ((categoryFilter as string) === '24X7') return a.type === 'SYNTH' || a.type === 'CRYPTO';
     return true;
   });
 
   return (
-    <div id="live-ticker-container" className="space-y-2">
-      {/* DEMO MODE WARNING BANNER */}
+    <div id="live-ticker-container" className="space-y-2.5">
+      {/* 1. DEMO MODE BANNER (Only displayed if user explicitly toggled DEMO) */}
       {isDemoMode && (
-        <div className="bg-amber-950/70 border border-amber-500/40 rounded-xl p-2.5 text-xs font-mono text-amber-200 flex items-center justify-between gap-3 shadow-md">
+        <div className="bg-amber-950/70 border border-amber-500/40 rounded-2xl p-2.5 sm:p-3 text-xs font-mono text-amber-200 flex items-center justify-between gap-3 shadow-lg">
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span>
-              <strong>SIMULATED DATA (DEMO MODE)</strong> — Replaying simulated volatility for test execution.
-              Outcomes are NOT recorded to live performance ledger.
+            <span className="leading-tight">
+              <strong>SIMULATED DATA (DEMO MODE)</strong> — Replaying offline simulation for testing.
+              Trades are NOT recorded to live performance ledger.
             </span>
           </div>
           {onToggleDemoMode && (
             <button
               type="button"
               onClick={() => onToggleDemoMode(false)}
-              className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-[11px] shrink-0"
+              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs shrink-0 cursor-pointer shadow-sm transition"
             >
               Switch to Live Feed
             </button>
@@ -301,35 +231,97 @@ export function LiveTicker({
         </div>
       )}
 
-      {/* FEED STALE / NO LIVE DATA ALERT */}
-      {!isDemoMode && !isFeedActive && (
-        <div className="bg-rose-950/70 border border-rose-500/40 rounded-xl p-2.5 text-xs font-mono text-rose-200 flex items-center justify-between gap-3 shadow-md">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-ping shrink-0" />
-            <div>
-              <strong>NO LIVE DATA</strong> — Deriv WebSocket feed for {activeAsset.name} is {feedStatus.toLowerCase()} (last tick: {(lastTickAgoMs / 1000).toFixed(1)}s ago).
-              Signal generation is paused to protect capital.
+      {/* 2. MARKET CLOSED (WEEKEND) INTELLIGENT HELPER */}
+      {!isDemoMode && feedStatus === 'MARKET_CLOSED' && (
+        <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-3 text-xs font-mono text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-in fade-in">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" />
+            <div className="leading-tight text-slate-300">
+              <strong className="text-white block font-bold">
+                🏛️ Global Interbank Forex Market Closed (Weekend)
+              </strong>
+              <span>
+                {activeAsset.name} reopens Sunday 5:00 PM EST (21:00 UTC). Volatility Synthetics and Crypto operate 24/7/365 with uninterrupted live tick streams!
+              </span>
             </div>
           </div>
-          {onToggleDemoMode && (
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
             <button
               type="button"
-              onClick={() => onToggleDemoMode(true)}
-              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 rounded-lg text-[11px] shrink-0 font-bold"
+              onClick={() => {
+                const vol100 = ASSETS.find((a) => a.symbol === 'R_100');
+                if (vol100) onAssetChange(vol100);
+              }}
+              className="px-2.5 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-sm"
             >
-              Enable Demo Mode
+              <span>⚡ Switch to VOL 100 (24/7)</span>
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => {
+                const btc = ASSETS.find((a) => a.symbol === 'cryBTCUSD');
+                if (btc) onAssetChange(btc);
+              }}
+              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-sm"
+            >
+              <span>🪙 BTC/USD</span>
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Top Bar: Feed Status & Category Selector + VIP Screener Trigger */}
+      {/* 3. RECONNECTING / STALE FEED NOTICE WITH DIRECT RETRY (No forced demo push) */}
+      {!isDemoMode && !isFeedActive && feedStatus !== 'MARKET_CLOSED' && (
+        <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-2.5 sm:p-3 text-xs font-mono text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-lg">
+          <div className="flex items-center gap-2.5">
+            <span
+              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                feedStatus === 'RECONNECTING'
+                  ? 'bg-amber-400 animate-pulse'
+                  : feedStatus === 'STALE'
+                  ? 'bg-amber-400'
+                  : 'bg-rose-500 animate-ping'
+              }`}
+            />
+            <div className="leading-tight text-slate-300">
+              <strong className="text-white block font-bold">
+                {feedStatus === 'RECONNECTING'
+                  ? 'Reconnecting to Deriv Live Market Feed...'
+                  : feedStatus === 'STALE'
+                  ? `Live Feed Awaiting Next Tick (${lastTickAgeSec}s age)`
+                  : 'Live Feed Temporarily Disconnected'}
+              </strong>
+              <span>
+                {activeAsset.name} feed {feedStatus.toLowerCase()} (last tick {lastTickAgeSec > 0 ? `${lastTickAgeSec}s ago` : 'just now'}).
+                Signal generation is paused until fresh ticks arrive.
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+            <button
+              type="button"
+              onClick={handleManualRetry}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-750 text-emerald-400 border border-emerald-500/40 hover:border-emerald-400 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+              title="Force immediate reconnection attempt"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>Retry connection</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 4. TOP TELEMETRY BAR: Category Selector + Live Status Pill + VIP Screener */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         {/* Category Filter Pills */}
-        <div className="flex items-center gap-1 overflow-x-auto pb-1 sm:pb-0 scrollbar-none text-[11px] font-mono">
+        <div className="flex items-center gap-1 overflow-x-auto pb-1 sm:pb-0 scrollbar-none text-xs font-mono">
           {[
-            { id: 'ALL', label: 'All (15)' },
-            { id: 'FOREX', label: 'Forex (7)' },
+            { id: 'ALL', label: 'All (16)' },
+            { id: '24X7', label: '⚡ 24/7 Active (8)' },
+            { id: 'FOREX', label: 'Forex (8)' },
             { id: 'CRYPTO', label: 'Crypto (2)' },
             { id: 'SYNTH', label: 'Synthetics & Gold (6)' },
           ].map((cat) => (
@@ -337,9 +329,9 @@ export function LiveTicker({
               key={cat.id}
               type="button"
               onClick={() => setCategoryFilter(cat.id as any)}
-              className={`px-2.5 py-1 rounded-lg font-bold transition shrink-0 ${
+              className={`px-2.5 sm:px-3 py-1.5 rounded-xl font-bold transition shrink-0 ${
                 categoryFilter === cat.id
-                  ? 'bg-slate-800 text-white border border-slate-700'
+                  ? 'bg-slate-800 text-white border border-slate-700 shadow-sm'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
               }`}
             >
@@ -348,15 +340,15 @@ export function LiveTicker({
           ))}
         </div>
 
-        {/* Right side: VIP Screener button + Stream status + Live/Demo Toggle */}
-        <div className="flex items-center gap-2">
+        {/* Right side: VIP Radar button + Status Pill + App ID indicator */}
+        <div className="flex items-center gap-2 flex-wrap">
           {onOpenVipRadar && (
             <button
               type="button"
               id="vip-radar-screener-btn"
               data-tour="radar-control"
               onClick={onOpenVipRadar}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-xl bg-gradient-to-r from-amber-500/20 to-amber-400/20 hover:from-amber-500/30 hover:to-amber-400/30 border border-amber-500/40 text-amber-400 font-mono text-xs font-black shadow-md shadow-amber-500/10 transition"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/20 to-amber-400/20 hover:from-amber-500/30 hover:to-amber-400/30 border border-amber-500/40 text-amber-400 font-mono text-xs font-black shadow-md shadow-amber-500/10 transition"
               title="Open Real-Time Trade Screener"
             >
               <svg className="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -366,61 +358,83 @@ export function LiveTicker({
             </button>
           )}
 
-          {/* Honest Connection Health Indicator */}
-          <div className="flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 rounded-xl border bg-slate-900/80 border-slate-800">
+          {/* STATUS PILL (LIVE / RECONNECTING / OFFLINE / STALE / MARKET_CLOSED) */}
+          <div
+            className={`flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-xl border transition shadow-sm ${
+              isDemoMode
+                ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                : feedStatus === 'LIVE' && lastTickAgeSec <= 10
+                ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
+                : feedStatus === 'MARKET_CLOSED'
+                ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                : feedStatus === 'RECONNECTING'
+                ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
+                : 'bg-rose-950/40 border-rose-500/40 text-rose-300'
+            }`}
+            title={`Deriv WebSocket Feed: ${activeEndpointUrl || 'Connecting'}`}
+          >
             <span
               className={`w-2 h-2 rounded-full ${
                 isDemoMode
                   ? 'bg-amber-400'
-                  : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
+                  : feedStatus === 'LIVE' && lastTickAgeSec <= 10
                   ? 'bg-emerald-400 animate-pulse'
+                  : feedStatus === 'MARKET_CLOSED'
+                  ? 'bg-amber-400'
                   : feedStatus === 'RECONNECTING'
                   ? 'bg-amber-400 animate-pulse'
                   : 'bg-rose-500'
               }`}
             />
-            <span
-              className={`font-bold ${
-                isDemoMode
-                  ? 'text-amber-300'
-                  : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
-                  ? 'text-emerald-400'
-                  : feedStatus === 'RECONNECTING'
-                  ? 'text-amber-400'
-                  : 'text-rose-400'
-              }`}
-            >
+            <span className="font-bold">
               {isDemoMode
                 ? 'SIMULATED DEMO'
-                : feedStatus === 'LIVE' && lastTickAgoMs <= 2000
-                ? 'DERIV LIVE'
+                : feedStatus === 'LIVE' && lastTickAgeSec <= 10
+                ? 'LIVE'
+                : feedStatus === 'MARKET_CLOSED'
+                ? 'WEEKEND CLOSED'
                 : feedStatus === 'RECONNECTING'
-                ? 'RECONNECTING'
-                : 'NO LIVE DATA'}
+                ? `RECONNECTING ${lastTickAgeSec > 0 ? `(${lastTickAgeSec}s)` : ''}`
+                : feedStatus === 'STALE'
+                ? `STALE (${lastTickAgeSec}s)`
+                : 'OFFLINE'}
             </span>
           </div>
 
-          {/* Mode Switcher (Live vs Demo) */}
-          {onToggleDemoMode && (
+          {/* App ID Info / Dev Note */}
+          <div className="relative">
             <button
               type="button"
-              onClick={() => onToggleDemoMode(!isDemoMode)}
-              className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border transition ${
-                isDemoMode
-                  ? 'bg-amber-500/20 border-amber-500/40 text-amber-300'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
-              }`}
-              title="Toggle Simulated Demo Mode for practice"
+              onClick={() => setShowAppIdNotice((v) => !v)}
+              className="px-2 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono"
+              title="Deriv WebSocket App ID Status"
             >
-              {isDemoMode ? '🧪 DEMO' : '⚡ LIVE'}
+              <span>ID: {ACTIVE_APP_ID}</span>
             </button>
-          )}
+
+            {showAppIdNotice && (
+              <div className="absolute right-0 top-9 w-64 p-3 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl z-30 font-mono text-xs space-y-2 text-slate-300">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-1">
+                  <span className="font-bold text-white">Deriv Feed Config</span>
+                  <button type="button" onClick={() => setShowAppIdNotice(false)} className="text-slate-400 hover:text-white">✕</button>
+                </div>
+                <p className="text-[11px] leading-tight text-slate-300">
+                  {IS_CUSTOM_APP_ID_CONFIGURED
+                    ? `Using custom App ID: ${ACTIVE_APP_ID}`
+                    : `Using Deriv Public Tier ID (1089). To register your own App ID, visit api.deriv.com and set VITE_DERIV_APP_ID in your environment.`}
+                </p>
+                <div className="text-[10px] text-emerald-400">
+                  Endpoint: {activeEndpointUrl ? new URL(activeEndpointUrl).hostname : 'ws.derivws.com'}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Asset Grid Selection */}
+      {/* 4. ASSET SELECTOR TABS */}
       <div className="overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-slate-800">
-        <div className="flex items-center gap-1.5 min-w-max" id="asset-selector-tabs" data-tour="asset-selector">
+        <div className="flex items-center gap-2 min-w-max" id="asset-selector-tabs" data-tour="asset-selector">
           {filteredAssets.map((asset) => {
             const isActive = asset.symbol === activeAsset.symbol;
             return (
@@ -429,14 +443,14 @@ export function LiveTicker({
                 type="button"
                 id={`tab-${asset.symbol}`}
                 onClick={() => onAssetChange(asset)}
-                className={`py-2 px-3 rounded-xl text-left transition-all shrink-0 ${
+                className={`py-2 px-3 rounded-xl text-left transition-all shrink-0 cursor-pointer ${
                   isActive
                     ? 'bg-slate-900 border border-emerald-500 shadow-md shadow-emerald-500/10'
                     : 'bg-slate-900/60 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
                 }`}
               >
                 <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 leading-none">
-                  <span className="px-1 py-0.2 rounded bg-slate-800 text-[9px] font-bold text-slate-300">
+                  <span className="px-1 py-0.5 rounded bg-slate-800 text-[10px] font-bold text-slate-300">
                     {asset.type}
                   </span>
                 </div>
@@ -449,7 +463,7 @@ export function LiveTicker({
         </div>
       </div>
 
-      {/* TradingView Lightweight Charts Live Terminal */}
+      {/* 5. TRADINGVIEW LIGHTWEIGHT CHARTS LIVE TERMINAL */}
       <div data-tour="live-ticker">
         <ErrorBoundary fallbackTitle="Chart Telemetry Initializing...">
           <LiveChart

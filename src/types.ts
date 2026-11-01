@@ -453,6 +453,8 @@ export interface NowPaymentsPayment {
   actuallyPaid?: number;
 }
 
+export type FeedHealthStatus = 'LIVE' | 'RECONNECTING' | 'STALE' | 'OFFLINE' | 'MARKET_CLOSED';
+
 export type PageView =
   | 'landing'
   | 'cockpit'
@@ -464,8 +466,6 @@ export type PageView =
   | 'terms'
   | 'privacy'
   | 'risk'
-  | 'cookies'
-  | 'files'
-  | 'supabase';
+  | 'cookies';
 
 export type AuthModalMode = 'login' | 'register' | 'profile' | 'redeem-vip' | null;

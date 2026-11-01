@@ -269,50 +269,41 @@ export function VipSafeRadarModal({
 
         {/* Main List Container with VIP gating */}
         <div className="relative flex-1 p-3 sm:p-6 overflow-y-auto">
-          {!isVIP ? (
-            <div className="w-full h-full min-h-[360px] bg-slate-950 flex flex-col items-center justify-center p-4 sm:p-6 text-center space-y-4 select-none rounded-2xl border border-amber-500/20">
-              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl sm:rounded-3xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 shadow-xl shrink-0">
-                <svg className="w-7 h-7 sm:w-8 sm:h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
+          {/* Non-VIP Top Conversion Banner */}
+          {!isVIP && (
+            <div className="mb-4 bg-gradient-to-r from-amber-500/15 via-slate-900 to-amber-500/15 border border-amber-500/40 rounded-2xl p-3 sm:p-4 text-xs font-mono flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg animate-in fade-in">
+              <div className="flex items-center gap-2.5">
+                <span className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 text-base font-bold">★</span>
+                <div>
+                  <strong className="text-white block font-bold text-xs sm:text-sm">
+                    Free Screener Preview (Top 2 Active Markets Live)
+                  </strong>
+                  <span className="text-slate-300 text-[11px] block mt-0.5">
+                    Upgrade to 30-Day VIP to unlock 24/7 scanning across all 16 assets with instant 5/5 confluence alarms.
+                  </span>
+                </div>
               </div>
-
-              <div className="max-w-md space-y-2">
-                <h3 className="text-lg sm:text-xl font-black font-mono text-white tracking-tight">
-                  VIP PASS REQUIRED FOR REAL-TIME SCREENER
-                </h3>
-                <p className="text-xs text-slate-300 leading-relaxed">
-                  Registered VIP members enjoy 24/7 continuous multi-asset screener updates, safety ratings across all coins &amp; stocks, and instant optimal safe close timing recommendations.
-                </p>
-              </div>
-
-              <div className="flex flex-col sm:flex-row gap-2.5 pt-2 w-full max-w-sm">
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    handleUpgrade();
-                  }}
-                  className="w-full min-h-[44px] py-3 px-6 rounded-2xl bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black font-mono text-xs sm:text-sm shadow-xl shadow-amber-500/20 transition cursor-pointer active:scale-98"
-                >
-                  UPGRADE TO VIP (UNLIMITED)
-                </button>
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="w-full min-h-[44px] py-3 px-5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-300 font-mono text-xs sm:text-sm transition border border-slate-800 cursor-pointer active:scale-98"
-                >
-                  Close Preview
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  handleUpgrade();
+                }}
+                className="w-full sm:w-auto px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black rounded-xl text-xs shrink-0 cursor-pointer shadow-md shadow-amber-500/20 transition active:scale-98"
+              >
+                ★ UPGRADE TO VIP ($49)
+              </button>
             </div>
-          ) : filteredItems.length === 0 ? (
+          )}
+
+          {filteredItems.length === 0 ? (
             <div className="text-center py-12 text-slate-400 font-mono text-xs">
               No assets match your current filter. Try selecting &quot;All Assets&quot;.
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {filteredItems.map((item) => {
+              {filteredItems.map((item, index) => {
+                const isLockedForNonVip = !isVIP && index >= 2;
                 const fullAssetConfig = ASSETS.find((a) => a.symbol === item.symbol) || {
                   symbol: item.symbol,
                   name: item.name,
@@ -328,14 +319,30 @@ export function VipSafeRadarModal({
                 return (
                   <div
                     key={item.symbol}
-                    className={`bg-slate-950 border rounded-2xl p-3.5 sm:p-4 transition flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4 font-mono ${
-                      isSafe
+                    className={`relative bg-slate-950 border rounded-2xl p-3.5 sm:p-4 transition flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4 font-mono overflow-hidden ${
+                      isLockedForNonVip
+                        ? 'border-slate-800/60 opacity-60'
+                        : isSafe
                         ? 'border-emerald-500/50 bg-gradient-to-r from-emerald-950/25 via-slate-950 to-slate-950 hover:border-emerald-400'
                         : item.safetyRating === 'MODERATE RISK'
                         ? 'border-amber-500/30 bg-gradient-to-r from-amber-950/15 via-slate-950 to-slate-950 hover:border-amber-500/50'
                         : 'border-slate-800/80 hover:border-slate-700'
                     }`}
                   >
+                    {isLockedForNonVip && (
+                      <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-[2px] z-10 flex items-center justify-center p-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onClose();
+                            handleUpgrade();
+                          }}
+                          className="px-3.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 font-bold text-xs flex items-center gap-1.5 transition shadow-lg active:scale-95"
+                        >
+                          <span>🔒 VIP Locked: {item.name} — Tap to Unlock All Assets</span>
+                        </button>
+                      </div>
+                    )}
                     {/* Row 1/Col 1: Asset details & Price */}
                     <div className="flex items-center justify-between md:justify-start gap-3 min-w-[200px]">
                       <div className="flex items-center gap-3">
