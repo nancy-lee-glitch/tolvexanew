@@ -286,13 +286,14 @@ export function LiveTicker({
             <div className="leading-tight text-slate-300">
               <strong className="text-white block font-bold">
                 {feedStatus === 'RECONNECTING'
-                  ? 'Reconnecting to Deriv Live Market Feed...'
+                  ? 'Connecting to Deriv Live Market Feed...'
                   : feedStatus === 'STALE'
-                  ? `Live Feed Awaiting Next Tick (${lastTickAgeSec}s age)`
+                  ? `Live Feed Awaiting Next Tick ${lastTickAgeSec > 0 && lastTickAgeSec < 60 ? `(${lastTickAgeSec}s)` : ''}`
                   : 'Live Feed Temporarily Disconnected'}
               </strong>
               <span>
-                {activeAsset.name} feed {feedStatus.toLowerCase()} (last tick {lastTickAgeSec > 0 ? `${lastTickAgeSec}s ago` : 'just now'}).
+                {activeAsset.name} feed {feedStatus.toLowerCase()}
+                {lastTickAgeSec > 0 && lastTickAgeSec < 60 ? ` (last tick ${lastTickAgeSec}s ago)` : ' (awaiting initial quote)'}.
                 Signal generation is paused until fresh ticks arrive.
               </span>
             </div>
@@ -394,9 +395,9 @@ export function LiveTicker({
                 : feedStatus === 'MARKET_CLOSED'
                 ? 'WEEKEND CLOSED'
                 : feedStatus === 'RECONNECTING'
-                ? `RECONNECTING ${lastTickAgeSec > 0 ? `(${lastTickAgeSec}s)` : ''}`
+                ? `RECONNECTING ${lastTickAgeSec > 0 && lastTickAgeSec < 60 ? `(${lastTickAgeSec}s)` : ''}`
                 : feedStatus === 'STALE'
-                ? `STALE (${lastTickAgeSec}s)`
+                ? `STALE ${lastTickAgeSec > 0 && lastTickAgeSec < 60 ? `(${lastTickAgeSec}s)` : ''}`
                 : 'OFFLINE'}
             </span>
           </div>

@@ -291,25 +291,29 @@ export class DerivFeedService {
       if (this.isDestroyed) return;
 
       const now = Date.now();
-      const ageMs = this.lastTickTimestamp > 0 ? now - this.lastTickTimestamp : 999999;
-      const ageSec = Math.floor(ageMs / 1000);
+      const ageMs = this.lastTickTimestamp > 0 ? now - this.lastTickTimestamp : 0;
+      const ageSec = this.lastTickTimestamp > 0 ? Math.floor(ageMs / 1000) : 0;
       const isClosedWeekend = isWeekendForexClosed(this.activeSymbol);
 
+      // 1. If global market is closed for weekend, always report MARKET_CLOSED
+      if (isClosedWeekend) {
+        this.updateStatus('MARKET_CLOSED', 0);
+        return;
+      }
+
+      // 2. Market is open: evaluate live stream health
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         if (this.lastTickTimestamp > 0 && ageMs <= 10000) {
           this.updateStatus('LIVE', ageSec);
-        } else if (isClosedWeekend) {
-          // Connected but asset is closed for the weekend
-          this.updateStatus('MARKET_CLOSED', ageSec);
         } else if (this.lastTickTimestamp > 0 && ageMs > 10000) {
           // Socket open but no tick in >10s
           this.updateStatus('STALE', ageSec);
         } else {
-          // Connected, awaiting initial history/tick
-          this.updateStatus('RECONNECTING', ageSec);
+          // Connected, awaiting initial history/tick quote
+          this.updateStatus('RECONNECTING', 0);
         }
       } else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
-        this.updateStatus(isClosedWeekend ? 'MARKET_CLOSED' : 'RECONNECTING', ageSec);
+        this.updateStatus('RECONNECTING', 0);
       } else {
         // Closed / in backoff
         const isSustained = this.consecutiveFailures >= 4;
