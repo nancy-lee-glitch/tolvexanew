@@ -924,3 +924,72 @@ export async function logOutcomeToSupabase(outcome: 'WIN' | 'LOSS', signal: any,
     return false;
   }
 }
+
+/**
+ * Send password reset email instructions via Supabase Auth
+ */
+export async function sendPasswordResetEmail(email: string): Promise<{ success: boolean; message: string }> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return {
+      success: false,
+      message: 'Supabase authentication service is currently not connected.',
+    };
+  }
+
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    return {
+      success: false,
+      message: 'Please provide a valid email address.',
+    };
+  }
+
+  try {
+    const redirectTo = typeof window !== 'undefined'
+      ? `${window.location.origin}/?view=reset-password`
+      : undefined;
+
+    const { error } = await client.auth.resetPasswordForEmail(cleanEmail, {
+      redirectTo,
+    });
+
+    if (error) {
+      return { success: false, message: error.message };
+    }
+
+    return {
+      success: true,
+      message: `Password reset instructions have been sent to ${cleanEmail}. Please check your inbox and spam folder.`,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Unable to process password reset request at this time.',
+    };
+  }
+}
+
+/**
+ * Update user password after clicking the reset link
+ */
+export async function updateUserPassword(newPassword: string): Promise<{ success: boolean; message: string }> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return { success: false, message: 'Authentication service not available.' };
+  }
+
+  if (!newPassword || newPassword.length < 6) {
+    return { success: false, message: 'Password must be at least 6 characters long.' };
+  }
+
+  try {
+    const { error } = await client.auth.updateUser({ password: newPassword });
+    if (error) {
+      return { success: false, message: error.message };
+    }
+    return { success: true, message: 'Your password has been successfully updated! You can now log in.' };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Failed to update password.' };
+  }
+}

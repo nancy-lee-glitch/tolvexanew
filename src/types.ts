@@ -468,4 +468,4 @@ export type PageView =
   | 'risk'
   | 'cookies';
 
-export type AuthModalMode = 'login' | 'register' | 'profile' | 'redeem-vip' | null;
+export type AuthModalMode = 'login' | 'register' | 'profile' | 'redeem-vip' | 'forgot-password' | 'reset-password' | null;

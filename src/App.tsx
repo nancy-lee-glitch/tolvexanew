@@ -70,15 +70,18 @@ export default function App() {
     return () => window.removeEventListener('pulsetrade_brokers_changed', handleBrokersChanged);
   }, []);
 
-  // Check secret URL param ?view=admin or ?view=pricing on initial load
+  // Check secret URL param ?view=admin, ?view=pricing, or ?view=reset-password on initial load
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       const viewParam = params.get('view');
+      const hash = window.location.hash || '';
       if (viewParam === 'admin') {
         setCurrentPage('admin');
       } else if (viewParam === 'pricing') {
         setCurrentPage('pricing');
+      } else if (viewParam === 'reset-password' || hash.includes('type=recovery')) {
+        setAuthModalMode('reset-password');
       }
     }
   }, []);
@@ -147,7 +150,9 @@ export default function App() {
     if (client) {
       const { data: authListener } = client.auth.onAuthStateChange(async (event, session) => {
         if (!isMounted) return;
-        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+        if (event === 'PASSWORD_RECOVERY') {
+          setAuthModalMode('reset-password');
+        } else if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
           if (session?.user) {
             const freshUser = await getCurrentSupabaseUser();
             if (isMounted && freshUser) {
