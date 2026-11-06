@@ -632,6 +632,7 @@ export default function App() {
                 onOpenAuth={(mode) => setAuthModalMode(mode)}
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
                 isFeedActive={isFeedActive}
+                feedHealthStatus={feedHealthStatus}
                 isDemoMode={isDemoMode}
               />
 

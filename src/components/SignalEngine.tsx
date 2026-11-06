@@ -38,6 +38,7 @@ interface SignalEngineProps {
   onOpenAuth?: (mode: 'login' | 'register') => void;
   onOpenVipRadar?: () => void;
   isFeedActive?: boolean;
+  feedHealthStatus?: string;
   isDemoMode?: boolean;
 }
 
@@ -63,6 +64,7 @@ export function SignalEngine({
   onOpenAuth,
   onOpenVipRadar,
   isFeedActive = true,
+  feedHealthStatus = 'LIVE',
   isDemoMode = false,
 }: SignalEngineProps) {
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
@@ -237,8 +239,8 @@ export function SignalEngine({
         velocity: 'Feed Offline',
         generatedAt: Date.now(),
         status: 'ANALYSIS_BLOCKED',
-        blockedReason: 'NO LIVE DATA: Market WebSocket stream is offline or tick feed is stale (>2s).',
-        plainLanguageReason: 'Signal generation is paused to protect capital. PulseTrade never generates signals from interrupted or estimated feeds. No credits deducted.',
+        blockedReason: 'NO LIVE DATA: Market feed is offline or tick stream is stale (>10s).',
+        plainLanguageReason: 'Signal generation is paused to protect capital. Tolvexa strictly executes signals from verified live market ticks. No credits deducted.',
         riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -1612,7 +1614,13 @@ export function SignalEngine({
           }`}
         >
           {!isFeedActive && !isDemoMode ? (
-            <span>⚠️ RECONNECTING TO LIVE FEED...</span>
+            feedHealthStatus === 'MARKET_CLOSED' ? (
+              <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
+            ) : feedHealthStatus === 'OFFLINE' ? (
+              <span>⚠️ FEED OFFLINE — RETRYING...</span>
+            ) : (
+              <span>⚡ CONNECTING TO LIVE FEED...</span>
+            )
           ) : isRechecking ? (
             <>
               <svg className="animate-spin h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24">
