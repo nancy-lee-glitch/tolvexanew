@@ -407,7 +407,7 @@ export function LiveTicker({
             <button
               type="button"
               onClick={() => setShowAppIdNotice((v) => !v)}
-              className="px-2 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono"
+              className="px-2 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 text-xs font-mono cursor-pointer"
               title="Deriv WebSocket App ID Status"
             >
               <span>ID: {ACTIVE_APP_ID}</span>
@@ -417,7 +417,7 @@ export function LiveTicker({
               <div className="absolute right-0 top-9 w-64 p-3 bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl z-30 font-mono text-xs space-y-2 text-slate-300">
                 <div className="flex items-center justify-between border-b border-slate-800 pb-1">
                   <span className="font-bold text-white">Deriv Feed Config</span>
-                  <button type="button" onClick={() => setShowAppIdNotice(false)} className="text-slate-400 hover:text-white">✕</button>
+                  <button type="button" onClick={() => setShowAppIdNotice(false)} className="text-slate-400 hover:text-white cursor-pointer">✕</button>
                 </div>
                 <p className="text-[11px] leading-tight text-slate-300">
                   {IS_CUSTOM_APP_ID_CONFIGURED

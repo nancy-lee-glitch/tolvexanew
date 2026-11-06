@@ -23,10 +23,21 @@ export interface DerivHistoryEvent {
   symbol: string;
 }
 
+export interface DerivAccountInfo {
+  loginid: string;
+  balance: number;
+  currency: string;
+  email: string;
+  isVirtual: boolean;
+  fullname?: string;
+}
+
 export interface DerivFeedCallbacks {
   onTick: (event: DerivTickEvent) => void;
   onHistory?: (event: DerivHistoryEvent) => void;
   onStatusChange: (status: FeedHealthStatus, ageSeconds: number, activeEndpoint: string) => void;
+  onAccountUpdate?: (account: DerivAccountInfo | null) => void;
+  onAccountError?: (errorMsg: string) => void;
 }
 
 // Production App ID from env with fallback to Deriv official public test ID (1089)
@@ -61,12 +72,59 @@ export class DerivFeedService {
   private lastPingSentTime = 0;
   private isPollingRest = false;
   private lastRestPollTime = 0;
+  private accountToken = '';
+  private accountInfo: DerivAccountInfo | null = null;
 
   constructor(initialSymbol: string, callbacks: DerivFeedCallbacks) {
     this.activeSymbol = initialSymbol || 'frxEURUSD';
     this.callbacks = callbacks;
+    if (typeof window !== 'undefined') {
+      try {
+        this.accountToken = localStorage.getItem('tolvexa_deriv_token') || '';
+      } catch {}
+    }
     this.startWatchdog();
     this.connect();
+  }
+
+  public authorizeAccount(token: string) {
+    this.accountToken = (token || '').trim();
+    if (typeof window !== 'undefined') {
+      try {
+        if (this.accountToken) {
+          localStorage.setItem('tolvexa_deriv_token', this.accountToken);
+        } else {
+          localStorage.removeItem('tolvexa_deriv_token');
+        }
+      } catch {}
+    }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      if (this.accountToken) {
+        try {
+          this.ws.send(JSON.stringify({ authorize: this.accountToken }));
+        } catch (err) {
+          console.warn('[DerivFeed] Authorize request failed', err);
+        }
+      } else {
+        this.accountInfo = null;
+        this.callbacks.onAccountUpdate?.(null);
+      }
+    }
+  }
+
+  public disconnectAccount() {
+    this.accountToken = '';
+    this.accountInfo = null;
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.removeItem('tolvexa_deriv_token');
+      } catch {}
+    }
+    this.callbacks.onAccountUpdate?.(null);
+  }
+
+  public getAccountInfo(): DerivAccountInfo | null {
+    return this.accountInfo;
   }
 
   public setSymbol(newSymbol: string) {
@@ -130,6 +188,13 @@ export class DerivFeedService {
 
         // 1. Prefill with ~500 ticks history & subscribe
         this.requestHistoryAndSubscribe(this.activeSymbol);
+
+        // 2. Authorize personal token if present
+        if (this.accountToken) {
+          try {
+            this.ws?.send(JSON.stringify({ authorize: this.accountToken }));
+          } catch {}
+        }
       };
 
       ws.onmessage = (event) => {
@@ -191,6 +256,32 @@ export class DerivFeedService {
         return;
       }
 
+      // Handle Authorize Response (Deriv Account Login)
+      if (data.msg_type === 'authorize' && data.authorize) {
+        const a = data.authorize;
+        this.accountInfo = {
+          loginid: a.loginid,
+          balance: parseFloat(a.balance) || 0,
+          currency: a.currency || 'USD',
+          email: a.email || '',
+          isVirtual: Boolean(a.is_virtual),
+          fullname: a.fullname || a.loginid,
+        };
+        this.callbacks.onAccountUpdate?.(this.accountInfo);
+        // Subscribe to real-time balance stream
+        try {
+          this.ws?.send(JSON.stringify({ balance: 1, subscribe: 1 }));
+        } catch {}
+        return;
+      }
+
+      // Handle Real-Time Balance Updates
+      if (data.msg_type === 'balance' && data.balance && this.accountInfo) {
+        this.accountInfo.balance = parseFloat(data.balance.balance) || this.accountInfo.balance;
+        this.callbacks.onAccountUpdate?.({ ...this.accountInfo });
+        return;
+      }
+
       // Handle Historical Ticks Prefill
       if (data.msg_type === 'history' && data.history && Array.isArray(data.history.prices)) {
         const prices = data.history.prices.map((p: any) => parseFloat(p)).filter((p: number) => !isNaN(p));
@@ -231,8 +322,13 @@ export class DerivFeedService {
         return;
       }
 
-      // Handle Server Errors cleanly (e.g. market closed on weekend for forex)
+      // Handle Server Errors cleanly (e.g. market closed on weekend for forex or invalid token)
       if (data.error) {
+        if (data.echo_req?.authorize) {
+          this.accountInfo = null;
+          this.callbacks.onAccountError?.(data.error.message || 'Invalid Deriv API token');
+          return;
+        }
         const errorMsg = String(data.error.message || '').toLowerCase();
         const errorCode = String(data.error.code || '').toLowerCase();
         if (errorCode.includes('marketclosed') || errorMsg.includes('closed') || errorMsg.includes('trading is not allowed')) {
