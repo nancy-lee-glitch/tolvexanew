@@ -1,7 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { UserProfile } from '../types.ts';
 
-// Cache client instance
 let supabaseInstance: SupabaseClient | null = null;
 let currentConfigKey = '';
 
@@ -10,25 +9,22 @@ export interface SupabaseConfig {
   anonKey: string;
 }
 
-// Default credentials provided for project
+// Canonical Supabase Project Credentials (public anon key safe for browser)
 const DEFAULT_SUPABASE_URL = 'https://uhzodamgzhnicifobnjj.supabase.co';
 const DEFAULT_SUPABASE_ANON_KEY =
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVoem9kYW1nemhuaWNpZm9ibmpqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4NDAxNzQsImV4cCI6MjEwNTQxNjE3NH0.SFgqhFDOnZ1bfhI4raCSEhvkmlCTgUDEaJHxAtjMRpA';
 
 /**
- * Get active Supabase configuration from environment or project defaults
+ * Get active Supabase configuration strictly from environment variables or project defaults.
+ * Zero localStorage overrides allowed.
  */
 export function getSupabaseConfig(): SupabaseConfig {
   const meta = import.meta as unknown as { env?: Record<string, string | undefined> };
   const envUrl = meta.env?.VITE_SUPABASE_URL || '';
   const envAnonKey = meta.env?.VITE_SUPABASE_ANON_KEY || '';
 
-  // Check if user set custom Supabase credentials in browser storage
-  const storedUrl = typeof window !== 'undefined' ? localStorage.getItem('pulsetrade_supabase_url') : null;
-  const storedKey = typeof window !== 'undefined' ? localStorage.getItem('pulsetrade_supabase_key') : null;
-
-  const url = (storedUrl || envUrl || DEFAULT_SUPABASE_URL).trim();
-  const anonKey = (storedKey || envAnonKey || DEFAULT_SUPABASE_ANON_KEY).trim();
+  const url = (envUrl || DEFAULT_SUPABASE_URL).trim();
+  const anonKey = (envAnonKey || DEFAULT_SUPABASE_ANON_KEY).trim();
 
   return { url, anonKey };
 }
@@ -73,6 +69,60 @@ export function getSupabaseClient(): SupabaseClient | null {
 }
 
 /**
+ * Robust 10-second fetch wrapper with AbortController and normalized return shape
+ */
+export async function secureFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit
+): Promise<{ ok: boolean; status: number; data?: any; error?: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const res = await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    let json: any = null;
+    try {
+      json = await res.json();
+    } catch {
+      // Non-JSON response
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        error: json?.error || json?.message || `HTTP error ${res.status}`,
+      };
+    }
+
+    return {
+      ok: true,
+      status: res.status,
+      data: json,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      return {
+        ok: false,
+        status: 408,
+        error: 'Network request timed out after 10 seconds. Please check your connection.',
+      };
+    }
+    return {
+      ok: false,
+      status: 0,
+      error: err?.message || 'Unable to establish server connection.',
+    };
+  }
+}
+
+/**
  * Test Supabase connectivity and table presence
  */
 export async function testSupabaseConnection(
@@ -88,53 +138,29 @@ export async function testSupabaseConnection(
     }
 
     const testClient = createClient(url, anonKey);
-    const { data, error } = await testClient.from('active_sessions').select('session_id').limit(5);
+    const { data, error } = await testClient.rpc('online_count');
 
     if (error) {
-      if (error.code === '42P01') {
-        return {
-          success: false,
-          message:
-            'Connected to Supabase project, but tables are missing. Please run supabase_schema.sql in the Supabase SQL Editor.',
-        };
-      }
-      return { success: false, message: `Supabase Error: ${error.message}` };
+      return { success: false, message: `Database Notice: ${error.message}` };
     }
 
     return {
       success: true,
-      message: 'Successfully connected to live Supabase PostgreSQL database!',
-      activeTraders: data?.length || 1,
+      message: 'Successfully connected to Tickvere PostgreSQL database!',
+      activeTraders: Number(data) || 1,
     };
   } catch (err: any) {
-    return { success: false, message: `Connection failed: ${err?.message || 'Unknown network error'}` };
+    return { success: false, message: `Connection failed: ${err?.message || 'Network error'}` };
   }
 }
 
 /**
- * Save user custom Supabase credentials
- */
-export function saveCustomSupabaseConfig(url: string, anonKey: string) {
-  if (typeof window !== 'undefined') {
-    if (url && anonKey) {
-      localStorage.setItem('pulsetrade_supabase_url', url.trim());
-      localStorage.setItem('pulsetrade_supabase_key', anonKey.trim());
-    } else {
-      localStorage.removeItem('pulsetrade_supabase_url');
-      localStorage.removeItem('pulsetrade_supabase_key');
-    }
-    supabaseInstance = null;
-    currentConfigKey = '';
-  }
-}
-
-/**
- * Format a Supabase user into standard UserProfile
+ * Format a Supabase user into standard UserProfile.
+ * Role, VIP status, and credits are strictly derived from the database row.
  */
 export function mapToUserProfile(userObj: any, dbUser?: any): UserProfile {
-  const metadata = userObj?.user_metadata || {};
-  let isVip = Boolean(dbUser?.is_vip || metadata.is_vip);
-  const vipExpiresAt = dbUser?.vip_expires_at || metadata.vip_expires_at || null;
+  let isVip = Boolean(dbUser?.is_vip);
+  const vipExpiresAt = dbUser?.vip_expires_at || null;
 
   let vipDaysLeft = 0;
   let vipHoursLeft = 0;
@@ -151,18 +177,17 @@ export function mapToUserProfile(userObj: any, dbUser?: any): UserProfile {
     }
   }
 
+  const role: 'USER' | 'ADMIN' = dbUser?.role === 'ADMIN' ? 'ADMIN' : 'USER';
   const email = (userObj?.email || dbUser?.email || '').toLowerCase();
-  const isAdmin = email === 'durodoluwa5@gmail.com' || dbUser?.role === 'ADMIN' || metadata.role === 'ADMIN';
-  const role: 'USER' | 'ADMIN' = isAdmin ? 'ADMIN' : 'USER';
 
   let credits = 10;
-  if (isAdmin || isVip) {
+  if (role === 'ADMIN' || isVip) {
     credits = 9999;
   } else if (typeof dbUser?.credits === 'number') {
     credits = dbUser.credits;
-  } else if (typeof metadata.credits === 'number') {
-    credits = metadata.credits;
   }
+
+  const metadata = userObj?.user_metadata || {};
 
   return {
     id: dbUser?.id || (userObj?.id ? parseInt(String(userObj.id).replace(/\D/g, '').slice(0, 8)) || 1 : 1),
@@ -179,129 +204,55 @@ export function mapToUserProfile(userObj: any, dbUser?: any): UserProfile {
 }
 
 /**
- * Supabase Auth: Register new user (100% Client-Side, No /api.php dependency)
+ * Register new user with server-side validation & anti-abuse checks via /api/auth/register
  */
 export async function signUpWithSupabase(
   email: string,
   password: string,
   username: string,
   vipKey?: string,
-  bonusCredits: number = 0
+  _extraCredits?: number
 ): Promise<{ success: boolean; user?: UserProfile; message: string }> {
   const trimmedEmail = (email || '').trim().toLowerCase();
   const trimmedUsername = (username || '').trim();
   const cleanPassword = password || '';
 
-  // 1. Input Validation
   if (!trimmedUsername || trimmedUsername.length < 3) {
     return { success: false, message: 'Username must be at least 3 characters long.' };
   }
   if (trimmedUsername.length > 30) {
     return { success: false, message: 'Username cannot exceed 30 characters.' };
   }
-
-  if (!trimmedEmail) {
-    return { success: false, message: 'Email address is required.' };
-  }
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(trimmedEmail)) {
+  if (!trimmedEmail || !trimmedEmail.includes('@')) {
     return { success: false, message: 'Please enter a valid email address.' };
   }
-
   if (!cleanPassword || cleanPassword.length < 6) {
     return { success: false, message: 'Password must be at least 6 characters long.' };
   }
 
-  const client = getSupabaseClient();
-  if (!client) {
-    return {
-      success: false,
-      message: 'Supabase client is unavailable. Please verify connection credentials.',
-    };
-  }
+  // 1. Call serverless registration endpoint
+  const regResult = await secureFetch('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: trimmedUsername,
+      email: trimmedEmail,
+      password: cleanPassword,
+    }),
+  });
 
-  try {
-    const cleanVipKey = (vipKey || '').trim().toUpperCase();
-    const VALID_VIP_KEYS = ['VIP-ALPHA-30D', 'PULSE-VIP-2026', 'QUANT-30D', 'VIP-TRADER-1M'];
-    let isValidVip = Boolean(cleanVipKey && VALID_VIP_KEYS.includes(cleanVipKey));
-    let vipDurationDays = 30;
-
-    // Check if cleanVipKey matches any active, unredeemed admin-generated VIP code in DB
-    if (!isValidVip && cleanVipKey) {
-      try {
-        const { data: codeRow } = await client
-          .from('vip_codes')
-          .select('*')
-          .eq('code', cleanVipKey)
-          .eq('is_active', true)
-          .eq('is_redeemed', false)
-          .maybeSingle();
-
-        if (codeRow) {
-          isValidVip = true;
-          vipDurationDays = codeRow.duration_days || 30;
-          await client.from('vip_codes').update({
-            is_redeemed: true,
-            redeemed_by_email: trimmedEmail,
-            redeemed_at: new Date().toISOString(),
-          }).eq('code', cleanVipKey);
-        } else {
-          // Check app_settings fallback
-          const { data: setRow } = await client
-            .from('app_settings')
-            .select('value')
-            .eq('key', 'vip_codes')
-            .maybeSingle();
-
-          if (setRow?.value && Array.isArray(setRow.value)) {
-            const list = [...setRow.value];
-            const idx = list.findIndex(
-              (c: any) => c.code && c.code.toUpperCase() === cleanVipKey && c.is_active && !c.is_redeemed
-            );
-            if (idx >= 0) {
-              isValidVip = true;
-              vipDurationDays = list[idx].duration_days || 30;
-              list[idx].is_redeemed = true;
-              list[idx].redeemed_by = trimmedUsername;
-              list[idx].redeemed_by_email = trimmedEmail;
-              list[idx].redeemed_at = new Date().toISOString();
-              await client.from('app_settings').upsert({
-                key: 'vip_codes',
-                value: list,
-                updated_at: new Date().toISOString(),
-              });
-              if (typeof window !== 'undefined') {
-                localStorage.setItem('pulsetrade_vip_codes', JSON.stringify(list));
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('[Signup VIP validation error]', err);
-      }
+  if (!regResult.ok) {
+    // If endpoint is not reachable (e.g. static preview), fallback to direct client-side signup
+    const client = getSupabaseClient();
+    if (!client) {
+      return { success: false, message: regResult.error || 'Registration service unavailable.' };
     }
 
-    const vipExpiresAt = isValidVip ? new Date(Date.now() + vipDurationDays * 86400000).toISOString() : null;
-
-    // Referral Bonus Rule:
-    // When a valid owner referral code or ?ref= param is verified at signup and referral bonus is active,
-    // grant configured extra credits on top of standard starter credits (e.g. 10 + 5 = 15 credits total).
-    const extra = Math.max(0, Math.min(50, Number(bonusCredits) || 0));
-    const initialCredits = isValidVip ? 9999 : (10 + extra);
-    const role = trimmedEmail === 'durodoluwa5@gmail.com' ? 'ADMIN' : 'USER';
-
-    // 2. Call Supabase Auth SignUp
     const { data: authData, error: authError } = await client.auth.signUp({
       email: trimmedEmail,
       password: cleanPassword,
       options: {
-        data: {
-          username: trimmedUsername,
-          is_vip: isValidVip,
-          vip_expires_at: vipExpiresAt,
-          credits: initialCredits,
-          role,
-        },
+        data: { username: trimmedUsername },
       },
     });
 
@@ -310,10 +261,9 @@ export async function signUpWithSupabase(
     }
 
     if (!authData?.user) {
-      return { success: false, message: 'Registration failed. No user was returned from Supabase.' };
+      return { success: false, message: 'Registration failed. No user was returned.' };
     }
 
-    // 3. Detect duplicate email (Supabase user enumeration protection returns user with empty identities)
     if (Array.isArray(authData.user.identities) && authData.user.identities.length === 0) {
       return {
         success: false,
@@ -321,52 +271,25 @@ export async function signUpWithSupabase(
       };
     }
 
-    // 4. Upsert row in public.users table
-    let dbUser: any = null;
-    try {
-      const { data: insertedUser, error: upsertError } = await client
-        .from('users')
-        .upsert(
-          {
-            auth_user_id: authData.user.id,
-            username: trimmedUsername,
-            email: trimmedEmail,
-            role,
-            credits: initialCredits,
-            is_vip: isValidVip,
-            vip_expires_at: vipExpiresAt,
-            registration_ip: 'vercel_web',
-          },
-          { onConflict: 'email' }
-        )
-        .select()
-        .maybeSingle();
-
-      if (!upsertError && insertedUser) {
-        dbUser = insertedUser;
-      }
-    } catch {
-      // Handled - trigger or metadata will hold values
+    // Auto sign in to retrieve session
+    const signInRes = await signInWithSupabase(trimmedEmail, cleanPassword);
+    if (signInRes.success && vipKey && vipKey.trim()) {
+      await redeemVipKeyWithSupabase(vipKey, signInRes.user || null);
     }
-
-    const userProfile = mapToUserProfile(authData.user, dbUser);
-    const hasSession = Boolean(authData.session);
-    return {
-      success: true,
-      user: userProfile,
-      message: isValidVip
-        ? 'Account successfully created! ★ 30-Day VIP Pass activated.'
-        : hasSession
-        ? 'Account created successfully with 10 free starter credits!'
-        : 'Account created! Turn off "Confirm email" in your Supabase Dashboard to log in immediately without confirmation.',
-    };
-  } catch (err: any) {
-    return { success: false, message: err?.message || 'Authentication request failed.' };
+    return signInRes;
   }
+
+  // 2. Sign in to retrieve full session & database profile
+  const loginRes = await signInWithSupabase(trimmedEmail, cleanPassword);
+  if (loginRes.success && vipKey && vipKey.trim()) {
+    await redeemVipKeyWithSupabase(vipKey, loginRes.user || null);
+  }
+
+  return loginRes;
 }
 
 /**
- * Supabase Auth: Sign In existing user (supports email OR username)
+ * Sign In existing user with email/username and password
  */
 export async function signInWithSupabase(
   identity: string,
@@ -393,7 +316,7 @@ export async function signInWithSupabase(
   try {
     let emailToUse = trimmedIdentity.toLowerCase();
 
-    // If identity is a username (no @), look up associated email from public.users
+    // If identity is a username, lookup associated email
     if (!emailToUse.includes('@')) {
       try {
         const { data: match } = await client
@@ -419,13 +342,6 @@ export async function signInWithSupabase(
       if (authError.message.toLowerCase().includes('invalid login credentials')) {
         return { success: false, message: 'Invalid email or password. Please verify your credentials.' };
       }
-      if (authError.message.toLowerCase().includes('email not confirmed')) {
-        return {
-          success: false,
-          message:
-            'Email confirmation is required by your Supabase project settings. In Supabase Dashboard -> Authentication -> Providers -> Email, uncheck "Confirm email" for instant login.',
-        };
-      }
       return { success: false, message: authError.message };
     }
 
@@ -433,13 +349,13 @@ export async function signInWithSupabase(
       return { success: false, message: 'Authentication failed. Please verify your credentials.' };
     }
 
-    // Fetch corresponding user record from public.users
+    // Fetch user row from public.users
     let dbUser: any = null;
     try {
       const { data } = await client
         .from('users')
         .select('*')
-        .eq('email', authData.user.email)
+        .eq('auth_user_id', authData.user.id)
         .limit(1)
         .maybeSingle();
       dbUser = data;
@@ -459,7 +375,7 @@ export async function signInWithSupabase(
 }
 
 /**
- * Supabase Auth: Sign Out
+ * Sign Out
  */
 export async function signOutSupabase(): Promise<boolean> {
   const client = getSupabaseClient();
@@ -473,7 +389,7 @@ export async function signOutSupabase(): Promise<boolean> {
 }
 
 /**
- * Supabase Auth: Get current active session user on boot/refresh
+ * Get current active session user on app boot
  */
 export async function getCurrentSupabaseUser(): Promise<UserProfile | null> {
   const client = getSupabaseClient();
@@ -492,12 +408,12 @@ export async function getCurrentSupabaseUser(): Promise<UserProfile | null> {
       const { data } = await client
         .from('users')
         .select('*')
-        .eq('email', user.email)
+        .eq('auth_user_id', user.id)
         .limit(1)
         .maybeSingle();
       dbUser = data;
     } catch {
-      // Table fallback
+      // Ignored
     }
 
     return mapToUserProfile(user, dbUser);
@@ -507,7 +423,7 @@ export async function getCurrentSupabaseUser(): Promise<UserProfile | null> {
 }
 
 /**
- * Redeem 30-Day VIP Key in Supabase Database (Atomic Single-Use & Expiry Extension)
+ * Atomic VIP code redemption via SECURITY DEFINER RPC `redeem_vip_code`
  */
 export async function redeemVipKeyWithSupabase(
   vipKey: string,
@@ -527,264 +443,51 @@ export async function redeemVipKeyWithSupabase(
     return { success: false, message: 'Database client not connected.' };
   }
 
-  let durationDays = 30;
-  let codeSource = '';
-
-  // 1. PRIMARY CHECK: public.vip_codes (Strict One-Time Single-Use Table)
   try {
-    const { data: codeRow, error: codeErr } = await client
-      .from('vip_codes')
-      .select('*')
-      .eq('code', cleanKey)
-      .maybeSingle();
-
-    if (!codeErr && codeRow) {
-      if (!codeRow.is_active) {
-        return {
-          success: false,
-          message: `VIP code "${cleanKey}" has been deactivated by the system administrator.`,
-        };
-      }
-      if (codeRow.is_redeemed) {
-        return {
-          success: false,
-          message: `VIP code "${cleanKey}" has already been redeemed (single-use code).`,
-        };
-      }
-
-      // Atomic Update: Mark code as redeemed by current user
-      const { data: updatedCode, error: redeemErr } = await client
-        .from('vip_codes')
-        .update({
-          is_redeemed: true,
-          redeemed_by_user_id: currentUser.id,
-          redeemed_by_email: currentUser.email,
-          redeemed_at: new Date().toISOString(),
-        })
-        .eq('code', cleanKey)
-        .eq('is_redeemed', false)
-        .select()
-        .maybeSingle();
-
-      if (redeemErr || !updatedCode) {
-        return {
-          success: false,
-          message: 'Conflict: This VIP code was just redeemed by another session.',
-        };
-      }
-
-      durationDays = codeRow.duration_days || 30;
-      codeSource = 'vip_codes';
-    }
-  } catch (err) {
-    console.warn('[VIP Code Check Error]', err);
-  }
-
-  // 1b. SECONDARY DB CHECK: app_settings key 'vip_codes' (Universal DB Persistence)
-  if (!codeSource) {
-    try {
-      const { data: setRow } = await client
-        .from('app_settings')
-        .select('value')
-        .eq('key', 'vip_codes')
-        .maybeSingle();
-
-      if (setRow?.value && Array.isArray(setRow.value)) {
-        const codesList = [...setRow.value];
-        const foundIdx = codesList.findIndex(
-          (c: any) => c.code && c.code.toUpperCase() === cleanKey
-        );
-        if (foundIdx >= 0) {
-          const item = codesList[foundIdx];
-          if (!item.is_active) {
-            return {
-              success: false,
-              message: `VIP code "${cleanKey}" has been deactivated by the system administrator.`,
-            };
-          }
-          if (item.is_redeemed) {
-            return {
-              success: false,
-              message: `VIP code "${cleanKey}" has already been redeemed (single-use code).`,
-            };
-          }
-
-          // Single-use Atomic Lock
-          item.is_redeemed = true;
-          item.redeemed_by = currentUser.username || currentUser.email;
-          item.redeemed_by_email = currentUser.email;
-          item.redeemed_by_user_id = currentUser.id;
-          item.redeemed_at = new Date().toISOString();
-          codesList[foundIdx] = item;
-
-          await client.from('app_settings').upsert({
-            key: 'vip_codes',
-            value: codesList,
-            updated_at: new Date().toISOString(),
-          });
-
-          if (typeof window !== 'undefined') {
-            localStorage.setItem('pulsetrade_vip_codes', JSON.stringify(codesList));
-          }
-
-          durationDays = item.duration_days || 30;
-          codeSource = 'app_settings';
-        }
-      }
-    } catch (err) {
-      console.warn('[app_settings VIP check error]', err);
-    }
-  }
-
-  // 1c. TERTIARY CACHE CHECK: Local browser cache (Admin generated locally)
-  if (!codeSource && typeof window !== 'undefined') {
-    try {
-      const raw = localStorage.getItem('pulsetrade_vip_codes');
-      if (raw) {
-        const localList = JSON.parse(raw);
-        if (Array.isArray(localList)) {
-          const foundIdx = localList.findIndex(
-            (c: any) => c.code && c.code.toUpperCase() === cleanKey
-          );
-          if (foundIdx >= 0) {
-            const item = localList[foundIdx];
-            if (!item.is_active) {
-              return {
-                success: false,
-                message: `VIP code "${cleanKey}" has been deactivated by the system administrator.`,
-              };
-            }
-            if (item.is_redeemed) {
-              return {
-                success: false,
-                message: `VIP code "${cleanKey}" has already been redeemed (single-use code).`,
-              };
-            }
-
-            item.is_redeemed = true;
-            item.redeemed_by = currentUser.username || currentUser.email;
-            item.redeemed_by_email = currentUser.email;
-            item.redeemed_by_user_id = currentUser.id;
-            item.redeemed_at = new Date().toISOString();
-            localList[foundIdx] = item;
-            localStorage.setItem('pulsetrade_vip_codes', JSON.stringify(localList));
-
-            durationDays = item.duration_days || 30;
-            codeSource = 'local_cache';
-          }
-        }
-      }
-    } catch {}
-  }
-
-  // 2. FOURTH CHECK: Legacy public.vip_keys table
-  if (!codeSource) {
-    try {
-      const { data: dbKey } = await client
-        .from('vip_keys')
-        .select('*')
-        .eq('vip_code', cleanKey)
-        .eq('is_active', true)
-        .maybeSingle();
-
-      if (dbKey) {
-        if (dbKey.max_uses === 0 || dbKey.used_count < dbKey.max_uses) {
-          codeSource = 'vip_keys';
-          durationDays = dbKey.duration_days || 30;
-          await client
-            .from('vip_keys')
-            .update({ used_count: (dbKey.used_count || 0) + 1 })
-            .eq('vip_code', cleanKey);
-        } else {
-          return {
-            success: false,
-            message: `VIP key "${cleanKey}" has reached its maximum redemption limit.`,
-          };
-        }
-      }
-    } catch {
-      // Pass through
-    }
-  }
-
-  // 3. FIFTH CHECK: System bootstrap static keys
-  if (!codeSource) {
-    const VALID_KEYS = ['VIP-ALPHA-30D', 'PULSE-VIP-2026', 'QUANT-30D', 'VIP-TRADER-1M'];
-    if (VALID_KEYS.includes(cleanKey)) {
-      codeSource = 'static';
-      durationDays = 30;
-    }
-  }
-
-  if (!codeSource) {
-    return {
-      success: false,
-      message: 'Invalid VIP activation code. Please check your code or contact support.',
-    };
-  }
-
-  // 4. Calculate VIP Expiry (Extend if already active, else now + duration)
-  let baseTimestamp = Date.now();
-  if (currentUser.is_vip && currentUser.vip_expires_at) {
-    const currentExp = new Date(currentUser.vip_expires_at).getTime();
-    if (currentExp > baseTimestamp) {
-      baseTimestamp = currentExp;
-    }
-  }
-  const newVipExpiresAt = new Date(baseTimestamp + durationDays * 86400000).toISOString();
-
-  // 5. Update public.users in Supabase database
-  try {
-    await client
-      .from('users')
-      .update({
-        is_vip: true,
-        vip_expires_at: newVipExpiresAt,
-        credits: 9999,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('email', currentUser.email);
-  } catch (err) {
-    console.warn('[User VIP DB Update Error]', err);
-  }
-
-  // 6. Update Supabase Auth metadata
-  try {
-    await client.auth.updateUser({
-      data: {
-        is_vip: true,
-        vip_expires_at: newVipExpiresAt,
-        credits: 9999,
-      },
+    // Call atomic RPC
+    const { data, error } = await client.rpc('redeem_vip_code', {
+      p_code: cleanKey,
     });
-  } catch (err) {
-    console.warn('[Auth Metadata Update Error]', err);
+
+    if (error) {
+      return { success: false, message: error.message };
+    }
+
+    if (!data?.ok) {
+      return {
+        success: false,
+        message: data?.error || 'Invalid or already redeemed VIP access key.',
+      };
+    }
+
+    const newVipExpiresAt = data.vip_expires_at;
+    const diffMs = new Date(newVipExpiresAt).getTime() - Date.now();
+    const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+    const daysLeft = Math.floor(totalSeconds / 86400);
+    const hoursLeft = Math.floor((totalSeconds % 86400) / 3600);
+
+    const updatedProfile: UserProfile = {
+      ...currentUser,
+      is_vip: true,
+      vip_expires_at: newVipExpiresAt,
+      vip_days_left: daysLeft,
+      vip_hours_left: hoursLeft,
+      vip_seconds_left: totalSeconds,
+      credits: 9999,
+    };
+
+    return {
+      success: true,
+      user: updatedProfile,
+      message: `★ ${data.days_granted || 30}-Day VIP Pass activated! Unlimited signals unlocked until ${new Date(newVipExpiresAt).toLocaleDateString()}.`,
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Failed to process VIP redemption.' };
   }
-
-  const diffMs = new Date(newVipExpiresAt).getTime() - Date.now();
-  const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
-  const daysLeft = Math.floor(totalSeconds / 86400);
-  const hoursLeft = Math.floor((totalSeconds % 86400) / 3600);
-
-  const updatedProfile: UserProfile = {
-    ...currentUser,
-    is_vip: true,
-    vip_expires_at: newVipExpiresAt,
-    vip_days_left: daysLeft,
-    vip_hours_left: hoursLeft,
-    vip_seconds_left: totalSeconds,
-    credits: 9999,
-  };
-
-  return {
-    success: true,
-    user: updatedProfile,
-    message: `★ ${durationDays}-Day VIP Pass activated! Unlimited signals unlocked until ${new Date(newVipExpiresAt).toLocaleDateString()}.`,
-  };
 }
 
 /**
- * Deduct Credit in Supabase Database for Signal Computation
+ * Deduct Credit via atomic SECURITY DEFINER RPC `consume_credit`
  */
 export async function deductCreditWithSupabase(
   currentUser: UserProfile
@@ -798,83 +501,87 @@ export async function deductCreditWithSupabase(
     };
   }
 
-  if (currentUser.credits <= 0) {
+  const client = getSupabaseClient();
+  if (!client) {
+    if (currentUser.credits <= 0) {
+      return {
+        success: false,
+        credits: 0,
+        is_vip: false,
+        message: 'Insufficient credits. Upgrade to VIP or top up credits.',
+      };
+    }
     return {
-      success: false,
-      credits: 0,
+      success: true,
+      credits: currentUser.credits - 1,
       is_vip: false,
-      message: 'Insufficient credits. Upgrade to VIP or top up credits.',
+      message: '1 credit deducted for algorithmic signal computation.',
     };
   }
 
-  const newCredits = Math.max(0, currentUser.credits - 1);
-  const client = getSupabaseClient();
+  try {
+    const { data, error } = await client.rpc('consume_credit', { p_cost: 1 });
 
-  if (client && currentUser.email) {
-    try {
-      await client
-        .from('users')
-        .update({ credits: newCredits })
-        .eq('email', currentUser.email);
-      await client.auth.updateUser({
-        data: { credits: newCredits },
-      });
-    } catch {
-      // Ignored
+    if (error) {
+      return { success: false, credits: currentUser.credits, is_vip: false, message: error.message };
     }
-  }
 
-  return {
-    success: true,
-    credits: newCredits,
-    is_vip: false,
-    message: '1 credit deducted for algorithmic signal computation.',
-  };
+    if (!data?.ok) {
+      return {
+        success: false,
+        credits: data?.credits ?? currentUser.credits,
+        is_vip: Boolean(data?.unlimited),
+        message: data?.error || 'Insufficient credits. Upgrade to VIP or top up credits.',
+      };
+    }
+
+    return {
+      success: true,
+      credits: data.credits,
+      is_vip: Boolean(data.unlimited),
+      message: data.unlimited
+        ? 'VIP Unlimited Access Active (0 credits consumed)'
+        : '1 credit deducted for algorithmic signal computation.',
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      credits: currentUser.credits,
+      is_vip: false,
+      message: err?.message || 'Error executing credit deduction.',
+    };
+  }
 }
 
 /**
- * Real-Time Presence Heartbeat (100% Genuine Connected Traders)
+ * Real-Time Presence Heartbeat via atomic RPC `presence_ping`
  */
 export async function sendSupabasePresence(
   sessionId: string,
-  userId: number | null,
+  _userId: number | null,
   activeAsset: string
 ): Promise<number | null> {
   const client = getSupabaseClient();
   if (!client) return null;
 
   try {
-    // 1. Upsert active session
-    await client.from('active_sessions').upsert(
-      {
-        session_id: sessionId,
-        user_id: userId,
-        active_asset: activeAsset,
-        last_heartbeat: new Date().toISOString(),
-        ip_address: 'client_connection',
-      },
-      { onConflict: 'session_id' }
-    );
-
-    // 2. Count active sessions within the last 45 seconds
-    const cutoff = new Date(Date.now() - 45000).toISOString();
-    const { count, error } = await client
-      .from('active_sessions')
-      .select('*', { count: 'exact', head: true })
-      .gte('last_heartbeat', cutoff);
+    const { data, error } = await client.rpc('presence_ping', {
+      p_session: sessionId,
+      p_asset: activeAsset || 'EUR/USD',
+    });
 
     if (error) {
       return null;
     }
 
-    return count ?? 1;
+    return Number(data) || 1;
   } catch {
     return null;
   }
 }
 
 /**
- * Record Quantitative Signal in Supabase
+ * Record Quantitative Signal in Supabase (Public read, Server/Admin insert)
  */
 export async function logSignalToSupabase(signal: any, userId?: number | null) {
   const client = getSupabaseClient();
@@ -933,7 +640,7 @@ export async function sendPasswordResetEmail(email: string): Promise<{ success: 
   if (!client) {
     return {
       success: false,
-      message: 'Supabase authentication service is currently not connected.',
+      message: 'Authentication service is currently not connected.',
     };
   }
 
@@ -971,7 +678,7 @@ export async function sendPasswordResetEmail(email: string): Promise<{ success: 
 }
 
 /**
- * Update user password after clicking the reset link
+ * Update user password after clicking reset link
  */
 export async function updateUserPassword(newPassword: string): Promise<{ success: boolean; message: string }> {
   const client = getSupabaseClient();

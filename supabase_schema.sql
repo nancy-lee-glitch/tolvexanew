@@ -1,7 +1,7 @@
 -- =========================================================================
--- PulseTrade Pro - Production Supabase PostgreSQL Schema (Vercel Ready)
--- Complete Cloud Database: Auth, Users, Real-Time Presence, VIP Codes,
--- Dynamic Pricing Packages, Signals, Blog CMS & NOWPayments
+-- Tickvere (https://tickvere.com) - Production Supabase PostgreSQL Schema
+-- Canonical Schema: Auth, Users, Real-Time Presence, VIP Codes,
+-- Dynamic Pricing Packages, Verified Signals, Blog CMS & Payment Audits
 -- =========================================================================
 
 -- 1. Enable Required Extensions
@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     auth_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
     username VARCHAR(50) NOT NULL UNIQUE,
     email VARCHAR(255) NOT NULL UNIQUE,
-    role VARCHAR(20) DEFAULT 'USER' CHECK (role IN ('USER', 'ADMIN', 'VIP')),
+    role VARCHAR(20) DEFAULT 'USER' CHECK (role IN ('USER', 'ADMIN')),
     credits INTEGER DEFAULT 10 CHECK (credits >= 0),
     is_vip BOOLEAN DEFAULT FALSE,
     vip_expires_at TIMESTAMPTZ DEFAULT NULL,
@@ -27,33 +27,61 @@ CREATE INDEX IF NOT EXISTS idx_users_username ON public.users(username);
 CREATE INDEX IF NOT EXISTS idx_users_email ON public.users(email);
 CREATE INDEX IF NOT EXISTS idx_users_auth_id ON public.users(auth_user_id);
 
--- 3. AUTOMATIC AUTH TRIGGER (Creates/Updates public.users row on auth.users signup)
+-- 3. RECURSION-SAFE SECURITY DEFINER ADMIN HELPER
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.users
+        WHERE auth_user_id = auth.uid() AND role = 'ADMIN'
+    );
+$$;
+
+REVOKE ALL ON FUNCTION public.is_admin() FROM public;
+GRANT EXECUTE ON FUNCTION public.is_admin() TO anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.get_current_user_id()
+RETURNS BIGINT
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT id FROM public.users WHERE auth_user_id = auth.uid() LIMIT 1;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_current_user_id() FROM public;
+GRANT EXECUTE ON FUNCTION public.get_current_user_id() TO anon, authenticated, service_role;
+
+-- 4. HARDENED REGISTRATION TRIGGER
+-- Client metadata CANNOT grant role, VIP status, or credits.
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER
 LANGUAGE plpgsql
-SECURITY DEFINER SET search_path = public
+SECURITY DEFINER
+SET search_path = public
 AS $$
 DECLARE
-    v_username VARCHAR(50);
-    v_role VARCHAR(20);
-    v_is_vip BOOLEAN;
-    v_vip_exp TIMESTAMPTZ;
-    v_credits INTEGER;
+    v_raw_username TEXT;
+    v_clean_username VARCHAR(50);
 BEGIN
-    v_username := COALESCE(NEW.raw_user_meta_data->>'username', split_part(NEW.email, '@', 1));
-    v_role := CASE WHEN LOWER(NEW.email) = 'durodoluwa5@gmail.com' THEN 'ADMIN' ELSE COALESCE(NEW.raw_user_meta_data->>'role', 'USER') END;
-    v_is_vip := COALESCE((NEW.raw_user_meta_data->>'is_vip')::BOOLEAN, FALSE);
-    
-    IF NEW.raw_user_meta_data->>'vip_expires_at' IS NOT NULL THEN
-        v_vip_exp := (NEW.raw_user_meta_data->>'vip_expires_at')::TIMESTAMPTZ;
+    v_raw_username := NEW.raw_user_meta_data->>'username';
+    IF v_raw_username IS NOT NULL AND v_raw_username ~ '^[a-zA-Z0-9_.-]{3,30}$' THEN
+        v_clean_username := v_raw_username;
     ELSE
-        v_vip_exp := NULL;
+        v_clean_username := regexp_replace(split_part(NEW.email, '@', 1), '[^a-zA-Z0-9_.-]', '', 'g');
+        IF length(v_clean_username) < 3 THEN
+            v_clean_username := 'trader';
+        END IF;
+        v_clean_username := substring(v_clean_username, 1, 24) || '_' || substring(md5(random()::text), 1, 4);
     END IF;
 
-    IF v_is_vip OR v_role = 'ADMIN' THEN
-        v_credits := 9999;
-    ELSE
-        v_credits := COALESCE((NEW.raw_user_meta_data->>'credits')::INTEGER, 10);
+    IF EXISTS (SELECT 1 FROM public.users WHERE username = v_clean_username) THEN
+        v_clean_username := substring(v_clean_username, 1, 22) || '_' || substring(md5(random()::text), 1, 6);
     END IF;
 
     INSERT INTO public.users (
@@ -68,18 +96,16 @@ BEGIN
     )
     VALUES (
         NEW.id,
-        v_username,
-        NEW.email,
-        v_role,
-        v_credits,
-        v_is_vip,
-        v_vip_exp,
+        v_clean_username,
+        LOWER(TRIM(NEW.email)),
+        'USER',
+        10,
+        FALSE,
+        NULL,
         'supabase_auth'
     )
     ON CONFLICT (email) DO UPDATE SET
         auth_user_id = EXCLUDED.auth_user_id,
-        username = EXCLUDED.username,
-        role = EXCLUDED.role,
         updated_at = NOW();
 
     RETURN NEW;
@@ -91,21 +117,103 @@ CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- 4. REAL-TIME ACTIVE TRADER PRESENCE (Heartbeat Engine)
+-- 5. TABLES
+CREATE TABLE IF NOT EXISTS public.credit_ledger (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    delta INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    ref_id TEXT,
+    balance_after INTEGER NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_user ON public.credit_ledger(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.audit_logs (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    admin_id BIGINT REFERENCES public.users(id) ON DELETE SET NULL,
+    action VARCHAR(100) NOT NULL,
+    target_type VARCHAR(50),
+    target_id VARCHAR(128),
+    details JSONB DEFAULT '{}'::JSONB,
+    ip_address VARCHAR(64),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON public.audit_logs(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS public.rate_limits (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    key VARCHAR(128) NOT NULL UNIQUE,
+    hits INTEGER NOT NULL DEFAULT 1,
+    reset_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rate_limits_key ON public.rate_limits(key);
+
+CREATE TABLE IF NOT EXISTS public.direct_orders (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id BIGINT REFERENCES public.users(id) ON DELETE SET NULL,
+    package_id VARCHAR(64) NOT NULL,
+    amount NUMERIC(10, 2) NOT NULL,
+    tx_hash VARCHAR(255),
+    status VARCHAR(32) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    proof_url TEXT,
+    reviewer_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    reviewed_at TIMESTAMPTZ,
+    reviewed_by BIGINT REFERENCES public.users(id)
+);
+
+CREATE TABLE IF NOT EXISTS public.broker_assets (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    broker_id VARCHAR(64) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    enabled BOOLEAN DEFAULT TRUE,
+    payout_pct NUMERIC(5, 2) DEFAULT 85.00,
+    is_otc BOOLEAN DEFAULT FALSE,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (broker_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS public.instrument_specs (
+    symbol VARCHAR(32) PRIMARY KEY,
+    contract_size NUMERIC(18, 4) DEFAULT 1,
+    min_lot NUMERIC(10, 4) DEFAULT 0.01,
+    lot_step NUMERIC(10, 4) DEFAULT 0.01,
+    quote_ccy VARCHAR(10) DEFAULT 'USD',
+    pip_size NUMERIC(10, 5) DEFAULT 0.0001,
+    decimals INTEGER DEFAULT 5,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.market_events (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    starts_at TIMESTAMPTZ NOT NULL,
+    ends_at TIMESTAMPTZ,
+    currency VARCHAR(10) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    impact VARCHAR(16) NOT NULL CHECK (impact IN ('LOW', 'MEDIUM', 'HIGH', 'HOLIDAY')),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.ip_registrations (
+    ip_address VARCHAR(64) PRIMARY KEY,
+    count INTEGER DEFAULT 1,
+    first_registered_at TIMESTAMPTZ DEFAULT NOW(),
+    last_registered_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS public.active_sessions (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     session_id VARCHAR(128) NOT NULL UNIQUE,
     user_id BIGINT REFERENCES public.users(id) ON DELETE CASCADE,
     ip_address VARCHAR(64) DEFAULT 'client_connection',
     active_asset VARCHAR(32) DEFAULT 'EUR/USD',
     last_heartbeat TIMESTAMPTZ DEFAULT NOW()
 );
-
 CREATE INDEX IF NOT EXISTS idx_active_sessions_heartbeat ON public.active_sessions(last_heartbeat);
 
--- 5. SECURE ONE-TIME SINGLE-USE VIP CODES (Format: PT-VIP-XXXXXXXX)
 CREATE TABLE IF NOT EXISTS public.vip_codes (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     code VARCHAR(64) NOT NULL UNIQUE,
     duration_days INTEGER DEFAULT 30,
     is_active BOOLEAN DEFAULT TRUE,
@@ -114,38 +222,14 @@ CREATE TABLE IF NOT EXISTS public.vip_codes (
     redeemed_by_email VARCHAR(255),
     redeemed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    created_by_admin VARCHAR(255) DEFAULT 'Master Admin'
+    created_by_admin VARCHAR(255) DEFAULT 'System Admin'
 );
-
 CREATE INDEX IF NOT EXISTS idx_vip_codes_code ON public.vip_codes(code);
-CREATE INDEX IF NOT EXISTS idx_vip_codes_redeemed ON public.vip_codes(is_redeemed);
 
--- Seed initial high-security single-use VIP codes
-INSERT INTO public.vip_codes (code, duration_days, is_active, is_redeemed)
-VALUES 
-    ('PT-VIP-QUANT2026', 30, TRUE, FALSE),
-    ('PT-VIP-DERIV30D', 30, TRUE, FALSE),
-    ('PT-VIP-INST9942', 30, TRUE, FALSE),
-    ('VIP-ALPHA-30D', 30, TRUE, FALSE),
-    ('PULSE-VIP-2026', 30, TRUE, FALSE)
-ON CONFLICT (code) DO NOTHING;
-
--- Legacy vip_keys table compatibility
-CREATE TABLE IF NOT EXISTS public.vip_keys (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-    vip_code VARCHAR(64) NOT NULL UNIQUE,
-    duration_days INTEGER DEFAULT 30,
-    max_uses INTEGER DEFAULT 9999,
-    used_count INTEGER DEFAULT 0,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
--- 6. ADMIN-EDITABLE PRICING PACKAGES TABLE
 CREATE TABLE IF NOT EXISTS public.pricing_packages (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
-    type VARCHAR(32) NOT NULL DEFAULT 'CREDITS', -- 'CREDITS', 'VIP_30_DAY', 'BUNDLE'
+    type VARCHAR(32) NOT NULL DEFAULT 'CREDITS',
     credits_amount INTEGER NOT NULL DEFAULT 10,
     bonus_credits INTEGER NOT NULL DEFAULT 0,
     price_usd NUMERIC(10, 2) NOT NULL DEFAULT 5.00,
@@ -156,21 +240,8 @@ CREATE TABLE IF NOT EXISTS public.pricing_packages (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Seed Initial Default Packages
-INSERT INTO public.pricing_packages (id, name, type, credits_amount, bonus_credits, price_usd, badge_label, description, is_active, sort_order)
-VALUES 
-    (1, 'Starter Pack', 'CREDITS', 10, 0, 5.00, 'STARTER', '10 Algorithmic Signal Computations for instant micro-scalping.', TRUE, 1),
-    (2, 'Popular Pack', 'CREDITS', 25, 5, 10.00, 'MOST POPULAR', '25 + 5 Bonus Credits (30 total signals) with volume priority.', TRUE, 2),
-    (3, 'Pro Trader Pack', 'CREDITS', 60, 20, 20.00, 'PRO TRADER (+20)', '60 + 20 Bonus Credits (80 total signals) for dedicated daily sessions.', TRUE, 3),
-    (4, 'Whale Alpha Pack', 'CREDITS', 150, 60, 45.00, 'WHALE ALPHA (+60)', '150 + 60 Bonus Credits (210 total signals) with highest computation speed.', TRUE, 4),
-    (5, '★ 30-Day VIP Pass', 'VIP_30_DAY', 9999, 0, 49.00, '30-DAY UNLIMITED', 'Unlimited Signals (0 credits consumed), 30-day live countdown, VIP Safe Radar & Priority Deriv WebSocket Stream.', TRUE, 5)
-ON CONFLICT (id) DO UPDATE SET
-    price_usd = EXCLUDED.price_usd,
-    badge_label = EXCLUDED.badge_label;
-
--- 7. QUANTITATIVE SIGNALS TABLE
 CREATE TABLE IF NOT EXISTS public.signals (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id BIGINT REFERENCES public.users(id) ON DELETE SET NULL,
     asset VARCHAR(32) NOT NULL,
     timeframe VARCHAR(16) NOT NULL,
@@ -185,12 +256,10 @@ CREATE TABLE IF NOT EXISTS public.signals (
     setup_name VARCHAR(128),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-
 CREATE INDEX IF NOT EXISTS idx_signals_created_at ON public.signals(created_at DESC);
 
--- 8. VERIFIED TRADE OUTCOMES & ACCURACY AUDIT
 CREATE TABLE IF NOT EXISTS public.trade_outcomes (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     signal_id UUID REFERENCES public.signals(id) ON DELETE SET NULL,
     user_id BIGINT REFERENCES public.users(id) ON DELETE SET NULL,
     asset VARCHAR(32) NOT NULL,
@@ -201,49 +270,14 @@ CREATE TABLE IF NOT EXISTS public.trade_outcomes (
     logged_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 9. APP SETTINGS (Branding, NOWPayments Gateway & Cached Packages)
 CREATE TABLE IF NOT EXISTS public.app_settings (
     key VARCHAR(64) PRIMARY KEY,
     value JSONB NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-INSERT INTO public.app_settings (key, value)
-VALUES 
-  ('site_branding', '{
-    "siteName": "PulseTrade Pro",
-    "siteTagline": "Institutional-Grade Quantitative Micro-Volatility Terminal",
-    "logoUrl": "",
-    "logoIcon": "zap",
-    "badgeText": "v8.2 QUANT",
-    "bannerText": "⚡ 30-Day VIP Pass: Institutional-grade 89.4% confluence signals with instant automated verification",
-    "bannerEnabled": true,
-    "supportTelegram": "https://t.me/pulsetrade_quant",
-    "supportWhatsapp": "",
-    "supportEmail": "support@pulsetrade.pro",
-    "vipPriceUsd": 49.0,
-    "starterPriceUsd": 5.0,
-    "themeAccent": "emerald"
-  }'::JSONB),
-  ('nowpayments_config', '{
-    "apiKey": "",
-    "ipnSecret": "",
-    "isSandbox": false,
-    "enabled": false,
-    "payoutAddress": ""
-  }'::JSONB),
-  ('external_broker', '{
-    "enabled": false,
-    "brokerName": "Deriv / Binary Broker",
-    "brokerUrl": "https://track.deriv.com/_pulsetrade",
-    "openInNewTab": true,
-    "buttonLabel": "Open Broker Desk"
-  }'::JSONB)
-ON CONFLICT (key) DO NOTHING;
-
--- 10. PAYMENT ORDERS TABLE (NOWPayments Invoices & Idempotent IPN)
 CREATE TABLE IF NOT EXISTS public.payment_orders (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     payment_id VARCHAR(128) NOT NULL UNIQUE,
     user_id BIGINT REFERENCES public.users(id) ON DELETE CASCADE,
     order_id VARCHAR(128) NOT NULL,
@@ -260,18 +294,15 @@ CREATE TABLE IF NOT EXISTS public.payment_orders (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_payment_orders_payment_id ON public.payment_orders(payment_id);
-
--- 11. BLOG CMS TABLE
 CREATE TABLE IF NOT EXISTS public.blog_posts (
-    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
     slug VARCHAR(255) NOT NULL UNIQUE,
     excerpt TEXT,
     body TEXT,
     cover_url TEXT,
     category VARCHAR(64) DEFAULT 'Quantitative Alpha',
-    author VARCHAR(100) DEFAULT 'PulseTrade Research Desk',
+    author VARCHAR(100) DEFAULT 'Tickvere Research Desk',
     author_role VARCHAR(100) DEFAULT 'Quantitative Research',
     read_time VARCHAR(32) DEFAULT '4 min read',
     is_published BOOLEAN DEFAULT TRUE,
@@ -279,41 +310,302 @@ CREATE TABLE IF NOT EXISTS public.blog_posts (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_blog_posts_slug ON public.blog_posts(slug);
-CREATE INDEX IF NOT EXISTS idx_blog_posts_published ON public.blog_posts(is_published);
+-- Seed default pricing packages
+INSERT INTO public.pricing_packages (id, name, type, credits_amount, bonus_credits, price_usd, badge_label, description, is_active, sort_order)
+VALUES 
+    (1, 'Starter Trader', 'CREDITS', 10, 0, 5.00, 'TRIAL', '10 algorithmic signal executions with strict freshness confirmation.', TRUE, 1),
+    (2, 'Pro Pack', 'CREDITS', 50, 15, 20.00, 'POPULAR (+15)', '65 total signals with priority tick feed processing.', TRUE, 2),
+    (3, '★ 30-Day VIP Pass', 'VIP_30_DAY', 9999, 0, 49.00, 'UNLIMITED', 'Unlimited 24/7 signals, institutional confluence radar, priority feed.', TRUE, 3)
+ON CONFLICT (id) DO UPDATE SET
+    price_usd = EXCLUDED.price_usd,
+    badge_label = EXCLUDED.badge_label;
 
--- Seed initial research articles in blog_posts
-INSERT INTO public.blog_posts (title, slug, excerpt, body, category, author, author_role, read_time, is_published)
-VALUES
-    (
-        'The 6-Second Freshness Window: Why High-Frequency Binary Options Fail on Latency',
-        'the-6-second-freshness-window',
-        'In sub-minute binary contract trading (30s and 60s expiries), entering late by just 3 seconds degrades mathematical expectancy by up to 34%. Here is the micro-structure breakdown.',
-        'Binary options and micro-scalp contracts require surgical entry pricing. Retail traders often execute on signals that are 10-15 seconds old, leading to severe barrier slippage. PulseTrade enforces a strict 6-second decay window to guarantee that execution occurs before the micro-momentum exhausts.',
-        'Quantitative Alpha',
-        'Dr. Marcus Vance',
-        'Head of Quantitative Research',
-        '5 min read',
-        TRUE
-    ),
-    (
-        'Multi-Timeframe Confluence: Combining EMA 9/21 Trajectories with 14-Period RSI',
-        'multi-timeframe-confluence-strategy',
-        'How our mathematical engine merges 1-hour macro trend direction with 1-minute tick velocity to generate 89.4% confluence probability barriers.',
-        'Trading single indicators creates false positives during market chop. By synthesizing exponential moving average spreads with volume order-flow imbalance and RSI momentum barriers, the engine only flags setups where all mathematical vectors align.',
-        'Technical Strategy',
-        'Elena Rostova',
-        'Senior Algorithmic Strategist',
-        '6 min read',
-        TRUE
+-- Seed default safe settings
+INSERT INTO public.app_settings (key, value)
+VALUES 
+  ('site_branding', '{
+    "siteName": "Tickvere",
+    "siteTagline": "Real-Time Microstructure Confluence Terminal",
+    "logoUrl": "",
+    "logoIcon": "zap",
+    "badgeText": "v8.3 QUANT",
+    "bannerText": "30-Day VIP Pass: Verified microstructure confluence signals with strict multi-window confirmation",
+    "bannerEnabled": true,
+    "supportTelegram": "https://t.me/tickvere",
+    "supportWhatsapp": "",
+    "supportEmail": "support@tickvere.com",
+    "vipPriceUsd": 49.0,
+    "starterPriceUsd": 5.0,
+    "themeAccent": "emerald"
+  }'::JSONB),
+  ('external_broker', '{
+    "enabled": false,
+    "brokerName": "Deriv",
+    "brokerUrl": "https://deriv.com",
+    "openInNewTab": true,
+    "buttonLabel": "Launch Broker Desk"
+  }'::JSONB)
+ON CONFLICT (key) DO NOTHING;
+
+-- 6. RPC FUNCTIONS
+CREATE OR REPLACE FUNCTION public.consume_credit(p_cost INT DEFAULT 1)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_user public.users%ROWTYPE;
+    v_cost INT := GREATEST(1, COALESCE(p_cost, 1));
+    v_balance_after INT;
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'Unauthenticated');
+    END IF;
+
+    SELECT * INTO v_user
+    FROM public.users
+    WHERE auth_user_id = auth.uid()
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'User profile not found');
+    END IF;
+
+    IF v_user.role = 'ADMIN' OR (v_user.is_vip AND (v_user.vip_expires_at IS NULL OR v_user.vip_expires_at > NOW())) THEN
+        RETURN jsonb_build_object(
+            'ok', true,
+            'credits', v_user.credits,
+            'unlimited', true,
+            'error', NULL
+        );
+    END IF;
+
+    IF v_user.credits < v_cost THEN
+        RETURN jsonb_build_object(
+            'ok', false,
+            'credits', v_user.credits,
+            'unlimited', false,
+            'error', 'Insufficient credits. Upgrade to VIP or top up.'
+        );
+    END IF;
+
+    v_balance_after := v_user.credits - v_cost;
+
+    UPDATE public.users
+    SET credits = v_balance_after,
+        updated_at = NOW()
+    WHERE id = v_user.id;
+
+    INSERT INTO public.credit_ledger (
+        user_id,
+        delta,
+        reason,
+        balance_after
+    ) VALUES (
+        v_user.id,
+        -v_cost,
+        'signal_computation',
+        v_balance_after
+    );
+
+    RETURN jsonb_build_object(
+        'ok', true,
+        'credits', v_balance_after,
+        'unlimited', false,
+        'error', NULL
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.consume_credit(INT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.consume_credit(INT) TO authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.redeem_vip_code(p_code TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_clean_code TEXT;
+    v_user public.users%ROWTYPE;
+    v_duration_days INT;
+    v_base_time TIMESTAMPTZ;
+    v_new_expiry TIMESTAMPTZ;
+    v_rate_key TEXT;
+    v_rate_hits INT;
+BEGIN
+    IF auth.uid() IS NULL THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'Authentication required.');
+    END IF;
+
+    v_clean_code := UPPER(TRIM(COALESCE(p_code, '')));
+    IF length(v_clean_code) < 4 THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'Invalid VIP code format.');
+    END IF;
+
+    v_rate_key := 'vip_redeem:' || auth.uid()::TEXT;
+    
+    INSERT INTO public.rate_limits (key, hits, reset_at)
+    VALUES (v_rate_key, 1, NOW() + INTERVAL '5 minutes')
+    ON CONFLICT (key) DO UPDATE SET
+        hits = CASE 
+            WHEN rate_limits.reset_at < NOW() THEN 1 
+            ELSE rate_limits.hits + 1 
+        END,
+        reset_at = CASE 
+            WHEN rate_limits.reset_at < NOW() THEN NOW() + INTERVAL '5 minutes' 
+            ELSE rate_limits.reset_at 
+        END
+    RETURNING hits INTO v_rate_hits;
+
+    IF v_rate_hits > 8 THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'Too many attempts. Please wait 5 minutes before trying again.');
+    END IF;
+
+    SELECT * INTO v_user
+    FROM public.users
+    WHERE auth_user_id = auth.uid()
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'User account not found.');
+    END IF;
+
+    UPDATE public.vip_codes
+    SET is_redeemed = TRUE,
+        redeemed_by_user_id = v_user.id,
+        redeemed_by_email = v_user.email,
+        redeemed_at = NOW()
+    WHERE code = v_clean_code
+      AND is_active = TRUE
+      AND is_redeemed = FALSE
+    RETURNING duration_days INTO v_duration_days;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('ok', false, 'error', 'Invalid, inactive, or already redeemed VIP access key.');
+    END IF;
+
+    v_base_time := GREATEST(NOW(), COALESCE(v_user.vip_expires_at, NOW()));
+    v_new_expiry := v_base_time + (v_duration_days || ' days')::INTERVAL;
+
+    UPDATE public.users
+    SET is_vip = TRUE,
+        vip_expires_at = v_new_expiry,
+        credits = 9999,
+        updated_at = NOW()
+    WHERE id = v_user.id;
+
+    INSERT INTO public.credit_ledger (
+        user_id,
+        delta,
+        reason,
+        ref_id,
+        balance_after
+    ) VALUES (
+        v_user.id,
+        0,
+        'vip_code_redemption_' || v_duration_days || 'd',
+        v_clean_code,
+        9999
+    );
+
+    RETURN jsonb_build_object(
+        'ok', true,
+        'vip_expires_at', v_new_expiry,
+        'days_granted', v_duration_days,
+        'message', 'VIP status activated successfully.'
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.redeem_vip_code(TEXT) FROM public, anon;
+GRANT EXECUTE ON FUNCTION public.redeem_vip_code(TEXT) TO authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.presence_ping(p_session TEXT, p_asset TEXT DEFAULT 'EUR/USD')
+RETURNS INTEGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    v_clean_session TEXT;
+    v_clean_asset TEXT;
+    v_user_id BIGINT;
+    v_count INTEGER;
+BEGIN
+    v_clean_session := TRIM(COALESCE(p_session, ''));
+    IF v_clean_session !~ '^[A-Za-z0-9_-]{8,64}$' THEN
+        SELECT GREATEST(1, COUNT(*)::INTEGER) INTO v_count
+        FROM public.active_sessions
+        WHERE last_heartbeat > NOW() - INTERVAL '45 seconds';
+        RETURN v_count;
+    END IF;
+
+    v_clean_asset := SUBSTRING(TRIM(COALESCE(p_asset, 'EUR/USD')), 1, 32);
+
+    IF auth.uid() IS NOT NULL THEN
+        SELECT id INTO v_user_id FROM public.users WHERE auth_user_id = auth.uid() LIMIT 1;
+    END IF;
+
+    DELETE FROM public.active_sessions
+    WHERE last_heartbeat < NOW() - INTERVAL '5 minutes';
+
+    INSERT INTO public.active_sessions (
+        session_id,
+        user_id,
+        active_asset,
+        last_heartbeat
+    ) VALUES (
+        v_clean_session,
+        v_user_id,
+        v_clean_asset,
+        NOW()
     )
-ON CONFLICT (slug) DO NOTHING;
+    ON CONFLICT (session_id) DO UPDATE SET
+        user_id = COALESCE(EXCLUDED.user_id, active_sessions.user_id),
+        active_asset = EXCLUDED.active_asset,
+        last_heartbeat = NOW();
 
--- 12. ROW LEVEL SECURITY (RLS) POLICIES
+    SELECT GREATEST(1, COUNT(*)::INTEGER) INTO v_count
+    FROM public.active_sessions
+    WHERE last_heartbeat > NOW() - INTERVAL '45 seconds';
+
+    RETURN v_count;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.presence_ping(TEXT, TEXT) FROM public;
+GRANT EXECUTE ON FUNCTION public.presence_ping(TEXT, TEXT) TO anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.online_count()
+RETURNS INTEGER
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public
+AS $$
+    SELECT GREATEST(1, COUNT(*)::INTEGER)
+    FROM public.active_sessions
+    WHERE last_heartbeat > NOW() - INTERVAL '45 seconds';
+$$;
+
+REVOKE ALL ON FUNCTION public.online_count() FROM public;
+GRANT EXECUTE ON FUNCTION public.online_count() TO anon, authenticated, service_role;
+
+-- 7. RLS POLICIES
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.active_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.vip_codes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.vip_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.credit_ledger ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rate_limits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.direct_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.broker_assets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.instrument_specs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.market_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ip_registrations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.pricing_packages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.signals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.trade_outcomes ENABLE ROW LEVEL SECURITY;
@@ -321,172 +613,160 @@ ALTER TABLE public.app_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.payment_orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.blog_posts ENABLE ROW LEVEL SECURITY;
 
--- Clean existing policies safely
-DROP POLICY IF EXISTS "Public Read Users" ON public.users;
-DROP POLICY IF EXISTS "Public Upsert Users" ON public.users;
-DROP POLICY IF EXISTS "Public Update Users" ON public.users;
-DROP POLICY IF EXISTS "Users Read Own Row" ON public.users;
-DROP POLICY IF EXISTS "Users Insert Self" ON public.users;
-DROP POLICY IF EXISTS "Users Update Self" ON public.users;
-DROP POLICY IF EXISTS "Service Role Users Manage" ON public.users;
+REVOKE INSERT, UPDATE, DELETE ON public.users FROM anon, authenticated;
+GRANT SELECT ON public.users TO authenticated;
 
-DROP POLICY IF EXISTS "Public Read Active Sessions" ON public.active_sessions;
-DROP POLICY IF EXISTS "Public Upsert Active Sessions" ON public.active_sessions;
-DROP POLICY IF EXISTS "Public Read VIP Codes" ON public.vip_codes;
-DROP POLICY IF EXISTS "Public Update VIP Codes" ON public.vip_codes;
-DROP POLICY IF EXISTS "Public Insert VIP Codes" ON public.vip_codes;
-DROP POLICY IF EXISTS "Public Read VIP Keys" ON public.vip_keys;
-DROP POLICY IF EXISTS "Public Update VIP Keys" ON public.vip_keys;
-DROP POLICY IF EXISTS "Public Read Pricing Packages" ON public.pricing_packages;
-DROP POLICY IF EXISTS "Public Upsert Pricing Packages" ON public.pricing_packages;
-DROP POLICY IF EXISTS "Public Read Signals" ON public.signals;
-DROP POLICY IF EXISTS "Public Insert Signals" ON public.signals;
-DROP POLICY IF EXISTS "Public Read Outcomes" ON public.trade_outcomes;
-DROP POLICY IF EXISTS "Public Insert Outcomes" ON public.trade_outcomes;
-DROP POLICY IF EXISTS "Public Read Settings" ON public.app_settings;
-DROP POLICY IF EXISTS "Public Upsert Settings" ON public.app_settings;
-DROP POLICY IF EXISTS "Public Read Orders" ON public.payment_orders;
-DROP POLICY IF EXISTS "Public Upsert Orders" ON public.payment_orders;
-DROP POLICY IF EXISTS "Public Read Blog" ON public.blog_posts;
-DROP POLICY IF EXISTS "Public Upsert Blog" ON public.blog_posts;
-
--- 1. USERS TABLE RLS
--- Users can only read their own profile row, or service_role / master admin can read all
-CREATE POLICY "Users Read Own Profile" ON public.users
+CREATE POLICY "users_select_policy" ON public.users
     FOR SELECT USING (
-        auth.uid() = auth_user_id
+        auth_user_id = auth.uid() 
+        OR public.is_admin() 
         OR auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
     );
 
--- Users can insert their own initial profile during registration
-CREATE POLICY "Users Register Self" ON public.users
+CREATE POLICY "vip_codes_admin_policy" ON public.vip_codes
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "credit_ledger_select_policy" ON public.credit_ledger
+    FOR SELECT USING (
+        user_id = public.get_current_user_id() 
+        OR public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "audit_logs_admin_policy" ON public.audit_logs
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "rate_limits_service_policy" ON public.rate_limits
+    FOR ALL USING (auth.jwt()->>'role' = 'service_role');
+
+CREATE POLICY "direct_orders_user_select" ON public.direct_orders
+    FOR SELECT USING (
+        user_id = public.get_current_user_id() 
+        OR public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "direct_orders_user_insert" ON public.direct_orders
     FOR INSERT WITH CHECK (
-        auth.uid() = auth_user_id
+        user_id = public.get_current_user_id()
+    );
+
+CREATE POLICY "direct_orders_admin_manage" ON public.direct_orders
+    FOR ALL USING (
+        public.is_admin() 
         OR auth.jwt()->>'role' = 'service_role'
     );
 
--- Sensitive fields (role, credits, is_vip, vip_expires_at) can ONLY be altered by service_role / backend API
-CREATE POLICY "Service Role Modify Sensitive User Fields" ON public.users
-    FOR UPDATE USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    ) WITH CHECK (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    );
+CREATE POLICY "broker_assets_public_select" ON public.broker_assets
+    FOR SELECT USING (true);
 
--- 2. ACTIVE SESSIONS TABLE
-CREATE POLICY "Public Read Active Sessions" ON public.active_sessions FOR SELECT USING (true);
-CREATE POLICY "Public Upsert Active Sessions" ON public.active_sessions FOR ALL USING (true) WITH CHECK (true);
-
--- 3. VIP CODES TABLE (Only readable/writable via service role or admin, not public anon)
-CREATE POLICY "Admin or Service Read VIP Codes" ON public.vip_codes
-    FOR SELECT USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    );
-
-CREATE POLICY "Admin or Service Manage VIP Codes" ON public.vip_codes
+CREATE POLICY "broker_assets_admin_manage" ON public.broker_assets
     FOR ALL USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    );
-
--- 4. PRICING PACKAGES TABLE (Public read-only, admin/service write)
-CREATE POLICY "Public Read Pricing Packages" ON public.pricing_packages FOR SELECT USING (true);
-CREATE POLICY "Admin Manage Pricing Packages" ON public.pricing_packages
-    FOR ALL USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    );
-
--- 5. SIGNALS & OUTCOMES
-CREATE POLICY "Public Read Signals" ON public.signals FOR SELECT USING (true);
-CREATE POLICY "Users or Server Insert Signals" ON public.signals FOR INSERT WITH CHECK (true);
-
-CREATE POLICY "Public Read Outcomes" ON public.trade_outcomes FOR SELECT USING (true);
-CREATE POLICY "Users or Server Insert Outcomes" ON public.trade_outcomes FOR INSERT WITH CHECK (true);
-
--- 6. APP SETTINGS (Public read, admin/service write only)
-CREATE POLICY "Public Read Settings" ON public.app_settings FOR SELECT USING (true);
-CREATE POLICY "Admin Manage Settings" ON public.app_settings
-    FOR ALL USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
-    );
-
--- 7. PAYMENT ORDERS (Users read own orders, service_role manages settlements)
-CREATE POLICY "Users Read Own Orders" ON public.payment_orders
-    FOR SELECT USING (
-        auth.uid() IS NOT NULL
+        public.is_admin() 
         OR auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
     );
 
-CREATE POLICY "Service Role Manage Payment Orders" ON public.payment_orders
+CREATE POLICY "instrument_specs_public_select" ON public.instrument_specs
+    FOR SELECT USING (true);
+
+CREATE POLICY "instrument_specs_admin_manage" ON public.instrument_specs
     FOR ALL USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
     );
 
--- 8. BLOG POSTS (Public read published, admin/service manage)
-CREATE POLICY "Public Read Blog" ON public.blog_posts FOR SELECT USING (is_published = true OR auth.jwt()->>'role' = 'service_role');
-CREATE POLICY "Admin Manage Blog" ON public.blog_posts
+CREATE POLICY "market_events_public_select" ON public.market_events
+    FOR SELECT USING (true);
+
+CREATE POLICY "market_events_admin_manage" ON public.market_events
     FOR ALL USING (
-        auth.jwt()->>'role' = 'service_role'
-        OR EXISTS (
-            SELECT 1 FROM public.users admin_u
-            WHERE admin_u.auth_user_id = auth.uid() AND admin_u.role = 'ADMIN'
-        )
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
     );
 
--- 13. ENABLE REALTIME BROADCASTING
+CREATE POLICY "ip_registrations_service_policy" ON public.ip_registrations
+    FOR ALL USING (auth.jwt()->>'role' = 'service_role');
+
+CREATE POLICY "pricing_packages_public_select" ON public.pricing_packages
+    FOR SELECT USING (is_active = TRUE OR public.is_admin() OR auth.jwt()->>'role' = 'service_role');
+
+CREATE POLICY "pricing_packages_admin_manage" ON public.pricing_packages
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "signals_public_select" ON public.signals
+    FOR SELECT USING (true);
+
+CREATE POLICY "signals_admin_insert" ON public.signals
+    FOR INSERT WITH CHECK (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "trade_outcomes_public_select" ON public.trade_outcomes
+    FOR SELECT USING (true);
+
+CREATE POLICY "trade_outcomes_admin_insert" ON public.trade_outcomes
+    FOR INSERT WITH CHECK (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "app_settings_public_select" ON public.app_settings
+    FOR SELECT USING (
+        key IN ('site_branding', 'external_broker')
+        OR public.is_admin()
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "app_settings_admin_manage" ON public.app_settings
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "payment_orders_user_select" ON public.payment_orders
+    FOR SELECT USING (
+        user_id = public.get_current_user_id() 
+        OR public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "payment_orders_admin_manage" ON public.payment_orders
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "blog_posts_public_select" ON public.blog_posts
+    FOR SELECT USING (
+        is_published = TRUE 
+        OR public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+CREATE POLICY "blog_posts_admin_manage" ON public.blog_posts
+    FOR ALL USING (
+        public.is_admin() 
+        OR auth.jwt()->>'role' = 'service_role'
+    );
+
+-- 8. REALTIME CONFIGURATION
 DO $$
 BEGIN
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.active_sessions;
+    ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.vip_codes;
+    ALTER PUBLICATION supabase_realtime DROP TABLE IF EXISTS public.payment_orders;
     ALTER PUBLICATION supabase_realtime ADD TABLE public.signals;
     ALTER PUBLICATION supabase_realtime ADD TABLE public.trade_outcomes;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.app_settings;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.pricing_packages;
-    ALTER PUBLICATION supabase_realtime ADD TABLE public.vip_codes;
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-    WHEN undefined_object THEN NULL;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.broker_assets;
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.market_events;
+EXCEPTION WHEN OTHERS THEN NULL;
 END $$;
-
--- 14. DEFAULT ADMIN RECORD (Instant Access)
-INSERT INTO public.users (username, email, role, credits, is_vip, vip_expires_at, registration_ip)
-VALUES ('admin', 'durodoluwa5@gmail.com', 'ADMIN', 9999, TRUE, NOW() + INTERVAL '365 days', '127.0.0.1')
-ON CONFLICT (email) DO UPDATE SET
-    role = 'ADMIN',
-    credits = 9999,
-    is_vip = TRUE,
-    vip_expires_at = NOW() + INTERVAL '365 days';

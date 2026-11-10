@@ -72,7 +72,7 @@ export function AdminCenter({
   >('users');
 
   // Admin Security Gate State
-  const [adminIdentity, setAdminIdentity] = useState('durodoluwa5@gmail.com');
+  const [adminIdentity, setAdminIdentity] = useState('');
   const [adminPasscode, setAdminPasscode] = useState('');
   const [gateLoading, setGateLoading] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
@@ -141,24 +141,7 @@ export function AdminCenter({
       const data = await fetchAdminUsers();
       if (Array.isArray(data) && data.length > 0) {
         setUsersList(data);
-      } else {
-        // Fallback default sample if server returned empty
-        setUsersList([
-          {
-            id: 1,
-            username: 'admin',
-            email: 'durodoluwa5@gmail.com',
-            role: 'ADMIN',
-            credits: 9999,
-            is_vip: true,
-            vip_days_left: 365,
-            vip_hours_left: 0,
-            vip_expires_at: new Date(Date.now() + 365 * 86400000).toISOString(),
-            registration_ip: '127.0.0.1',
-            created_at: new Date(Date.now() - 30 * 86400000).toISOString(),
-            status: 'active',
-          },
-        ]);
+        setUsersList([]);
       }
     } catch (e) {
       console.warn('Failed to load users', e);
@@ -768,8 +751,7 @@ export function AdminCenter({
   const loadBlogPosts = async () => {
     setBlogLoading(true);
     try {
-      let res = await fetch('/api/admin/blog/posts');
-      if (!res.ok) res = await fetch('/api.php?action=admin_blog_posts');
+      const res = await fetch('/api/admin/blog');
       if (res.ok) {
         const data = await res.json();
         if (data && Array.isArray(data.posts)) {
@@ -908,7 +890,7 @@ export function AdminCenter({
               required
               value={adminIdentity}
               onChange={(e) => setAdminIdentity(e.target.value)}
-              placeholder="durodoluwa5@gmail.com or admin"
+              placeholder="Admin email or username"
               className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-xs text-white font-mono focus:border-amber-500 focus:outline-none"
             />
           </div>

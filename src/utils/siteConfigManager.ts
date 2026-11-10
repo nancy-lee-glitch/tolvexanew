@@ -199,16 +199,13 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
     }
   }
 
-  // 2. Try Node/PHP Backend API
+  // 2. Try Backend API
   try {
-    let res = await fetch('/api/settings');
-    if (!res.ok) {
-      res = await fetch('/api.php?action=get_settings');
-    }
+    const res = await fetch('/api/admin/settings');
     if (res.ok) {
       const data = await res.json();
       if (data && data.settings) {
-        settings = { ...DEFAULT_SITE_SETTINGS, ...data.settings };
+        settings = { ...DEFAULT_SITE_SETTINGS, ...(data.settings.site_branding || data.settings) };
         localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
         applyDocumentBranding(settings);
         return settings;
@@ -307,10 +304,7 @@ export async function fetchRemoteNowPaymentsConfig(): Promise<NowPaymentsConfig>
 
   // Try backend API
   try {
-    let res = await fetch('/api/nowpayments/config');
-    if (!res.ok) {
-      res = await fetch('/api.php?action=nowpayments_config');
-    }
+    const res = await fetch('/api/nowpayments/config');
     if (res.ok) {
       const data = await res.json();
       if (data && data.config) {
@@ -354,18 +348,11 @@ export async function saveNowPaymentsConfig(newConfig: NowPaymentsConfig): Promi
 
   // 3. Server
   try {
-    let res = await fetch('/api/nowpayments/save-config', {
+    await fetch('/api/nowpayments/save-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config: merged }),
     });
-    if (!res.ok) {
-      await fetch('/api.php?action=nowpayments_save_config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config: merged }),
-      });
-    }
   } catch (err) {
     // Handled
   }
@@ -415,19 +402,11 @@ export async function createNowPaymentsPayment(params: {
   orderDescription: string;
 }): Promise<{ success: boolean; data?: NowPaymentsPayment; message?: string }> {
   try {
-    let res = await fetch('/api/nowpayments/create-payment', {
+    const res = await fetch('/api/nowpayments/create-payment', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     });
-
-    if (!res.ok) {
-      res = await fetch('/api.php?action=nowpayments_create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
-      });
-    }
 
     const json = await res.json();
     if (res.ok && json.success && json.payment) {
@@ -448,10 +427,7 @@ export async function checkNowPaymentsStatus(paymentId: string): Promise<{
   message?: string;
 }> {
   try {
-    let res = await fetch(`/api/nowpayments/check-payment/${encodeURIComponent(paymentId)}`);
-    if (!res.ok) {
-      res = await fetch(`/api.php?action=nowpayments_check&id=${encodeURIComponent(paymentId)}`);
-    }
+    const res = await fetch(`/api/nowpayments/check-payment/${encodeURIComponent(paymentId)}`);
     const json = await res.json();
     if (res.ok && json.success && json.payment) {
       return { success: true, data: json.payment };
@@ -879,46 +855,22 @@ export async function adjustUserCredits(
   };
 }
 
-const STORAGE_KEY_VIP_CODES = 'pulsetrade_vip_codes';
-
-/**
- * Helper to get locally saved VIP codes
- */
+// VIP codes are stored strictly in the database and never kept in browser storage
 function getLocalVipCodes(): VipCodeItem[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_VIP_CODES);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch {}
   return [];
 }
 
-/**
- * Helper to save VIP codes locally
- */
-function saveLocalVipCodes(codes: VipCodeItem[]) {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(STORAGE_KEY_VIP_CODES, JSON.stringify(codes));
-  } catch {}
+function saveLocalVipCodes(_codes: VipCodeItem[]) {
+  // No-op: zero admin data in localStorage
 }
 
 /**
- * Fetch all VIP codes for Admin from Supabase DB, Server API, and Local Cache
+ * Fetch all VIP codes for Admin from Supabase DB or Server API
  */
 export async function fetchAdminVipKeys(_adminPin?: string): Promise<VipCodeItem[]> {
   const codeMap = new Map<string, VipCodeItem>();
 
-  // 1. Load from local cache first (instant availability)
-  const localList = getLocalVipCodes();
-  for (const c of localList) {
-    if (c.code) codeMap.set(c.code.toUpperCase(), c);
-  }
-
-  // 2. Fetch from Supabase DB
+  // 1. Fetch from Supabase DB / API
   const supabase = getSupabaseClient();
   if (supabase) {
     try {
@@ -1337,22 +1289,11 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
   },
 ];
 
-const STORAGE_KEY_PLATFORMS = 'pulsetrade_broker_platforms';
-
 export function getBrokerPlatforms(): BrokerPlatformItem[] {
-  if (typeof window === 'undefined') return DEFAULT_BROKER_PLATFORMS;
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_PLATFORMS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch {}
   return DEFAULT_BROKER_PLATFORMS;
 }
 
 export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]> {
-  let list = getBrokerPlatforms();
   const supabase = getSupabaseClient();
   if (supabase) {
     try {
@@ -1363,27 +1304,19 @@ export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]
         .maybeSingle();
 
       if (data?.value && Array.isArray(data.value) && data.value.length > 0) {
-        list = data.value;
-        if (typeof window !== 'undefined') {
-          localStorage.setItem(STORAGE_KEY_PLATFORMS, JSON.stringify(list));
-        }
-        return list;
+        return data.value;
       }
     } catch (err) {
       console.warn('[Supabase Broker Platforms Fetch Error]', err);
     }
   }
-  return list;
+  return DEFAULT_BROKER_PLATFORMS;
 }
 
 export async function saveBrokerPlatforms(
   platforms: BrokerPlatformItem[],
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_PLATFORMS, JSON.stringify(platforms));
-    window.dispatchEvent(new CustomEvent('pulsetrade_platforms_changed', { detail: platforms }));
-  }
 
   const supabase = getSupabaseClient();
   if (supabase) {
@@ -1412,17 +1345,7 @@ export async function saveBrokerPlatforms(
 // =========================================================================
 // DIRECT WALLET ORDERS & ADMIN APPROVAL WORKFLOW
 // =========================================================================
-const STORAGE_KEY_WALLET_ORDERS = 'pulsetrade_direct_wallet_orders';
-
 export function getLocalDirectWalletOrders(): DirectWalletOrder[] {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_WALLET_ORDERS);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-  } catch {}
   return [];
 }
 
@@ -1436,48 +1359,26 @@ export async function submitDirectWalletOrder(
     created_at: new Date().toISOString(),
   };
 
-  const current = getLocalDirectWalletOrders();
-  const updated = [newOrder, ...current];
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_WALLET_ORDERS, JSON.stringify(updated));
-  }
-
   const supabase = getSupabaseClient();
   if (supabase) {
     try {
-      await supabase.from('wallet_orders').insert([{
-        id: newOrder.id,
+      await supabase.from('direct_orders').insert([{
         user_id: newOrder.user_id,
-        username: newOrder.username,
-        email: newOrder.email,
-        package_id: newOrder.package_id,
-        package_name: newOrder.package_name,
-        package_type: newOrder.package_type,
-        credits_amount: newOrder.credits_amount,
-        price_usd: newOrder.price_usd,
-        coin_symbol: newOrder.coin_symbol,
-        network: newOrder.network,
-        wallet_address: newOrder.wallet_address,
+        package_id: String(newOrder.package_id),
+        amount: newOrder.price_usd,
         tx_hash: newOrder.tx_hash,
-        notes: newOrder.notes,
-        status: 'pending_admin',
-        created_at: newOrder.created_at,
+        status: 'PENDING',
+        reviewer_notes: `${newOrder.coin_symbol || 'CRYPTO'} - ${newOrder.network || 'MAINNET'}`,
       }]);
-    } catch {}
-
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'direct_wallet_orders',
-        value: updated.slice(0, 100),
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
+    } catch (err) {
+      console.warn('[Direct Order Submit Error]', err);
+    }
   }
 
   return {
     success: true,
     orderId: newOrder.id,
-    message: 'Transfer submitted successfully! Status: Pending Admin Verification.',
+    message: 'Transfer submitted successfully! Status: Pending Verification.',
   };
 }
 
@@ -1525,9 +1426,6 @@ export async function fetchDirectWalletOrders(): Promise<DirectWalletOrder[]> {
   }
 
   const merged = Array.from(orderMap.values()).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_WALLET_ORDERS, JSON.stringify(merged));
-  }
   return merged;
 }
 
@@ -1561,10 +1459,6 @@ export async function approveDirectWalletOrder(
   order.status = 'approved';
   order.reviewed_at = new Date().toISOString();
   order.reviewed_by = 'Master Admin';
-
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_WALLET_ORDERS, JSON.stringify(orders));
-  }
 
   const supabase = getSupabaseClient();
   if (supabase) {
@@ -1609,10 +1503,6 @@ export async function rejectDirectWalletOrder(
   order.status = 'rejected';
   order.reviewed_at = new Date().toISOString();
   order.reviewed_by = 'Master Admin';
-
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_WALLET_ORDERS, JSON.stringify(orders));
-  }
 
   const supabase = getSupabaseClient();
   if (supabase) {
@@ -1778,7 +1668,6 @@ export async function fetchRemoteBrokersSettings(): Promise<BrokersSettings> {
           },
           referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(data.value.referralBonus || {}) },
         };
-        localStorage.setItem(STORAGE_KEY_BROKERS, JSON.stringify(settings));
         return settings;
       }
     } catch (err) {
@@ -1798,7 +1687,6 @@ export async function fetchRemoteBrokersSettings(): Promise<BrokersSettings> {
           },
           referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(data.brokersSettings.referralBonus || {}) },
         };
-        localStorage.setItem(STORAGE_KEY_BROKERS, JSON.stringify(settings));
       }
     }
   } catch {}
@@ -1831,9 +1719,8 @@ export async function saveBrokersSettings(
     }
   }
 
-  // 1. Save local
+  // 1. Dispatch event without localStorage persistence
   if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_BROKERS, JSON.stringify(newSettings));
     window.dispatchEvent(new CustomEvent('pulsetrade_brokers_changed', { detail: newSettings }));
   }
 
