@@ -81,7 +81,80 @@ export function AuthModal({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // Security & Bot Defense
+  const [honeypot, setHoneypot] = useState('');
+  const [turnstileToken, setTurnstileToken] = useState('');
+  const [emailConfirmationRequired, setEmailConfirmationRequired] = useState(false);
+  const turnstileContainerRef = React.useRef<HTMLDivElement>(null);
+
   const brokersSettings = getBrokersSettings();
+
+  // Cloudflare Turnstile initialization
+  React.useEffect(() => {
+    const siteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
+    if (!siteKey || currentMode !== 'register' || emailConfirmationRequired) return;
+
+    let widgetId: string | undefined;
+
+    const renderWidget = () => {
+      if (typeof window !== 'undefined' && (window as any).turnstile && turnstileContainerRef.current) {
+        try {
+          // Clear container in case of re-render
+          turnstileContainerRef.current.innerHTML = '';
+          widgetId = (window as any).turnstile.render(turnstileContainerRef.current, {
+            sitekey: siteKey,
+            callback: (token: string) => setTurnstileToken(token),
+            'expired-callback': () => setTurnstileToken(''),
+            'error-callback': () => setTurnstileToken(''),
+          });
+        } catch (e) {
+          console.warn('[Turnstile render error]', e);
+        }
+      }
+    };
+
+    if (typeof window !== 'undefined' && !(window as any).turnstile) {
+      const existingScript = document.getElementById('cloudflare-turnstile-script');
+      if (!existingScript) {
+        const script = document.createElement('script');
+        script.id = 'cloudflare-turnstile-script';
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => renderWidget();
+        document.head.appendChild(script);
+      } else {
+        existingScript.addEventListener('load', renderWidget);
+      }
+    } else {
+      renderWidget();
+    }
+
+    return () => {
+      if (widgetId && typeof window !== 'undefined' && (window as any).turnstile) {
+        try {
+          (window as any).turnstile.remove(widgetId);
+        } catch (err) {
+          console.warn('[Turnstile cleanup warning]', err);
+        }
+      }
+    };
+  }, [currentMode, emailConfirmationRequired]);
+
+  const getPasswordStrength = (pwd: string): { score: number; label: string; color: string } => {
+    if (!pwd) return { score: 0, label: '', color: 'bg-slate-700' };
+    if (pwd.length < 8) return { score: 1, label: 'Too short (min 8 characters)', color: 'bg-rose-500' };
+
+    let score = 1;
+    if (pwd.length >= 12) score += 1;
+    if (/[A-Z]/.test(pwd) && /[a-z]/.test(pwd)) score += 1;
+    if (/[0-9]/.test(pwd)) score += 1;
+    if (/[^A-Za-z0-9]/.test(pwd)) score += 1;
+
+    if (score <= 2) return { score: 2, label: 'Weak', color: 'bg-amber-500' };
+    if (score <= 3) return { score: 3, label: 'Fair', color: 'bg-yellow-400' };
+    return { score: 4, label: 'Strong', color: 'bg-emerald-400' };
+  };
 
   if (!mode) return null;
 
@@ -91,6 +164,15 @@ export function AuthModal({
       setErrorMessage('You must confirm you are at least 18 years old and in an eligible jurisdiction to continue.');
       return;
     }
+    if (password.length < 8) {
+      setErrorMessage('Password must be at least 8 characters long.');
+      return;
+    }
+    if (password.length > 128) {
+      setErrorMessage('Password cannot exceed 128 characters.');
+      return;
+    }
+
     setLoading(true);
     setErrorMessage(null);
     setSuccessMessage(null);
@@ -104,18 +186,31 @@ export function AuthModal({
         extraCredits = brokersSettings.referralBonus.extraCredits || 5;
       }
 
-      const res = await signUpWithSupabase(email, password, username, vipKey.trim(), extraCredits);
+      const res = await signUpWithSupabase(
+        email,
+        password,
+        username,
+        vipKey.trim(),
+        extraCredits,
+        turnstileToken,
+        honeypot
+      );
 
-      if (res.success && res.user) {
-        if (extraCredits > 0) {
-          setSuccessMessage(`Account created! You received 10 starter credits + ${extraCredits} referral bonus credits! Total: ${10 + extraCredits} CR.`);
-        } else {
-          setSuccessMessage(res.message);
+      if (res.success) {
+        if (res.requireEmailConfirmation) {
+          setEmailConfirmationRequired(true);
+          setSuccessMessage('Account created! Please check your email to confirm your registration before signing in.');
+        } else if (res.user) {
+          if (extraCredits > 0) {
+            setSuccessMessage(`Account created! You received 10 starter credits + ${extraCredits} referral bonus credits! Total: ${10 + extraCredits} CR.`);
+          } else {
+            setSuccessMessage(res.message);
+          }
+          onUserUpdated(res.user);
+          setTimeout(() => {
+            setCurrentMode('profile');
+          }, 1200);
         }
-        onUserUpdated(res.user);
-        setTimeout(() => {
-          setCurrentMode('profile');
-        }, 1200);
       } else {
         setErrorMessage(res.message || 'Registration failed. Please check your credentials.');
       }
@@ -179,7 +274,10 @@ export function AuthModal({
   const handleLogout = async () => {
     try {
       await signOutSupabase();
-    } catch {}
+    } catch (err: any) {
+      console.warn('[SignOut Warning]', err);
+      setErrorMessage(err?.message || 'Warning: Failed to invalidate session on server. Local session cleared.');
+    }
 
     onUserUpdated(null);
     setCurrentMode('login');
@@ -310,144 +408,217 @@ export function AuthModal({
 
         {/* MODE: REGISTER */}
         {currentMode === 'register' && (
-          <form onSubmit={handleRegister} className="space-y-3.5">
-            {/* Admin-Configured Referral Bonus Promo Banner */}
-            {brokersSettings.referralBonus.enabled && (
-              <div className="p-3 bg-gradient-to-r from-amber-500/15 via-amber-600/10 to-slate-950 border border-amber-500/30 rounded-2xl space-y-1">
-                <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs font-mono">
-                  <span>🎁</span>
-                  <span>Partner Referral Promo: +{brokersSettings.referralBonus.extraCredits} Extra Credits</span>
-                </div>
-                <p className="text-[11px] text-slate-300 leading-snug font-sans">
-                  {brokersSettings.referralBonus.message ||
-                    `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
+          emailConfirmationRequired ? (
+            <div className="bg-emerald-950/40 border border-emerald-500/40 rounded-2xl p-5 text-center space-y-4">
+              <div className="w-12 h-12 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center mx-auto text-2xl font-mono">
+                ✉️
+              </div>
+              <div className="space-y-1">
+                <h3 className="font-bold text-white text-base font-mono">Confirm Your Email Address</h3>
+                <p className="text-xs text-slate-300 font-sans leading-relaxed">
+                  We sent a confirmation link to <strong className="text-emerald-400">{email}</strong>. Please check your inbox and verify your address before logging in.
                 </p>
               </div>
-            )}
-
-            <div>
-              <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
-                Trader Handle / Username
-              </label>
-              <input
-                type="text"
-                required
-                minLength={3}
-                maxLength={30}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="e.g. QuantAlpha"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
-                Email Address
-              </label>
-              <input
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="trader@domain.com"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
-                Secure Password
-              </label>
-              <input
-                type="password"
-                required
-                minLength={6}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
-              />
-            </div>
-
-            {/* Referral / Partner Promo Code */}
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] font-mono uppercase text-slate-400 tracking-wider">
-                  Referral / Affiliate Code (Optional)
-                </label>
-                {brokersSettings.referralBonus.enabled && (
-                  <span className="text-[10px] font-mono text-amber-400 font-bold">
-                    +{brokersSettings.referralBonus.extraCredits} Extra CR
-                  </span>
-                )}
+              <div className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl text-[11px] text-slate-400 font-mono text-left space-y-1">
+                <div>• Verification ensures honest ownership of your trading records.</div>
+                <div>• Once confirmed, log in to claim your 10 free algorithmic computation credits.</div>
               </div>
-              <input
-                type="text"
-                value={referralCode}
-                onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
-                placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} (or leave blank)`}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-amber-300 font-mono focus:border-amber-500 focus:outline-none uppercase"
-              />
-            </div>
-
-            {/* VIP Activation Pass */}
-            <div className="bg-slate-950/70 border border-amber-500/30 rounded-xl p-3 space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] font-mono uppercase text-amber-300 font-bold flex items-center gap-1.5">
-                  <span>★ VIP Key (Optional)</span>
-                </label>
-                <span className="text-[9px] font-mono text-slate-400">Strict 30-Day Pass</span>
-              </div>
-              <input
-                type="text"
-                value={vipKey}
-                onChange={(e) => setVipKey(e.target.value)}
-                placeholder="e.g. VIP-ALPHA-30D (or leave blank)"
-                className="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-amber-200 font-mono focus:border-amber-400 focus:outline-none uppercase"
-              />
-              <p className="text-[10px] text-slate-400 leading-tight">
-                Enter a 30-day VIP activation key to instantly unlock unlimited signals. If left blank, you will receive 10 free starter credits!
-              </p>
-            </div>
-
-            {/* Age & Jurisdiction Confirmation */}
-            <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-950/60 border border-slate-800 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                required
-                checked={ageConfirmed}
-                onChange={(e) => setAgeConfirmed(e.target.checked)}
-                className="mt-0.5 w-4 h-4 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500 bg-slate-900"
-              />
-              <span className="text-xs text-slate-300 leading-relaxed font-sans">
-                I confirm I am at least <strong className="text-white">18 years old</strong> and reside in an eligible jurisdiction where trading digital contracts is permitted by local law.
-              </span>
-            </label>
-
-            <button
-              type="submit"
-              disabled={loading || !ageConfirmed}
-              className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm font-mono rounded-xl transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
-            >
-              {loading
-                ? 'Creating Trader Account...'
-                : brokersSettings.referralBonus.enabled && referralCode.trim()
-                ? `Get Started & Claim ${10 + brokersSettings.referralBonus.extraCredits} Free Credits →`
-                : 'Get Started & Claim 10 Free Credits →'}
-            </button>
-
-            <div className="text-center text-xs font-mono text-slate-400 pt-1">
-              Already have an account?{' '}
               <button
                 type="button"
-                onClick={() => setCurrentMode('login')}
-                className="text-emerald-400 hover:underline font-bold"
+                onClick={() => {
+                  setEmailConfirmationRequired(false);
+                  setCurrentMode('login');
+                  setIdentity(email);
+                  setPassword('');
+                }}
+                className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs font-mono uppercase rounded-xl transition shadow-lg shadow-emerald-500/20 cursor-pointer"
               >
-                Sign In
+                Proceed to Sign In →
               </button>
             </div>
-          </form>
+          ) : (
+            <form onSubmit={handleRegister} className="space-y-3.5">
+              {/* Bot defense honeypot */}
+              <div style={{ display: 'none' }} aria-hidden="true">
+                <input
+                  type="text"
+                  name="website"
+                  tabIndex={-1}
+                  autoComplete="off"
+                  value={honeypot}
+                  onChange={(e) => setHoneypot(e.target.value)}
+                />
+              </div>
+
+              {/* Admin-Configured Referral Bonus Promo Banner */}
+              {brokersSettings.referralBonus.enabled && (
+                <div className="p-3 bg-gradient-to-r from-amber-500/15 via-amber-600/10 to-slate-950 border border-amber-500/30 rounded-2xl space-y-1">
+                  <div className="flex items-center gap-1.5 text-amber-300 font-bold text-xs font-mono">
+                    <span>🎁</span>
+                    <span>Partner Referral Promo: +{brokersSettings.referralBonus.extraCredits} Extra Credits</span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-snug font-sans">
+                    {brokersSettings.referralBonus.message ||
+                      `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
+                  Trader Handle / Username
+                </label>
+                <input
+                  type="text"
+                  required
+                  minLength={3}
+                  maxLength={30}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="e.g. QuantAlpha"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="trader@domain.com"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-400 tracking-wider mb-1">
+                  Secure Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  maxLength={128}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Min. 8 characters"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
+                />
+                {/* Password Strength Indicator */}
+                <div className="mt-1.5 space-y-1">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-slate-400">Password Strength:</span>
+                    <span className={password ? getPasswordStrength(password).color.replace('bg-', 'text-') : 'text-slate-500'}>
+                      {password ? getPasswordStrength(password).label : 'Min 8 characters'}
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden flex gap-1">
+                    {[1, 2, 3, 4].map((step) => {
+                      const strength = getPasswordStrength(password);
+                      const active = strength.score >= step;
+                      return (
+                        <div
+                          key={step}
+                          className={`h-full flex-1 transition-all duration-300 rounded-full ${
+                            active ? strength.color : 'bg-slate-800'
+                          }`}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* Referral / Partner Promo Code */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] font-mono uppercase text-slate-400 tracking-wider">
+                    Referral / Affiliate Code (Optional)
+                  </label>
+                  {brokersSettings.referralBonus.enabled && (
+                    <span className="text-[10px] font-mono text-amber-400 font-bold">
+                      +{brokersSettings.referralBonus.extraCredits} Extra CR
+                    </span>
+                  )}
+                </div>
+                <input
+                  type="text"
+                  value={referralCode}
+                  onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
+                  placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} (or leave blank)`}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-amber-300 font-mono focus:border-amber-500 focus:outline-none uppercase"
+                />
+              </div>
+
+              {/* VIP Activation Pass */}
+              <div className="bg-slate-950/70 border border-amber-500/30 rounded-xl p-3 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] font-mono uppercase text-amber-300 font-bold flex items-center gap-1.5">
+                    <span>★ VIP Key (Optional)</span>
+                  </label>
+                  <span className="text-[9px] font-mono text-slate-400">Strict 30-Day Pass</span>
+                </div>
+                <input
+                  type="text"
+                  value={vipKey}
+                  onChange={(e) => setVipKey(e.target.value)}
+                  placeholder="e.g. VIP-ALPHA-30D (or leave blank)"
+                  className="w-full bg-slate-900 border border-slate-700/80 rounded-lg px-3 py-1.5 text-xs text-amber-200 font-mono focus:border-amber-400 focus:outline-none uppercase"
+                />
+                <p className="text-[10px] text-slate-400 leading-tight">
+                  Enter a 30-day VIP activation key to instantly unlock unlimited signals. If left blank, you will receive 10 free starter credits!
+                </p>
+              </div>
+
+              {/* Cloudflare Turnstile Verification Widget */}
+              {typeof window !== 'undefined' && import.meta.env.VITE_TURNSTILE_SITE_KEY && (
+                <div className="flex flex-col items-center justify-center my-2">
+                  <div ref={turnstileContainerRef} />
+                </div>
+              )}
+
+              {/* Age & Jurisdiction Confirmation */}
+              <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-950/60 border border-slate-800 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  required
+                  checked={ageConfirmed}
+                  onChange={(e) => setAgeConfirmed(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-slate-700 text-emerald-500 focus:ring-emerald-500 bg-slate-900"
+                />
+                <span className="text-xs text-slate-300 leading-relaxed font-sans">
+                  I confirm I am at least <strong className="text-white">18 years old</strong> and reside in an eligible jurisdiction where trading digital contracts is permitted by local law.
+                </span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={loading || !ageConfirmed}
+                className="w-full py-3.5 bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-sm font-mono rounded-xl transition shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
+              >
+                {loading
+                  ? 'Creating Trader Account...'
+                  : brokersSettings.referralBonus.enabled && referralCode.trim()
+                  ? `Get Started & Claim ${10 + brokersSettings.referralBonus.extraCredits} Free Credits →`
+                  : 'Get Started & Claim 10 Free Credits →'}
+              </button>
+
+              <div className="text-center text-xs font-mono text-slate-400 pt-1">
+                Already have an account?{' '}
+                <button
+                  type="button"
+                  onClick={() => setCurrentMode('login')}
+                  className="text-emerald-400 hover:underline font-bold"
+                >
+                  Sign In
+                </button>
+              </div>
+            </form>
+          )
         )}
 
         {/* MODE: LOGIN */}

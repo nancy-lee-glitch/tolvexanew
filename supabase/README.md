@@ -1,36 +1,39 @@
-# Supabase Database & Security Setup Guide (Tickvere)
+# Supabase Database & Security Guide (Tickvere)
 
-This guide provides the exact operational steps to apply migrations, configure authentication, and manage admin privileges for **Tickvere** (`https://tickvere.com`).
+**Notice**: The `supabase/migrations/` directory is the **single source of truth** for all database tables, policies, triggers, and RPC functions. Legacy root schema files (such as `supabase_schema.sql` or `schema.sql`) have been completely retired.
 
 ---
 
-## 1. Apply Migration 001
+## 0. Pre-Migration Safety Rules
 
-### Option A: Supabase Web Dashboard (Recommended)
-1. Open your Supabase Project Dashboard (`https://supabase.com/dashboard/project/<your-project-id>`).
-2. In the left sidebar, click **SQL Editor**.
-3. Click **New Query**.
-4. Paste the entire content of `supabase/migrations/001_hardening.sql`.
-5. Click **Run** (or press `Ctrl+Enter` / `Cmd+Enter`).
-6. Confirm the console displays: `Success. No rows returned`.
+1. **Backup First**: Before applying migrations, perform a database backup via **Supabase Dashboard** -> **Database** -> **Backups** (or run `pg_dump`).
+2. **Export Legacy Keys**: If you have active keys in legacy tables, export them before running Migration 001, as legacy tables are cleaned up.
 
-### Option B: Supabase CLI
-```bash
-# Link project if not already linked
-supabase link --project-ref <your-project-id>
+---
 
-# Push the migration
-supabase db push
-```
+## 1. Apply Migrations
+
+Run migrations in sequence in **Supabase Dashboard** -> **SQL Editor** (or via Supabase CLI `supabase db push`):
+
+1. **`supabase/migrations/001_hardening.sql`**:
+   - Enables RLS on all tables.
+   - Defines `is_admin()` with `SECURITY DEFINER, STABLE` (eliminating RLS infinite recursion).
+   - Creates `credit_ledger`, `audit_logs`, `rate_limits`, `direct_orders`, `broker_assets`, `instrument_specs`, `market_events`, `ip_registrations`.
+   - Strips sensitive tables (`vip_codes`, `payment_orders`) from the realtime publication.
+
+2. **`supabase/migrations/002_fixes.sql`**:
+   - Updates `handle_new_user()` trigger to use `ON CONFLICT (email) DO NOTHING` to prevent profile takeovers.
+   - Performs idempotent backfill creating safe profile records for any orphaned auth users.
+   - Creates atomic functions `bump_ip_registration(p_ip)` and `rate_limit_hit(p_key, p_max, p_window)`.
+   - Redefines `consume_credit(p_profile)` so credit cost is strictly server-controlled via `app_settings` (ignoring client numbers).
 
 ---
 
 ## 2. Authentication & URL Configuration
 
-In Supabase Dashboard, go to **Authentication** -> **URL Configuration**:
+In Supabase Dashboard, navigate to **Authentication** -> **URL Configuration**:
 
 1. **Site URL**:
-   Set to:
    ```
    https://tickvere.com
    ```
@@ -43,45 +46,42 @@ In Supabase Dashboard, go to **Authentication** -> **URL Configuration**:
    http://localhost:5173/**
    ```
 
-3. **Email Provider Configuration** (**Authentication** -> **Providers** -> **Email**):
-   - **Enable Email Provider**: Checked
-   - **Confirm Email**: If you want users to trade immediately upon sign-up without email verification delays, uncheck **Confirm email**. If enabled, ensure custom SMTP is configured below so emails do not land in spam.
+3. **Email Confirmation**:
+   In **Authentication** -> **Providers** -> **Email**:
+   - Keep **Confirm email** turned **ON**.
+   - Registration creates users via client `auth.signUp` requiring email confirmation before sign-in.
 
 ---
 
-## 3. Enable Cloudflare Turnstile / CAPTCHA (Bot Protection)
+## 3. Enable Cloudflare Turnstile / Bot Protection
 
-To prevent automated credential stuffing and bot registrations:
+To prevent automated bot registrations:
 1. Navigate to **Authentication** -> **Bot Protection / Security**.
-2. Select **Cloudflare Turnstile** (or hCaptcha).
+2. Select **Cloudflare Turnstile**.
 3. Obtain your Turnstile Site Key and Secret Key from [Cloudflare Dashboard](https://dash.cloudflare.com).
-4. Enter the credentials in Supabase and toggle **Enable Turnstile Protection**.
-5. Add `TURNSTILE_SECRET_KEY` into your Vercel Project Environment Variables.
+4. Enter them into Supabase and configure `VITE_TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY` in Vercel.
+5. In production, registration fails closed if `TURNSTILE_SECRET_KEY` is not configured.
 
 ---
 
 ## 4. Custom SMTP Setup (Branded Tickvere Emails)
 
-By default, Supabase sends verification and password reset emails with a rate limit of 3 emails/hour from `noreply@mail.app.supabase.io`. To ensure high deliverability:
+To ensure confirmation and password reset emails land in user inboxes:
 1. Navigate to **Project Settings** -> **Authentication** -> **SMTP Settings**.
-2. Toggle **Enable Custom SMTP**.
-3. Configure your transactional email provider (e.g. Resend, SendGrid, Amazon SES, Postmark):
+2. Enable Custom SMTP using your transactional provider (Resend, SendGrid, Postmark, AWS SES):
    - **Sender Email**: `noreply@tickvere.com` or `support@tickvere.com`
    - **Sender Name**: `Tickvere Security`
-   - **Host**: (e.g., `smtp.resend.com` or `smtp.sendgrid.net`)
-   - **Port**: `587` (or `465` with SSL)
-   - **Username**: `apikey` (or your provider username)
-   - **Password**: Your SMTP API Key
-4. Save and send a test email.
+   - **Port**: `587`
+3. Send a test email to verify DNS DKIM/SPF records.
 
 ---
 
 ## 5. How to Safely Promote the FIRST Admin Account
 
-Because Tickvere follows zero-trust security and does not hardcode admin credentials or backdoors:
+Because Tickvere follows zero-trust security and hardcodes no credentials:
 
-1. Sign up on the website (`https://tickvere.com` or your local development instance) using your intended admin email.
-2. In Supabase Dashboard, open **SQL Editor** and run the following command replacing `'your-email@example.com'` with your actual signed-up email:
+1. Sign up on the website (`https://tickvere.com`) and confirm your email.
+2. In Supabase Dashboard, open **SQL Editor** and run:
 
 ```sql
 UPDATE public.users
@@ -90,13 +90,7 @@ SET role = 'ADMIN',
     vip_expires_at = NOW() + INTERVAL '365 days',
     credits = 9999,
     updated_at = NOW()
-WHERE email = 'your-email@example.com';
+WHERE email = 'your-verified-email@example.com';
 ```
 
-3. Verify admin promotion:
-```sql
-SELECT id, username, email, role, is_vip, credits 
-FROM public.users 
-WHERE email = 'your-email@example.com';
-```
-4. Log out and log back in on Tickvere. Your session now holds verified `ADMIN` privileges.
+3. Log in to Tickvere. The server verifies your `ADMIN` role from `public.users` and displays the Admin Console.

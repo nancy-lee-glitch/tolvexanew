@@ -73,7 +73,9 @@ export function SignalEngine({
     try {
       const saved = localStorage.getItem('pulsetrade_selected_platform');
       if (saved) return saved;
-    } catch {}
+    } catch (err) {
+      console.warn('[SignalEngine] Failed to read selected platform preference from storage:', err);
+    }
     return 'expert_option';
   });
 
@@ -96,7 +98,9 @@ export function SignalEngine({
     setSelectedPlatformId(id);
     try {
       localStorage.setItem('pulsetrade_selected_platform', id);
-    } catch {}
+    } catch (err) {
+      console.warn('[SignalEngine] Failed to save selected platform preference to storage:', err);
+    }
     if (signal) setSignal(null);
   };
 
@@ -107,7 +111,8 @@ export function SignalEngine({
   const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => {
     try {
       return localStorage.getItem('pulsetrade_auto_scan') === 'true';
-    } catch {
+    } catch (err) {
+      console.warn('[SignalEngine] Failed to read auto_scan setting:', err);
       return false;
     }
   });
@@ -171,7 +176,9 @@ export function SignalEngine({
     try {
       const saved = localStorage.getItem('pulsetrade_signal_history');
       if (saved) return JSON.parse(saved);
-    } catch {}
+    } catch (err) {
+      console.warn('[SignalEngine] Failed to read signal history from storage:', err);
+    }
     return [
       {
         id: 'sig_init_1',
@@ -192,7 +199,9 @@ export function SignalEngine({
   useEffect(() => {
     try {
       localStorage.setItem('pulsetrade_signal_history', JSON.stringify(signalHistory));
-    } catch {}
+    } catch (err) {
+      console.warn('[SignalEngine] Failed to persist signal history to storage:', err);
+    }
   }, [signalHistory]);
 
   const handleUpdateHistoryOutcome = (id: string, outcome: 'WIN' | 'LOSS') => {
@@ -737,7 +746,9 @@ export function SignalEngine({
                   setAutoScanEnabled(nextVal);
                   try {
                     localStorage.setItem('pulsetrade_auto_scan', String(nextVal));
-                  } catch {}
+                  } catch (err) {
+                    console.warn('[SignalEngine] Failed to save auto_scan preference:', err);
+                  }
                   if (!nextVal && autoScanCountdownRef.current) {
                     clearInterval(autoScanCountdownRef.current);
                     setAutoScanSecondsRemaining(0);

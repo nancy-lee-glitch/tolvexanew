@@ -22,6 +22,7 @@ function apiDevMiddleware(): Plugin {
         else if (pathname === '/api/admin/blog') routeFile = './api/admin/blog.ts';
         else if (pathname === '/api/admin/orders') routeFile = './api/admin/orders.ts';
         else if (pathname === '/api/admin/audit') routeFile = './api/admin/audit.ts';
+        else if (pathname === '/api/signals/log') routeFile = './api/signals/log.ts';
 
         if (routeFile) {
           try {

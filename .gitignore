@@ -26,4 +26,5 @@ pulsetrade.sqlite-journal
 data/state.json
 data/*.json
 !data/README.md
-
+# Vercel
+.vercel

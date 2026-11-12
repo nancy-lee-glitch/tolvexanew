@@ -1,13 +1,11 @@
 -- =========================================================================
 -- Migration 001: Security & Database Hardening (Idempotent & Re-runnable)
 -- Application: Tickvere (https://tickvere.com)
--- Fixes:
---  A. Unrestricted client-controlled role/VIP/credits in signup trigger
---  B. Infinite recursion in public.users RLS policies
---  C. Overly permissive active_sessions, signals, outcomes, and orders policies
---  D. Elimination of hardcoded backdoors, passwords, and predictable VIP codes
---  E. Atomic server-side RPCs for credit consumption and VIP redemption
---  F. Removal of sensitive tables from realtime broadcast
+--
+-- IMPORTANT PRE-MIGRATION WARNING:
+-- 1. Take a full database backup before running (Supabase Dashboard -> Database -> Backups, or pg_dump).
+-- 2. Export any vip_keys / vip_codes data you still need BEFORE executing this migration,
+--    because "DROP TABLE public.vip_keys CASCADE" permanently drops legacy tables.
 -- =========================================================================
 
 -- 1. EXTENSIONS
@@ -364,9 +362,6 @@ WHERE code IN ('PT-VIP-QUANT2026', 'PT-VIP-DERIV30D', 'PT-VIP-INST9942', 'VIP-AL
 
 -- Drop legacy insecure vip_keys table if present
 DROP TABLE IF EXISTS public.vip_keys CASCADE;
-
--- Remove backdoor admin seed row if present
-DELETE FROM public.users WHERE email = 'durodoluwa5@gmail.com';
 
 -- 7. ATOMIC SECURITY DEFINER RPCS
 

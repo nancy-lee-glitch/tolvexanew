@@ -211,8 +211,10 @@ export async function signUpWithSupabase(
   password: string,
   username: string,
   vipKey?: string,
-  _extraCredits?: number
-): Promise<{ success: boolean; user?: UserProfile; message: string }> {
+  _extraCredits?: number,
+  turnstileToken?: string,
+  website?: string
+): Promise<{ success: boolean; user?: UserProfile; requireEmailConfirmation?: boolean; message: string }> {
   const trimmedEmail = (email || '').trim().toLowerCase();
   const trimmedUsername = (username || '').trim();
   const cleanPassword = password || '';
@@ -226,8 +228,11 @@ export async function signUpWithSupabase(
   if (!trimmedEmail || !trimmedEmail.includes('@')) {
     return { success: false, message: 'Please enter a valid email address.' };
   }
-  if (!cleanPassword || cleanPassword.length < 6) {
-    return { success: false, message: 'Password must be at least 6 characters long.' };
+  if (!cleanPassword || cleanPassword.length < 8) {
+    return { success: false, message: 'Password must be at least 8 characters long.' };
+  }
+  if (cleanPassword.length > 128) {
+    return { success: false, message: 'Password cannot exceed 128 characters.' };
   }
 
   // 1. Call serverless registration endpoint
@@ -238,48 +243,27 @@ export async function signUpWithSupabase(
       username: trimmedUsername,
       email: trimmedEmail,
       password: cleanPassword,
+      turnstileToken: turnstileToken || '',
+      website: website || '',
     }),
   });
 
   if (!regResult.ok) {
-    // If endpoint is not reachable (e.g. static preview), fallback to direct client-side signup
-    const client = getSupabaseClient();
-    if (!client) {
-      return { success: false, message: regResult.error || 'Registration service unavailable.' };
-    }
-
-    const { data: authData, error: authError } = await client.auth.signUp({
-      email: trimmedEmail,
-      password: cleanPassword,
-      options: {
-        data: { username: trimmedUsername },
-      },
-    });
-
-    if (authError) {
-      return { success: false, message: authError.message };
-    }
-
-    if (!authData?.user) {
-      return { success: false, message: 'Registration failed. No user was returned.' };
-    }
-
-    if (Array.isArray(authData.user.identities) && authData.user.identities.length === 0) {
-      return {
-        success: false,
-        message: 'An account with this email address already exists. Please sign in instead.',
-      };
-    }
-
-    // Auto sign in to retrieve session
-    const signInRes = await signInWithSupabase(trimmedEmail, cleanPassword);
-    if (signInRes.success && vipKey && vipKey.trim()) {
-      await redeemVipKeyWithSupabase(vipKey, signInRes.user || null);
-    }
-    return signInRes;
+    return {
+      success: false,
+      message: regResult.error || 'Registration failed. Please check your credentials.',
+    };
   }
 
-  // 2. Sign in to retrieve full session & database profile
+  if (regResult.data?.requireEmailConfirmation) {
+    return {
+      success: true,
+      requireEmailConfirmation: true,
+      message: regResult.data?.message || 'Account created! Please check your email to confirm your account before logging in.',
+    };
+  }
+
+  // If email confirmation is disabled on the project, proceed to sign in
   const loginRes = await signInWithSupabase(trimmedEmail, cleanPassword);
   if (loginRes.success && vipKey && vipKey.trim()) {
     await redeemVipKeyWithSupabase(vipKey, loginRes.user || null);
@@ -488,9 +472,14 @@ export async function redeemVipKeyWithSupabase(
 
 /**
  * Deduct Credit via atomic SECURITY DEFINER RPC `consume_credit`
+ *
+ * NOTE: Analysis currently runs in the browser, so this gate protects the credit balance
+ * but cannot hide analysis code that ships in the bundle; premium outputs (history,
+ * backtests, MT5 plans) move behind server endpoints with entitlement checks in Stage 4.
  */
 export async function deductCreditWithSupabase(
-  currentUser: UserProfile
+  currentUser: UserProfile,
+  profile: 'binary' | 'mt5' = 'binary'
 ): Promise<{ success: boolean; credits: number; is_vip: boolean; message: string }> {
   if (currentUser.is_vip || currentUser.role === 'ADMIN') {
     return {
@@ -520,7 +509,8 @@ export async function deductCreditWithSupabase(
   }
 
   try {
-    const { data, error } = await client.rpc('consume_credit', { p_cost: 1 });
+    // The server defines the credit cost in app_settings (binary: 1, mt5: 2)
+    const { data, error } = await client.rpc('consume_credit', { p_profile: profile });
 
     if (error) {
       return { success: false, credits: currentUser.credits, is_vip: false, message: error.message };
@@ -541,7 +531,7 @@ export async function deductCreditWithSupabase(
       is_vip: Boolean(data.unlimited),
       message: data.unlimited
         ? 'VIP Unlimited Access Active (0 credits consumed)'
-        : '1 credit deducted for algorithmic signal computation.',
+        : `${data.cost || 1} credit deducted for algorithmic signal computation.`,
     };
   } catch (err: any) {
     return {
@@ -581,55 +571,54 @@ export async function sendSupabasePresence(
 }
 
 /**
- * Record Quantitative Signal in Supabase (Public read, Server/Admin insert)
+ * Record Quantitative Signal via server-authoritative POST /api/signals/log
+ * User ID is extracted from verified token on server; client direct inserts to signals are revoked.
  */
-export async function logSignalToSupabase(signal: any, userId?: number | null) {
-  const client = getSupabaseClient();
-  if (!client) return false;
-
+export async function logSignalToSupabase(signal: any, _userId?: number | null): Promise<boolean> {
   try {
-    const { error } = await client.from('signals').insert({
-      user_id: userId || null,
-      asset: signal.asset,
-      timeframe: signal.timeframe,
-      direction: signal.direction,
-      entry_price: signal.entryPrice,
-      target_price: signal.targetPrice,
-      stop_loss: signal.mt5?.stopLossPrice || null,
-      take_profit_1: signal.mt5?.takeProfit1Price || null,
-      take_profit_2: signal.mt5?.takeProfit2Price || null,
-      confidence: signal.confidence,
-      confluence_factors: signal.technicalAudit?.confluenceFactors || [],
-      setup_name: signal.technicalAudit?.setupName || 'Algorithmic Signal',
+    const client = getSupabaseClient();
+    const session = (await client?.auth.getSession())?.data?.session;
+    const token = session?.access_token || '';
+
+    const res = await secureFetch('/api/signals/log', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        asset: signal.asset,
+        timeframe: signal.timeframe,
+        direction: signal.direction,
+        entry_price: Number(signal.entryPrice),
+        target_price: signal.targetPrice ? Number(signal.targetPrice) : null,
+        stop_loss: signal.mt5?.stopLossPrice ? Number(signal.mt5.stopLossPrice) : null,
+        take_profit_1: signal.mt5?.takeProfit1Price ? Number(signal.mt5.takeProfit1Price) : null,
+        take_profit_2: signal.mt5?.takeProfit2Price ? Number(signal.mt5.takeProfit2Price) : null,
+        confidence: Number(signal.confidence),
+        confluence_factors: signal.technicalAudit?.confluenceFactors || [],
+        setup_name: signal.technicalAudit?.setupName || 'Algorithmic Signal',
+      }),
     });
 
-    return !error;
+    return res.ok;
   } catch {
     return false;
   }
 }
 
 /**
- * Record Verified Trade Outcome in Supabase
+ * Outcome recording stub
+ * Trade outcomes are settled exclusively on the server in Stage 4 to prevent
+ * client-side win rate manipulation. Direct client inserts are strictly prohibited.
  */
-export async function logOutcomeToSupabase(outcome: 'WIN' | 'LOSS', signal: any, userId?: number | null) {
-  const client = getSupabaseClient();
-  if (!client) return false;
-
-  try {
-    const { error } = await client.from('trade_outcomes').insert({
-      user_id: userId || null,
-      asset: signal.asset,
-      timeframe: signal.timeframe,
-      direction: signal.direction,
-      entry_price: signal.entryPrice,
-      outcome: outcome,
-    });
-
-    return !error;
-  } catch {
-    return false;
-  }
+export async function logOutcomeToSupabase(
+  _outcome: 'WIN' | 'LOSS',
+  _signal: any,
+  _userId?: number | null
+): Promise<boolean> {
+  // Outcomes are settled server-side in Stage 4
+  return true;
 }
 
 /**

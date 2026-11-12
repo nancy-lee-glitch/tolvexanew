@@ -18,6 +18,20 @@ export function getAuthHeaders(): Record<string, string> {
   let token = '';
   if (typeof window !== 'undefined') {
     token = localStorage.getItem('pulsetrade_session_token') || sessionStorage.getItem('pulsetrade_session_token') || '';
+    if (!token) {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
+          try {
+            const parsed = JSON.parse(localStorage.getItem(key) || '{}');
+            if (parsed?.access_token) {
+              token = parsed.access_token;
+              break;
+            }
+          } catch {}
+        }
+      }
+    }
   }
   return {
     'Content-Type': 'application/json',
@@ -232,32 +246,23 @@ export async function saveSiteSettings(newSettings: SiteSettings): Promise<boole
     window.dispatchEvent(new CustomEvent('pulsetrade_settings_changed', { detail: merged }));
   }
 
-  // 2. Save to Supabase real-time database if connected
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'site_branding',
-        value: merged,
-        updated_at: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.warn('[Supabase Settings Save Error]', err);
-    }
-  }
-
-  // 3. Save to server backend
+  // 2. Save to server backend with auth headers
   try {
-    await fetch('/api/settings', {
+    const res = await fetch('/api/admin/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: merged }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ key: 'site_branding', value: merged }),
     });
-  } catch (err) {
-    // Network fallback
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      console.warn('[Server Settings Save Warning]', data?.error);
+      return false;
+    }
+    return true;
+  } catch (err: any) {
+    console.warn('[Server Settings Save Network Error]', err);
+    return false;
   }
-
-  return true;
 }
 
 /**
@@ -282,7 +287,6 @@ export function getNowPaymentsConfig(): NowPaymentsConfig {
 export async function fetchRemoteNowPaymentsConfig(): Promise<NowPaymentsConfig> {
   let config = getNowPaymentsConfig();
 
-  // Try Supabase
   const supabase = getSupabaseClient();
   if (supabase) {
     try {
@@ -298,144 +302,78 @@ export async function fetchRemoteNowPaymentsConfig(): Promise<NowPaymentsConfig>
         return config;
       }
     } catch (err) {
-      // Handled
+      console.warn('[Supabase NOWPayments Fetch Error]', err);
     }
-  }
-
-  // Try backend API
-  try {
-    const res = await fetch('/api/nowpayments/config');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.config) {
-        config = { ...DEFAULT_NOWPAYMENTS_CONFIG, ...data.config };
-        localStorage.setItem(STORAGE_KEY_NOWPAYMENTS, JSON.stringify(config));
-        return config;
-      }
-    }
-  } catch (err) {
-    // Handled
   }
 
   return config;
 }
 
 /**
- * Save NOWPayments configuration
+ * Save NOWPayments configuration via admin settings
  */
 export async function saveNowPaymentsConfig(newConfig: NowPaymentsConfig): Promise<boolean> {
   const merged = { ...DEFAULT_NOWPAYMENTS_CONFIG, ...newConfig };
 
-  // 1. Local
   if (typeof window !== 'undefined') {
     localStorage.setItem(STORAGE_KEY_NOWPAYMENTS, JSON.stringify(merged));
     window.dispatchEvent(new CustomEvent('pulsetrade_nowpayments_changed', { detail: merged }));
   }
 
-  // 2. Supabase
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'nowpayments_config',
-        value: merged,
-        updated_at: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.warn('[Supabase NOWPayments Save Error]', err);
-    }
-  }
-
-  // 3. Server
   try {
-    await fetch('/api/nowpayments/save-config', {
+    const res = await fetch('/api/admin/settings', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: merged }),
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ key: 'nowpayments_config', value: merged }),
     });
-  } catch (err) {
-    // Handled
+    return res.ok;
+  } catch (err: any) {
+    console.warn('[Save NOWPayments Config Error]', err);
+    return false;
   }
-
-  return true;
 }
 
 /**
  * Test NOWPayments API connectivity
  */
 export async function testNowPaymentsConnection(
-  apiKey: string,
-  isSandbox: boolean = false
+  _apiKey: string,
+  _isSandbox: boolean = false
 ): Promise<{ success: boolean; message: string }> {
-  if (!apiKey || apiKey.trim().length < 10) {
-    return { success: false, message: 'Please provide a valid NOWPayments API Key.' };
-  }
-
-  try {
-    const res = await fetch('/api/nowpayments/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, isSandbox }),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      return {
-        success: Boolean(data.success),
-        message: data.message || (data.success ? 'NOWPayments API connection verified!' : 'Connection test failed.'),
-      };
-    }
-    return { success: false, message: `Server returned HTTP ${res.status}` };
-  } catch (err: any) {
-    return { success: false, message: err?.message || 'Network error during connection test.' };
-  }
+  return {
+    success: false,
+    message: 'Payments are being set up. Payment gateway testing and live webhook integration will be enabled in Stage 5.',
+  };
 }
 
 /**
  * Create a live NOWPayments invoice for instant payment verification
  */
-export async function createNowPaymentsPayment(params: {
+export async function createNowPaymentsPayment(_params: {
   priceAmount: number;
   priceCurrency?: string;
   payCurrency: string;
   orderId: string;
   orderDescription: string;
 }): Promise<{ success: boolean; data?: NowPaymentsPayment; message?: string }> {
-  try {
-    const res = await fetch('/api/nowpayments/create-payment', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-
-    const json = await res.json();
-    if (res.ok && json.success && json.payment) {
-      return { success: true, data: json.payment };
-    }
-    return { success: false, message: json.message || 'Failed to create payment invoice with NOWPayments.' };
-  } catch (err: any) {
-    return { success: false, message: err?.message || 'Network error initiating NOWPayments invoice.' };
-  }
+  return {
+    success: false,
+    message: 'Payments are being set up. Automated cryptocurrency invoices will be enabled in Stage 5.',
+  };
 }
 
 /**
  * Poll payment status from NOWPayments
  */
-export async function checkNowPaymentsStatus(paymentId: string): Promise<{
+export async function checkNowPaymentsStatus(_paymentId: string): Promise<{
   success: boolean;
   data?: NowPaymentsPayment;
   message?: string;
 }> {
-  try {
-    const res = await fetch(`/api/nowpayments/check-payment/${encodeURIComponent(paymentId)}`);
-    const json = await res.json();
-    if (res.ok && json.success && json.payment) {
-      return { success: true, data: json.payment };
-    }
-    return { success: false, message: json.message || 'Unable to fetch status.' };
-  } catch (err: any) {
-    return { success: false, message: err?.message || 'Status check request failed.' };
-  }
+  return {
+    success: false,
+    message: 'Payments are being set up. Real-time blockchain status tracking will be enabled in Stage 5.',
+  };
 }
 
 /**
@@ -506,8 +444,7 @@ export async function fetchPricingPackages(): Promise<PricingPackage[]> {
 
   // 3. Fallback to server API
   try {
-    let res = await fetch('/api/pricing_packages');
-    if (!res.ok) res = await fetch('/api/packages');
+    const res = await fetch('/api/admin/pricing');
     if (res.ok) {
       const data = await res.json();
       if (data && Array.isArray(data.packages) && data.packages.length > 0) {
@@ -534,88 +471,46 @@ export async function savePricingPackages(
   localStorage.setItem(STORAGE_KEY_PACKAGES, JSON.stringify(packages));
   window.dispatchEvent(new CustomEvent('pulsetrade_packages_changed', { detail: packages }));
 
-  let savedToDb = false;
-  let dbError = '';
-
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      // 1. Save to app_settings key 'pricing_packages'
-      const { error: setErr } = await supabase.from('app_settings').upsert({
-        key: 'pricing_packages',
-        value: packages,
-        updated_at: new Date().toISOString(),
-      });
-
-      if (!setErr) {
-        savedToDb = true;
-      } else {
-        dbError = setErr.message;
-      }
-
-      // 2. Also upsert into public.pricing_packages table
-      try {
-        for (const pkg of packages) {
-          const numericId = typeof pkg.id === 'number' ? pkg.id : parseInt(String(pkg.id).replace(/\D/g, '').slice(0, 8)) || undefined;
-          await supabase.from('pricing_packages').upsert({
-            ...(numericId ? { id: numericId } : {}),
-            name: pkg.name,
-            type: pkg.type,
-            credits_amount: pkg.credits_amount,
-            bonus_credits: pkg.bonus_credits,
-            price_usd: pkg.price_usd,
-            badge_label: pkg.badge_label || '',
-            description: pkg.description || '',
-            is_active: pkg.is_active,
-            sort_order: pkg.sort_order,
-            updated_at: new Date().toISOString(),
-          });
-        }
-      } catch {
-        // Handled via app_settings
-      }
-    } catch (err: any) {
-      dbError = err?.message || 'Database error';
-    }
-  }
-
-  // 3. Notify Node Backend API
   try {
-    await fetch('/api/admin/pricing_packages', {
+    const res = await fetch('/api/admin/pricing', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ packages }),
     });
-  } catch {}
 
-  if (savedToDb || supabase) {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return {
+        success: false,
+        message: data.error || 'Failed to update pricing packages on server.',
+      };
+    }
+
     return {
       success: true,
-      message: 'Pricing packages saved and synchronized successfully to live database!',
+      message: data.message || 'Pricing packages saved and synchronized successfully!',
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Network error updating pricing packages.',
     };
   }
-
-  return {
-    success: true,
-    message: 'Pricing packages saved locally in active session.',
-  };
 }
 
 /**
- * Fetch all registered users for Admin Dashboard from live online Supabase DB
+ * Fetch all registered users for Admin Dashboard from live online Supabase DB or Server API
  */
 export async function fetchAdminUsers(_adminPin?: string): Promise<AdminUserItem[]> {
-  const supabase = getSupabaseClient();
-
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('users')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!error && Array.isArray(data) && data.length > 0) {
-        return data.map((u: any) => {
+  try {
+    const res = await fetch('/api/admin/users', {
+      method: 'GET',
+      headers: getAuthHeaders(),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && Array.isArray(data.users)) {
+        return data.users.map((u: any) => {
           let isVip = Boolean(u.is_vip);
           const vipExp = u.vip_expires_at || null;
           let daysLeft = 0;
@@ -650,23 +545,6 @@ export async function fetchAdminUsers(_adminPin?: string): Promise<AdminUserItem
           };
         });
       }
-    } catch (err) {
-      console.warn('[Supabase Users Fetch Error]', err);
-    }
-  }
-
-  // Fallback to Backend API
-  try {
-    const res = await fetch('/api/admin/users', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({}),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data && Array.isArray(data.users)) {
-        return data.users;
-      }
     }
   } catch (err) {
     console.warn('[API Users Fetch Error]', err);
@@ -677,83 +555,26 @@ export async function fetchAdminUsers(_adminPin?: string): Promise<AdminUserItem
 
 /**
  * Grant 30-Day VIP to a user
- * Expiry Rule: If VIP still active, extend current vip_expires_at + 30 days; else now + 30 days.
  */
 export async function grantUserVip(
   userId: string | number,
   days: number = 30,
   _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
-  const supabase = getSupabaseClient();
-  let updatedRecord: any = null;
-
-  if (supabase) {
-    try {
-      // 1. Fetch current user row to calculate precise expiry
-      const { data: userRow } = await supabase
-        .from('users')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
-
-      let baseTimestamp = Date.now();
-      if (userRow?.is_vip && userRow?.vip_expires_at) {
-        const currentExp = new Date(userRow.vip_expires_at).getTime();
-        if (currentExp > baseTimestamp) {
-          baseTimestamp = currentExp;
-        }
-      }
-      const newVipExpiresAt = new Date(baseTimestamp + days * 86400000).toISOString();
-
-      const { data: updated, error } = await supabase
-        .from('users')
-        .update({
-          is_vip: true,
-          vip_expires_at: newVipExpiresAt,
-          credits: 9999,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', userId)
-        .select()
-        .maybeSingle();
-
-      if (!error && updated) {
-        updatedRecord = updated;
-      }
-    } catch (err) {
-      console.warn('[Supabase Grant VIP Error]', err);
-    }
-  }
-
-  // Also notify server backend
   try {
-    await fetch('/api/admin/grant-vip', {
+    const res = await fetch('/api/admin/users', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ userId, days }),
+      body: JSON.stringify({ action: 'grant_vip', userId, days }),
     });
-  } catch {}
-
-  if (updatedRecord) {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to grant VIP.' };
+    }
     return {
       success: true,
-      user: updatedRecord,
-      message: `30-Day VIP granted! Active until ${new Date(updatedRecord.vip_expires_at).toLocaleDateString()}.`,
-    };
-  }
-
-  // Fallback to Backend API
-  try {
-    const res = await fetch('/api/admin/grant-vip', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ userId, days }),
-    });
-    const data = await res.json();
-    return {
-      success: Boolean(data.success),
       user: data.user,
-      message: data.message || (data.success ? 'VIP granted.' : 'Failed to grant VIP.'),
+      message: data.message || `30-Day VIP granted!`,
     };
   } catch (err: any) {
     return { success: false, message: err?.message || 'Network error granting VIP.' };
@@ -767,45 +588,24 @@ export async function revokeUserVip(
   userId: string | number,
   _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
-  const supabase = getSupabaseClient();
-  let updatedRecord: any = null;
-
-  if (supabase) {
-    try {
-      const { data: updated, error } = await supabase
-        .from('users')
-        .update({
-          is_vip: false,
-          vip_expires_at: null,
-          credits: 10,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', userId)
-        .select()
-        .maybeSingle();
-
-      if (!error && updated) {
-        updatedRecord = updated;
-      }
-    } catch (err) {
-      console.warn('[Supabase Revoke VIP Error]', err);
-    }
-  }
-
-  // Also notify backend
   try {
-    await fetch('/api/admin/revoke-vip', {
+    const res = await fetch('/api/admin/users', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ userId }),
+      body: JSON.stringify({ action: 'revoke_vip', userId }),
     });
-  } catch {}
-
-  return {
-    success: true,
-    user: updatedRecord,
-    message: 'VIP status revoked and account reset to standard starter tier.',
-  };
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to revoke VIP.' };
+    }
+    return {
+      success: true,
+      user: data.user,
+      message: data.message || 'VIP status revoked and account reset.',
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error revoking VIP.' };
+  }
 }
 
 /**
@@ -816,43 +616,24 @@ export async function adjustUserCredits(
   credits: number,
   _adminPin?: string
 ): Promise<{ success: boolean; user?: any; message: string }> {
-  const supabase = getSupabaseClient();
-  let updatedRecord: any = null;
-
-  if (supabase) {
-    try {
-      const { data: updated, error } = await supabase
-        .from('users')
-        .update({
-          credits,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', userId)
-        .select()
-        .maybeSingle();
-
-      if (!error && updated) {
-        updatedRecord = updated;
-      }
-    } catch (err) {
-      console.warn('[Supabase Adjust Credits Error]', err);
-    }
-  }
-
-  // Also notify backend
   try {
-    await fetch('/api/admin/adjust-credits', {
+    const res = await fetch('/api/admin/users', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ userId, credits }),
+      body: JSON.stringify({ action: 'adjust_credits', userId, credits, reason: 'admin_manual_adjustment' }),
     });
-  } catch {}
-
-  return {
-    success: true,
-    user: updatedRecord,
-    message: `Account credits adjusted to ${credits} CR.`,
-  };
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to adjust credits.' };
+    }
+    return {
+      success: true,
+      user: data.user,
+      message: data.message || `Account credits adjusted to ${credits} CR.`,
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error adjusting credits.' };
+  }
 }
 
 // VIP codes are stored strictly in the database and never kept in browser storage
@@ -868,369 +649,147 @@ function saveLocalVipCodes(_codes: VipCodeItem[]) {
  * Fetch all VIP codes for Admin from Supabase DB or Server API
  */
 export async function fetchAdminVipKeys(_adminPin?: string): Promise<VipCodeItem[]> {
-  const codeMap = new Map<string, VipCodeItem>();
-
-  // 1. Fetch from Supabase DB / API
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      const { data, error } = await supabase
-        .from('vip_codes')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (!error && Array.isArray(data)) {
-        for (const d of data) {
-          const item: VipCodeItem = {
-            id: d.id,
-            code: d.code,
-            duration_days: d.duration_days || 30,
-            is_active: Boolean(d.is_active),
-            is_redeemed: Boolean(d.is_redeemed),
-            redeemed_by: d.redeemed_by_email || (d.redeemed_by_user_id ? `User #${d.redeemed_by_user_id}` : undefined),
-            redeemed_at: d.redeemed_at,
-            created_at: d.created_at || new Date().toISOString(),
-            created_by: d.created_by_admin || 'Master Admin',
-          };
-          codeMap.set(item.code.toUpperCase(), item);
-        }
-      }
-
-      // 2b. Also read app_settings key 'vip_codes' to ensure full sync
-      try {
-        const { data: setRow } = await supabase
-          .from('app_settings')
-          .select('value')
-          .eq('key', 'vip_codes')
-          .maybeSingle();
-
-        if (setRow?.value && Array.isArray(setRow.value)) {
-          for (const d of setRow.value) {
-            const item: VipCodeItem = {
-              id: d.id,
-              code: d.code,
-              duration_days: d.duration_days || 30,
-              is_active: Boolean(d.is_active !== false),
-              is_redeemed: Boolean(d.is_redeemed),
-              redeemed_by: d.redeemed_by || d.redeemed_by_username || d.redeemed_by_email,
-              redeemed_at: d.redeemed_at,
-              created_at: d.created_at || new Date().toISOString(),
-              created_by: d.created_by || 'Master Admin',
-            };
-            if (!codeMap.has(item.code.toUpperCase()) || item.is_redeemed) {
-              codeMap.set(item.code.toUpperCase(), item);
-            }
-          }
-        }
-      } catch {}
-    } catch (err) {
-      console.warn('[Supabase VIP Codes Fetch Error]', err);
-    }
-  }
-
-  // 3. Query Node / Express Backend API with session authorization
   try {
-    let res = await fetch('/api/admin/vip-codes', {
+    const res = await fetch('/api/admin/vip-codes', {
       headers: getAuthHeaders(),
     });
-    if (!res.ok) {
-      res = await fetch('/api/admin/vip-codes', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({}),
-      });
-    }
-    if (!res.ok) {
-      res = await fetch('/api/admin/vip-keys', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({}),
-      });
-    }
 
     if (res.ok) {
       const data = await res.json();
-      const list = data?.codes || data?.keys;
-      if (Array.isArray(list)) {
-        for (const d of list) {
-          const item: VipCodeItem = {
-            id: d.id,
-            code: d.code,
-            duration_days: d.duration_days || 30,
-            is_active: Boolean(d.is_active !== false),
-            is_redeemed: Boolean(d.is_redeemed),
-            redeemed_by: d.redeemed_by_username || d.redeemed_by_email || (d.redeemed_by_user_id ? `User #${d.redeemed_by_user_id}` : undefined),
-            redeemed_at: d.redeemed_at,
-            created_at: d.created_at || new Date().toISOString(),
-            created_by: d.created_by || 'Master Admin',
-          };
-          codeMap.set(item.code.toUpperCase(), item);
-        }
+      if (Array.isArray(data?.vipCodes)) {
+        return data.vipCodes.map((d: any) => ({
+          id: d.id,
+          code: d.code,
+          duration_days: d.duration_days || 30,
+          is_active: Boolean(d.is_active),
+          is_redeemed: Boolean(d.is_redeemed),
+          redeemed_by: d.redeemed_by_email || (d.redeemed_by_user_id ? `User #${d.redeemed_by_user_id}` : undefined),
+          redeemed_at: d.redeemed_at,
+          created_at: d.created_at || new Date().toISOString(),
+          created_by: d.created_by_admin || 'Master Admin',
+        }));
       }
     }
   } catch (err) {
     console.warn('[API VIP Codes Fetch Error]', err);
   }
 
-  const merged = Array.from(codeMap.values()).sort((a, b) => {
-    const timeA = a.created_at ? new Date(a.created_at).getTime() : 0;
-    const timeB = b.created_at ? new Date(b.created_at).getTime() : 0;
-    return timeB - timeA;
-  });
-
-  // Sync merged back to local storage
-  if (merged.length > 0) {
-    saveLocalVipCodes(merged);
-  }
-
-  return merged;
+  return [];
 }
 
 /**
- * Generate single or bulk secure VIP codes (PT-VIP-XXXXXXXX)
- * Inserts directly into online Supabase DB, syncs backend, and stores locally
+ * Generate single or bulk secure VIP codes via server-side admin endpoint
  */
 export async function generateVipKeys(
   count: number = 1,
   durationDays: number = 30,
   _adminPin?: string
 ): Promise<{ success: boolean; keys?: VipCodeItem[]; message: string }> {
-  const newCodes: VipCodeItem[] = [];
-  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-
-  for (let i = 0; i < count; i++) {
-    let rand = '';
-    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-      const buffer = new Uint8Array(8);
-      crypto.getRandomValues(buffer);
-      for (const b of buffer) {
-        rand += chars[b % chars.length];
-      }
-    } else {
-      for (let j = 0; j < 8; j++) {
-        rand += chars[Math.floor(Math.random() * chars.length)];
-      }
-    }
-    const code = `PT-VIP-${rand}`;
-    newCodes.push({
-      id: `vip_${Date.now()}_${i}`,
-      code,
-      duration_days: durationDays,
-      is_active: true,
-      is_redeemed: false,
-      created_at: new Date().toISOString(),
-      created_by: 'Master Admin',
-    });
-  }
-
-  // 1. Immediately update and persist in local storage
-  const currentLocal = getLocalVipCodes();
-  const existingCodes = new Set(currentLocal.map((c) => c.code.toUpperCase()));
-  const freshToAdd = newCodes.filter((c) => !existingCodes.has(c.code.toUpperCase()));
-  const updatedLocal = [...freshToAdd, ...currentLocal];
-  saveLocalVipCodes(updatedLocal);
-
-  // 2. Try inserting into Supabase DB
-  const supabase = getSupabaseClient();
-  let supabaseInserted: VipCodeItem[] | null = null;
-  if (supabase) {
-    try {
-      const rowsToInsert = newCodes.map((c) => ({
-        code: c.code,
-        duration_days: c.duration_days,
-        is_active: true,
-        is_redeemed: false,
-        created_at: c.created_at,
-        created_by_admin: 'Master Admin',
-      }));
-
-      const { data, error } = await supabase
-        .from('vip_codes')
-        .insert(rowsToInsert)
-        .select();
-
-      if (!error && Array.isArray(data)) {
-        supabaseInserted = data.map((d: any) => ({
-          id: d.id,
-          code: d.code,
-          duration_days: d.duration_days,
-          is_active: d.is_active,
-          is_redeemed: d.is_redeemed,
-          redeemed_by: d.redeemed_by_email || (d.redeemed_by_user_id ? `User #${d.redeemed_by_user_id}` : undefined),
-          redeemed_at: d.redeemed_at,
-          created_at: d.created_at,
-          created_by: d.created_by_admin || 'Master Admin',
-        }));
-      }
-    } catch (err: any) {
-      console.warn('[Supabase VIP Code Generation Error]', err);
-    }
-  }
-
-  // 3. Sync to Node / Express Backend API
-  let serverResultCodes: VipCodeItem[] | null = null;
   try {
-    let res = await fetch('/api/admin/generate-vip-codes', {
+    const res = await fetch('/api/admin/vip-codes', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ count, duration_days: durationDays, codes: newCodes }),
+      body: JSON.stringify({ action: 'generate', count, durationDays }),
     });
-    if (!res.ok) {
-      res = await fetch('/api/admin/generate-vip-keys', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ count, durationDays, codes: newCodes }),
-      });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return {
+        success: false,
+        message: data.error || 'Failed to generate VIP codes.',
+      };
     }
 
-    if (res.ok) {
-      const data = await res.json();
-      const list = data.codes || data.keys;
-      if (Array.isArray(list) && list.length > 0) {
-        serverResultCodes = list;
-      }
-    }
+    const generated = (data.generated || []).map((d: any) => ({
+      id: d.id,
+      code: d.code,
+      duration_days: d.duration_days || durationDays,
+      is_active: Boolean(d.is_active),
+      is_redeemed: Boolean(d.is_redeemed),
+      created_at: d.created_at || new Date().toISOString(),
+      created_by: d.created_by_admin || 'Master Admin',
+    }));
+
+    return {
+      success: true,
+      keys: generated,
+      message: data.message || `Generated ${generated.length} secure VIP code(s)!`,
+    };
   } catch (err: any) {
-    console.warn('[Backend VIP Sync Warning]', err);
+    return {
+      success: false,
+      message: err?.message || 'Network error generating VIP keys.',
+    };
   }
-
-  const finalCodes = supabaseInserted || serverResultCodes || newCodes;
-
-  // Update local storage with final IDs if any
-  const finalMap = new Map<string, VipCodeItem>();
-  for (const c of updatedLocal) finalMap.set(c.code.toUpperCase(), c);
-  for (const c of finalCodes) finalMap.set(c.code.toUpperCase(), c);
-  const fullList = Array.from(finalMap.values());
-  saveLocalVipCodes(fullList);
-
-  // Sync complete list to app_settings key 'vip_codes' for 100% database persistence
-  if (supabase) {
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'vip_codes',
-        value: fullList,
-        updated_at: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.warn('[app_settings VIP Codes save error]', err);
-    }
-  }
-
-  return {
-    success: true,
-    keys: finalCodes,
-    message: `Generated ${finalCodes.length} secure one-time VIP code(s)!`,
-  };
 }
 
 /**
- * Toggle disable / enable VIP code
+ * Toggle disable / enable VIP code via server-side admin endpoint
  */
 export async function toggleVipKey(
   id: string | number,
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-  // Update local storage first
-  const current = getLocalVipCodes();
-  let nextActive = false;
-  const updated = current.map((c) => {
-    if (String(c.id) === String(id) || c.code === String(id)) {
-      nextActive = !c.is_active;
-      return { ...c, is_active: nextActive };
-    }
-    return c;
-  });
-  saveLocalVipCodes(updated);
-
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      const { data: row } = await supabase.from('vip_codes').select('is_active').eq('id', id).maybeSingle();
-      if (row) {
-        nextActive = !row.is_active;
-      }
-      await supabase.from('vip_codes').update({ is_active: nextActive }).eq('id', id);
-    } catch (err) {
-      console.warn('[Supabase Toggle VIP Error]', err);
-    }
-
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'vip_codes',
-        value: updated,
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
-  }
-
   try {
-    let res = await fetch('/api/admin/toggle-vip-code', {
+    const res = await fetch('/api/admin/vip-codes', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: 'toggle', id }),
     });
-    if (!res.ok) {
-      await fetch('/api/admin/toggle-vip-key', {
-        method: 'POST',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ id }),
-      });
-    }
-  } catch {}
 
-  return {
-    success: true,
-    message: `VIP Code status updated to ${nextActive ? 'ACTIVE' : 'DISABLED'}.`,
-  };
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return {
+        success: false,
+        message: data.error || 'Failed to toggle VIP code status.',
+      };
+    }
+
+    return {
+      success: true,
+      message: `VIP Code status updated to ${data.code?.is_active ? 'ACTIVE' : 'DISABLED'}.`,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Network error toggling VIP code status.',
+    };
+  }
 }
 
 /**
- * Admin Test Redeem Tool for verification
+ * Admin Test Redeem Tool for verification via atomic server RPC
  */
 export async function adminTestRedeemVipKey(
   code: string,
-  usernameOrEmail: string = 'admin_test'
+  _usernameOrEmail: string = 'admin_test'
 ): Promise<{ success: boolean; message: string }> {
-  const cleanKey = (code || '').trim().toUpperCase();
-  const currentList = getLocalVipCodes();
-  const found = currentList.find((c) => c.code.toUpperCase() === cleanKey);
-  if (!found) {
-    return { success: false, message: `VIP code "${cleanKey}" not found in inventory.` };
-  }
-  if (!found.is_active) {
-    return { success: false, message: `VIP code "${cleanKey}" is deactivated.` };
-  }
-  if (found.is_redeemed) {
-    return { success: false, message: `VIP code "${cleanKey}" was already redeemed by ${found.redeemed_by || 'another trader'}.` };
-  }
-
-  found.is_redeemed = true;
-  found.redeemed_by = usernameOrEmail;
-  found.redeemed_at = new Date().toISOString();
-  saveLocalVipCodes(currentList);
-
   const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('vip_codes').update({
-        is_redeemed: true,
-        redeemed_by_email: usernameOrEmail,
-        redeemed_at: found.redeemed_at,
-      }).eq('code', cleanKey);
-    } catch {}
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'vip_codes',
-        value: currentList,
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
+  if (!supabase) {
+    return { success: false, message: 'Database client not connected.' };
   }
 
-  return {
-    success: true,
-    message: `Code "${cleanKey}" marked as redeemed by ${usernameOrEmail}. Single-use rule verified!`,
-  };
+  try {
+    const { data, error } = await supabase.rpc('redeem_vip', { p_code: code.trim().toUpperCase() });
+    if (error) {
+      return { success: false, message: error.message };
+    }
+    if (data?.ok) {
+      return {
+        success: true,
+        message: `Code "${code.toUpperCase()}" redeemed successfully! VIP active until ${data.vip_expires_at || '30 days'}.`,
+      };
+    }
+    return {
+      success: false,
+      message: data?.error || 'Redemption rejected.',
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err?.message || 'Error processing VIP code redemption.',
+    };
+  }
 }
 
 // =========================================================================
@@ -1317,29 +876,20 @@ export async function saveBrokerPlatforms(
   platforms: BrokerPlatformItem[],
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'broker_platforms',
-        value: platforms,
-        updated_at: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      console.warn('[Supabase Platforms Save Error]', err);
-    }
-  }
-
   try {
-    await fetch('/api/admin/broker-platforms', {
+    const res = await fetch('/api/admin/settings', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ platforms }),
+      body: JSON.stringify({ key: 'broker_platforms', value: platforms }),
     });
-  } catch {}
-
-  return { success: true, message: 'Broker platforms saved to database successfully!' };
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { success: false, message: data.error || 'Failed to update broker platforms.' };
+    }
+    return { success: true, message: 'Broker platforms saved to database successfully!' };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error updating broker platforms.' };
+  }
 }
 
 // =========================================================================
@@ -1362,14 +912,22 @@ export async function submitDirectWalletOrder(
   const supabase = getSupabaseClient();
   if (supabase) {
     try {
-      await supabase.from('direct_orders').insert([{
+      const { data, error } = await supabase.from('direct_orders').insert([{
         user_id: newOrder.user_id,
         package_id: String(newOrder.package_id),
         amount: newOrder.price_usd,
         tx_hash: newOrder.tx_hash,
         status: 'PENDING',
         reviewer_notes: `${newOrder.coin_symbol || 'CRYPTO'} - ${newOrder.network || 'MAINNET'}`,
-      }]);
+      }]).select().single();
+
+      if (!error && data) {
+        return {
+          success: true,
+          orderId: String(data.id),
+          message: 'Transfer submitted successfully! Status: Pending Verification.',
+        };
+      }
     } catch (err) {
       console.warn('[Direct Order Submit Error]', err);
     }
@@ -1383,186 +941,116 @@ export async function submitDirectWalletOrder(
 }
 
 export async function fetchDirectWalletOrders(): Promise<DirectWalletOrder[]> {
-  const local = getLocalDirectWalletOrders();
-  const orderMap = new Map<string, DirectWalletOrder>();
-  for (const o of local) orderMap.set(o.id, o);
+  try {
+    const res = await fetch('/api/admin/orders', {
+      headers: getAuthHeaders(),
+    });
 
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      const { data } = await supabase.from('app_settings').select('value').eq('key', 'direct_wallet_orders').maybeSingle();
-      if (data?.value && Array.isArray(data.value)) {
-        for (const o of data.value) orderMap.set(o.id, o);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.directOrders)) {
+        return data.directOrders.map((d: any) => ({
+          id: String(d.id),
+          user_id: d.user_id,
+          username: d.users?.username || `User #${d.user_id}`,
+          email: d.users?.email || '',
+          package_id: d.package_id,
+          package_name: d.package_id,
+          package_type: String(d.package_id).toLowerCase().includes('vip') ? 'VIP_30_DAY' : 'CREDITS',
+          credits_amount: 25,
+          price_usd: Number(d.amount) || 0,
+          coin_symbol: 'CRYPTO',
+          network: 'MAINNET',
+          wallet_address: '',
+          tx_hash: d.tx_hash,
+          notes: d.reviewer_notes,
+          status: (d.status || 'PENDING').toLowerCase(),
+          created_at: d.created_at,
+          reviewed_at: d.reviewed_at,
+          reviewed_by: d.reviewed_by ? String(d.reviewed_by) : undefined,
+        }));
       }
-    } catch {}
-
-    try {
-      const { data } = await supabase.from('wallet_orders').select('*').order('created_at', { ascending: false });
-      if (Array.isArray(data)) {
-        for (const d of data) {
-          orderMap.set(d.id, {
-            id: d.id,
-            user_id: d.user_id,
-            username: d.username,
-            email: d.email,
-            package_id: d.package_id,
-            package_name: d.package_name,
-            package_type: d.package_type,
-            credits_amount: d.credits_amount,
-            price_usd: d.price_usd,
-            coin_symbol: d.coin_symbol,
-            network: d.network,
-            wallet_address: d.wallet_address,
-            tx_hash: d.tx_hash,
-            notes: d.notes,
-            status: d.status,
-            created_at: d.created_at,
-            reviewed_at: d.reviewed_at,
-            reviewed_by: d.reviewed_by,
-          });
-        }
-      }
-    } catch {}
+    }
+  } catch (err) {
+    console.warn('[Fetch Direct Wallet Orders Error]', err);
   }
 
-  const merged = Array.from(orderMap.values()).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  return merged;
+  return [];
 }
 
 export async function approveDirectWalletOrder(
   orderId: string,
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-  const orders = await fetchDirectWalletOrders();
-  const order = orders.find((o) => o.id === orderId);
-  if (!order) return { success: false, message: 'Order not found.' };
-  if (order.status !== 'pending_admin') {
-    return { success: false, message: `Order is already ${order.status}.` };
-  }
-
-  // Grant VIP or Credits based on package_type
-  if (order.package_type === 'VIP_30_DAY') {
-    await grantUserVip(order.user_id, 30);
-  } else {
-    const supabase = getSupabaseClient();
-    let currentCredits = 10;
-    if (supabase) {
-      try {
-        const { data: u } = await supabase.from('users').select('credits').eq('id', order.user_id).maybeSingle();
-        if (u) currentCredits = Number(u.credits) || 0;
-      } catch {}
-    }
-    const newCredits = currentCredits + (order.credits_amount || 25);
-    await adjustUserCredits(order.user_id, newCredits);
-  }
-
-  order.status = 'approved';
-  order.reviewed_at = new Date().toISOString();
-  order.reviewed_by = 'Master Admin';
-
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('wallet_orders').update({
-        status: 'approved',
-        reviewed_at: order.reviewed_at,
-        reviewed_by: order.reviewed_by,
-      }).eq('id', orderId);
-    } catch {}
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'direct_wallet_orders',
-        value: orders,
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
-  }
-
   try {
-    await fetch('/api/admin/approve-wallet-order', {
+    const res = await fetch('/api/admin/orders', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ orderId }),
+      body: JSON.stringify({ action: 'approve', orderId: Number(orderId) || orderId }),
     });
-  } catch {}
 
-  return {
-    success: true,
-    message: `Order #${orderId} approved! ${order.package_name} granted to ${order.username || order.email}.`,
-  };
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to approve order.' };
+    }
+
+    return {
+      success: true,
+      message: data.message || `Order #${orderId} approved and benefits credited!`,
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error approving order.' };
+  }
 }
 
 export async function rejectDirectWalletOrder(
   orderId: string,
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-  const orders = await fetchDirectWalletOrders();
-  const order = orders.find((o) => o.id === orderId);
-  if (!order) return { success: false, message: 'Order not found.' };
-
-  order.status = 'rejected';
-  order.reviewed_at = new Date().toISOString();
-  order.reviewed_by = 'Master Admin';
-
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('wallet_orders').update({
-        status: 'rejected',
-        reviewed_at: order.reviewed_at,
-        reviewed_by: order.reviewed_by,
-      }).eq('id', orderId);
-    } catch {}
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'direct_wallet_orders',
-        value: orders,
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
-  }
-
   try {
-    await fetch('/api/admin/reject-wallet-order', {
+    const res = await fetch('/api/admin/orders', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ orderId }),
+      body: JSON.stringify({ action: 'reject', orderId: Number(orderId) || orderId }),
     });
-  } catch {}
 
-  return {
-    success: true,
-    message: `Order #${orderId} marked as rejected. No credits or VIP granted.`,
-  };
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to reject order.' };
+    }
+
+    return {
+      success: true,
+      message: data.message || `Order #${orderId} marked as rejected.`,
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error rejecting order.' };
+  }
 }
 
 /**
- * Delete VIP code
+ * Delete VIP code via server-side admin endpoint
  */
 export async function deleteVipKey(
   id: string | number,
   _adminPin?: string
 ): Promise<{ success: boolean; message: string }> {
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      const { error } = await supabase.from('vip_codes').delete().eq('id', id);
-      if (!error) {
-        return { success: true, message: 'VIP Code deleted from database.' };
-      }
-    } catch (err) {
-      console.warn('[Supabase Delete VIP Error]', err);
-    }
-  }
-
   try {
-    const res = await fetch('/api/admin/delete-vip-key', {
+    const res = await fetch('/api/admin/vip-codes', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ action: 'delete', id }),
     });
-    const data = await res.json();
-    return { success: Boolean(data.success), message: data.message || 'VIP key deleted.' };
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      return { success: false, message: data.error || 'Failed to delete VIP key.' };
+    }
+
+    return {
+      success: true,
+      message: data.message || 'VIP key removed.',
+    };
   } catch (err: any) {
     return { success: false, message: err?.message || 'Network error deleting VIP key.' };
   }
@@ -1676,16 +1164,17 @@ export async function fetchRemoteBrokersSettings(): Promise<BrokersSettings> {
   }
 
   try {
-    const res = await fetch('/api/settings/brokers');
+    const res = await fetch('/api/admin/settings');
     if (res.ok) {
       const data = await res.json();
-      if (data?.brokersSettings) {
+      const brokersVal = data?.settings?.brokers_settings;
+      if (brokersVal) {
         settings = {
           brokers: {
-            deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(data.brokersSettings.brokers?.deriv || {}) },
-            expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(data.brokersSettings.brokers?.expertOption || {}) },
+            deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(brokersVal.brokers?.deriv || {}) },
+            expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(brokersVal.brokers?.expertOption || {}) },
           },
-          referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(data.brokersSettings.referralBonus || {}) },
+          referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(brokersVal.referralBonus || {}) },
         };
       }
     }
@@ -1724,28 +1213,20 @@ export async function saveBrokersSettings(
     window.dispatchEvent(new CustomEvent('pulsetrade_brokers_changed', { detail: newSettings }));
   }
 
-  // 2. Save Supabase app_settings
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      await supabase.from('app_settings').upsert({
-        key: 'brokers_settings',
-        value: newSettings,
-        updated_at: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      console.warn('[Supabase Brokers Save Error]', err);
-    }
-  }
-
-  // 3. Save backend
+  // 2. Save via server-side admin settings
   try {
-    await fetch('/api/settings/brokers', {
+    const res = await fetch('/api/admin/settings', {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ brokersSettings: newSettings }),
+      body: JSON.stringify({ key: 'brokers_settings', value: newSettings }),
     });
-  } catch {}
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { success: false, message: data.error || 'Failed to update broker settings.' };
+    }
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Network error updating broker settings.' };
+  }
 
   return {
     success: true,

@@ -1,14 +1,18 @@
 {
-  "name": "react-example",
+  "name": "tickvere",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/test-indicators.ts"
+    "test": "tsx scripts/test-indicators.ts",
+    "verify:security": "node scripts/verify-security.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",

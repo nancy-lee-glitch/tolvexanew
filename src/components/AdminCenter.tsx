@@ -43,6 +43,7 @@ import {
   fetchDirectWalletOrders,
   approveDirectWalletOrder,
   rejectDirectWalletOrder,
+  getAuthHeaders,
 } from '../utils/siteConfigManager.ts';
 
 export interface AdminCenterProps {
@@ -71,11 +72,7 @@ export function AdminCenter({
     'users' | 'vip_codes' | 'pending_orders' | 'pricing' | 'branding' | 'nowpayments' | 'broker' | 'blog' | 'abuse'
   >('users');
 
-  // Admin Security Gate State
-  const [adminIdentity, setAdminIdentity] = useState('');
-  const [adminPasscode, setAdminPasscode] = useState('');
-  const [gateLoading, setGateLoading] = useState(false);
-  const [gateError, setGateError] = useState<string | null>(null);
+
 
   // Global Notification Toast
   const [toastMessage, setToastMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -770,24 +767,41 @@ export function AdminCenter({
     if (!editingPost || !editingPost.title) return;
 
     try {
-      const res = await fetch('/api/admin/blog/save', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(typeof window !== 'undefined' && localStorage.getItem('pulsetrade_session_token')
-            ? { Authorization: `Bearer ${localStorage.getItem('pulsetrade_session_token')}` }
-            : {}),
-        },
-        body: JSON.stringify({ post: editingPost }),
+      const isEdit = Boolean(editingPost.id);
+      const res = await fetch('/api/admin/blog', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(editingPost),
       });
-      if (res.ok) {
-        showToast('Blog article saved and published!', 'success');
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        showToast(`Blog article ${isEdit ? 'updated' : 'published'}!`, 'success');
         setIsBlogModalOpen(false);
         setEditingPost(null);
         await loadBlogPosts();
+      } else {
+        showToast(data.error || 'Error saving blog article.', 'error');
       }
     } catch {
-      showToast('Error saving blog article.', 'error');
+      showToast('Network error saving blog article.', 'error');
+    }
+  };
+
+  const handleDeleteBlogPost = async (id: number | string) => {
+    try {
+      const res = await fetch(`/api/admin/blog?id=${id}`, {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        showToast('Blog article deleted.', 'success');
+        await loadBlogPosts();
+      } else {
+        showToast(data.error || 'Failed to delete blog article.', 'error');
+      }
+    } catch {
+      showToast('Network error deleting blog article.', 'error');
     }
   };
 
@@ -818,41 +832,6 @@ export function AdminCenter({
     loadBrokerPlatforms();
   }, []);
 
-  const handleAdminGateLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setGateLoading(true);
-    setGateError(null);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: adminIdentity.trim(),
-          password: adminPasscode.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.success && data.user) {
-        if (data.user.role !== 'ADMIN') {
-          setGateError('Access Denied: Trader account does not have institutional ADMIN role.');
-          return;
-        }
-        if (data.token) {
-          localStorage.setItem('pulsetrade_session_token', data.token);
-        }
-        localStorage.setItem('pulsetrade_auth_user', JSON.stringify(data.user));
-        onUserUpdated?.(data.user);
-        showToast('Master Admin verified via secure session!', 'success');
-      } else {
-        setGateError(data.message || 'Access Denied: Invalid Master Administrator credentials.');
-      }
-    } catch (err: any) {
-      setGateError(err?.message || 'Authentication kernel unreachable.');
-    } finally {
-      setGateLoading(false);
-    }
-  };
-
   const isMasterAdmin = user?.role === 'ADMIN';
 
   // -------------------------------------------------------------------------
@@ -860,69 +839,27 @@ export function AdminCenter({
   // -------------------------------------------------------------------------
   if (!isMasterAdmin) {
     return (
-      <div className="max-w-md mx-auto my-12 bg-slate-900 border border-amber-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6">
-        <div className="text-center space-y-2">
-          <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto text-xl font-mono shadow-inner">
-            👑
+      <div className="max-w-md mx-auto my-12 bg-slate-900 border border-rose-500/30 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6">
+        <div className="text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-400 flex items-center justify-center mx-auto text-xl font-mono shadow-inner">
+            🛡️
           </div>
           <h2 className="text-lg font-black text-white font-mono uppercase tracking-wide">
-            Master Citadel Gate
+            Access Restricted
           </h2>
-          <p className="text-xs text-slate-400 font-sans">
-            Authentication required to inspect registered users, monetization tiers, and blockchain gateway credentials.
+          <p className="text-xs text-slate-400 font-sans leading-relaxed">
+            Institutional Administrator role required. Admin privileges are verified strictly through your authenticated session profile in Supabase Auth.
           </p>
         </div>
 
-        {gateError && (
-          <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/50 text-rose-300 text-xs font-mono flex items-center gap-2">
-            <span>⚠️</span>
-            <span>{gateError}</span>
-          </div>
-        )}
-
-        <form onSubmit={handleAdminGateLogin} className="space-y-4">
-          <div>
-            <label className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold mb-1">
-              Admin Identity
-            </label>
-            <input
-              type="text"
-              required
-              value={adminIdentity}
-              onChange={(e) => setAdminIdentity(e.target.value)}
-              placeholder="Admin email or username"
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-xs text-white font-mono focus:border-amber-500 focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold mb-1">
-              Admin Master PIN / Password
-            </label>
-            <input
-              type="password"
-              required
-              value={adminPasscode}
-              onChange={(e) => setAdminPasscode(e.target.value)}
-              placeholder="Enter master admin passcode"
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-xs text-white font-mono focus:border-amber-500 focus:outline-none"
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={gateLoading}
-            className="w-full py-3 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs uppercase rounded-xl transition shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {gateLoading ? 'Verifying Credentials...' : 'Authenticate Master Admin →'}
-          </button>
-        </form>
-
-        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-xs text-slate-500 font-mono">
-          <span>Protected Kernel</span>
+        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-center text-xs font-mono">
           {onExitAdmin && (
-            <button type="button" onClick={onExitAdmin} className="text-slate-400 hover:text-white underline">
-              Return to Cockpit
+            <button
+              type="button"
+              onClick={onExitAdmin}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl transition"
+            >
+              ← Return to Cockpit
             </button>
           )}
         </div>
@@ -2071,25 +2008,18 @@ export function AdminCenter({
       {/* ========================================================================= */}
       {activeTab === 'nowpayments' && (
         <form onSubmit={handleSaveNowPayments} className="space-y-4">
-          <div className="bg-emerald-950/30 border border-emerald-500/40 rounded-xl p-4 text-xs space-y-2">
+          <div className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-4 text-xs space-y-2">
             <div className="flex items-center justify-between">
-              <div className="font-black text-emerald-400 flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span>NOWPayments Instant Automated Crypto Engine</span>
+              <div className="font-black text-amber-400 flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse" />
+                <span>Payments Gateway Architecture (Stage 5)</span>
               </div>
-              <span
-                className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
-                  nowConfig.enabled
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                    : 'bg-slate-800 text-slate-400 border border-slate-700'
-                }`}
-              >
-                {nowConfig.enabled ? '● GATEWAY ACTIVE' : '○ DISABLED'}
+              <span className="text-[10px] px-2 py-0.5 rounded font-bold uppercase bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                SETTING UP
               </span>
             </div>
             <p className="text-slate-300 text-[11px] leading-relaxed">
-              When enabled, traders receive a direct crypto deposit invoice supporting USDT TRC-20, BEP-20, BTC, ETH, TON, and LTC.
-              When blockchain confirmation completes, NOWPayments fires an Instant Payment Notification (IPN), and the user's <strong>30-Day VIP Pass</strong> or credit package is credited automatically with idempotency protection.
+              Payments are being set up. The payment gateway, webhook IPN verification, and automated cryptographic order settlement will be enabled in Stage 5. All configuration options below will be verified against the live environment.
             </p>
           </div>
 
@@ -3052,6 +2982,17 @@ export function AdminCenter({
                       className="text-amber-400 hover:underline"
                     >
                       Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (confirm(`Delete article "${post.title}"?`)) {
+                          handleDeleteBlogPost(post.id);
+                        }
+                      }}
+                      className="text-rose-400 hover:underline"
+                    >
+                      Delete
                     </button>
                   </div>
                 </div>
