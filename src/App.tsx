@@ -109,7 +109,7 @@ export default function App() {
 
   // Trading engine states
   const [activeAsset, setActiveAsset] = useState<AssetConfig>(() => getDefaultActiveAsset());
-  const [currentPrice, setCurrentPrice] = useState<number>(() => activeAsset?.basePrice || 1.08542);
+  const [currentPrice, setCurrentPrice] = useState<number>(0);
   const [liveTicks, setLiveTicks] = useState<number[]>([]);
   const [credits, setCredits] = useState<number>(10);
   const [isVIP, setIsVIP] = useState<boolean>(false);
@@ -179,7 +179,7 @@ export default function App() {
     };
   }, []);
 
-  // Live dynamic presence tracking: connects to Supabase active_sessions (100% Genuine)
+  // Live dynamic presence tracking: connects to Supabase active_sessions via presence_ping RPC (25s + jitter)
   useEffect(() => {
     let sessionId = '';
     try {
@@ -192,10 +192,13 @@ export default function App() {
       sessionId = 'sess_' + Date.now();
     }
 
+    let timerId: NodeJS.Timeout | null = null;
+    let isCancelled = false;
+
     const fetchHeartbeat = async () => {
       try {
         const presenceCount = await sendSupabasePresence(sessionId, user?.id || null, activeAsset.symbol);
-        if (typeof presenceCount === 'number' && presenceCount > 0) {
+        if (!isCancelled && typeof presenceCount === 'number' && presenceCount > 0) {
           setOnlineUsers(presenceCount);
         }
       } catch {
@@ -203,9 +206,33 @@ export default function App() {
       }
     };
 
+    const scheduleNext = () => {
+      if (isCancelled) return;
+      // 25s heartbeat with +/- 2000ms jitter
+      const jitterMs = 25000 + Math.floor((Math.random() - 0.5) * 4000);
+      timerId = setTimeout(async () => {
+        await fetchHeartbeat();
+        scheduleNext();
+      }, jitterMs);
+    };
+
+    // Immediate initial ping
     fetchHeartbeat();
-    const interval = setInterval(fetchHeartbeat, 10000);
-    return () => clearInterval(interval);
+    scheduleNext();
+
+    // Trigger immediate ping upon tab returning to foreground
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchHeartbeat();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      isCancelled = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [user?.id, activeAsset.symbol]);
 
   // Synchronize dynamic site settings & branding
@@ -296,6 +323,11 @@ export default function App() {
     } else {
       setCredits(10);
       setIsVIP(false);
+      try {
+        sessionStorage.removeItem('tickvere_deriv_token');
+      } catch {
+        // Silently handled
+      }
     }
   };
 
@@ -616,6 +648,7 @@ export default function App() {
                 }}
                 isDemoMode={isDemoMode}
                 onToggleDemoMode={() => setIsDemoMode((d) => !d)}
+                user={user}
               />
 
               {/* Multi-Timeframe Algorithmic Signal Engine & Lockout Loop */}

@@ -1,15 +1,24 @@
 /**
- * Deriv Public WebSocket Feed Client
- * Official, free ticks, zero user login required.
+ * derivFeed.ts — Thin compatibility adapter around the singleton LiveFeed.
  *
- * Primary Endpoint: wss://ws.derivws.com/websockets/v3?app_id=${app_id}
- * Fallback 1:       wss://api.derivws.com/trading/v1/options/ws/public?app_id=${app_id}
- * Fallback 2:       wss://ws.binaryws.com/websockets/v3?app_id=${app_id}&l=EN&brand=deriv
+ * Requirements:
+ * - Use LiveFeed AS-IS as the only WebSocket market data client.
+ * - Zero fake prices, zero Math.random, zero hardcoded gold prices, zero sine-wave seeding.
+ * - Map FeedStatus to existing UI status types ('LIVE' | 'CONNECTING' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED').
+ * - Store optional user account token in sessionStorage (never localStorage) and clear on logout.
  */
 
-import { isWeekendForexClosed } from './symbolMap.ts';
+import {
+  getLiveFeed,
+  subscribeTicks,
+  subscribeStatus,
+  PRIMARY_ENDPOINT,
+  FALLBACK_ENDPOINT,
+} from './feedSingleton.ts';
+import type { Tick, StatusEvent, FeedStatus } from './liveFeed.ts';
+import { getOrFetchCandles } from './candleStore.ts';
 
-export type FeedHealthStatus = 'LIVE' | 'RECONNECTING' | 'STALE' | 'OFFLINE' | 'MARKET_CLOSED';
+export type FeedHealthStatus = FeedStatus | 'STALE';
 
 export interface DerivTickEvent {
   price: number;
@@ -40,85 +49,122 @@ export interface DerivFeedCallbacks {
   onAccountError?: (errorMsg: string) => void;
 }
 
-// Production App ID from env with fallback to Deriv official public test ID (1089)
-const ENV_APP_ID = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_DERIV_APP_ID)
-  ? String(import.meta.env.VITE_DERIV_APP_ID).trim()
-  : '';
-
-export const ACTIVE_APP_ID = ENV_APP_ID || '1089';
+const ENV_APP_ID = typeof import.meta !== 'undefined' ? import.meta.env?.VITE_DERIV_APP_ID : '';
+export const ACTIVE_APP_ID = (ENV_APP_ID || '1089').trim();
 export const IS_CUSTOM_APP_ID_CONFIGURED = Boolean(ENV_APP_ID);
+export const DERIV_ENDPOINTS = [PRIMARY_ENDPOINT, FALLBACK_ENDPOINT];
 
-export const DERIV_ENDPOINTS = [
-  `wss://ws.derivws.com/websockets/v3?app_id=${ACTIVE_APP_ID}&l=EN`,
-  `wss://api.derivws.com/trading/v1/options/ws/public?app_id=${ACTIVE_APP_ID}`,
-  `wss://ws.binaryws.com/websockets/v3?app_id=${ACTIVE_APP_ID}&l=EN&brand=deriv`,
-];
+const SESSION_TOKEN_KEY = 'tickvere_deriv_token';
 
+/**
+ * Thin adapter around LiveFeed.
+ */
 export class DerivFeedService {
-  private ws: WebSocket | null = null;
-  private currentEndpointIndex = 0;
   private activeSymbol = 'frxEURUSD';
   private callbacks: DerivFeedCallbacks;
-  private status: FeedHealthStatus = 'RECONNECTING';
-
-  private lastTickTimestamp = 0;
-  private consecutiveFailures = 0;
-  private backoffMs = 1000;
+  private unsubscribeTick: (() => void) | null = null;
+  private unsubscribeStatus: (() => void) | null = null;
   private isDestroyed = false;
-
-  private pingInterval: any = null;
-  private watchdogInterval: any = null;
-  private reconnectTimer: any = null;
-  private lastPingSentTime = 0;
-  private isPollingRest = false;
-  private lastRestPollTime = 0;
-  private accountToken = '';
   private accountInfo: DerivAccountInfo | null = null;
-  private lastFallbackPrice = 0;
+  private accountToken = '';
 
   constructor(initialSymbol: string, callbacks: DerivFeedCallbacks) {
     this.activeSymbol = initialSymbol || 'frxEURUSD';
     this.callbacks = callbacks;
-    if (typeof window !== 'undefined') {
-      try {
-        this.accountToken = localStorage.getItem('tolvexa_deriv_token') || '';
-      } catch {}
-    }
-    this.startWatchdog();
-    this.connect();
-  }
 
-  public authorizeAccount(token: string) {
-    this.accountToken = (token || '').trim();
-    if (typeof window !== 'undefined') {
+    // Optional Deriv account token: strictly sessionStorage, never localStorage
+    if (typeof window !== 'undefined' && window.sessionStorage) {
       try {
-        if (this.accountToken) {
-          localStorage.setItem('tolvexa_deriv_token', this.accountToken);
-        } else {
-          localStorage.removeItem('tolvexa_deriv_token');
-        }
-      } catch {}
-    }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      if (this.accountToken) {
-        try {
-          this.ws.send(JSON.stringify({ authorize: this.accountToken }));
-        } catch (err) {
-          console.warn('[DerivFeed] Authorize request failed', err);
-        }
-      } else {
-        this.accountInfo = null;
-        this.callbacks.onAccountUpdate?.(null);
+        this.accountToken = sessionStorage.getItem(SESSION_TOKEN_KEY) || '';
+      } catch (err) {
+        console.warn('[DerivFeed] sessionStorage access notice:', err);
       }
     }
+
+    const feed = getLiveFeed();
+    feed.setActive(this.activeSymbol);
+
+    // Initial historical candles request to hydrate buffers
+    this.hydrateHistory(this.activeSymbol);
+
+    // Subscribe to shared feed ticks
+    this.unsubscribeTick = subscribeTicks((tick: Tick) => {
+      if (this.isDestroyed) return;
+      if (tick.symbol === this.activeSymbol) {
+        this.callbacks.onTick({
+          price: tick.price,
+          time: tick.epoch,
+          symbol: tick.symbol,
+        });
+      }
+    });
+
+    // Subscribe to shared feed status
+    this.unsubscribeStatus = subscribeStatus((event: StatusEvent) => {
+      if (this.isDestroyed) return;
+      const ageSec = event.tickAgeMs !== null ? Math.round(event.tickAgeMs / 1000) : 0;
+      this.callbacks.onStatusChange(event.status, ageSec, event.endpoint);
+    });
+  }
+
+  private async hydrateHistory(symbol: string) {
+    try {
+      const candles = await getOrFetchCandles(symbol, 60, 120);
+      if (this.isDestroyed || !candles || candles.length === 0) return;
+      const prices = candles.map((c) => c.close);
+      const times = candles.map((c) => c.time);
+      this.callbacks.onHistory?.({
+        prices,
+        times,
+        symbol,
+      });
+    } catch (err) {
+      console.warn(`[DerivFeed] History hydration notice for ${symbol}:`, err);
+    }
+  }
+
+  public setSymbol(newSymbol: string) {
+    if (!newSymbol || this.activeSymbol === newSymbol || this.isDestroyed) return;
+    const oldSymbol = this.activeSymbol;
+    this.activeSymbol = newSymbol;
+
+    const feed = getLiveFeed();
+    feed.unsubscribe(oldSymbol);
+    feed.setActive(newSymbol);
+
+    this.hydrateHistory(newSymbol);
+  }
+
+  public manualRetry() {
+    getLiveFeed().manualRetry();
+  }
+
+  /**
+   * Optional Deriv account token authorization.
+   * Enforces security rule 10: stored strictly in sessionStorage, never localStorage.
+   */
+  public authorizeAccount(token: string) {
+    this.accountToken = (token || '').trim();
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      try {
+        if (this.accountToken) {
+          sessionStorage.setItem(SESSION_TOKEN_KEY, this.accountToken);
+        } else {
+          sessionStorage.removeItem(SESSION_TOKEN_KEY);
+        }
+      } catch (err) {
+        console.warn('[DerivFeed] sessionStorage error:', err);
+      }
+    }
+    // LiveFeed uses Deriv public socket; token is kept client-side for optional account balance telemetry
   }
 
   public disconnectAccount() {
     this.accountToken = '';
     this.accountInfo = null;
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
       try {
-        localStorage.removeItem('tolvexa_deriv_token');
+        sessionStorage.removeItem(SESSION_TOKEN_KEY);
       } catch {}
     }
     this.callbacks.onAccountUpdate?.(null);
@@ -128,421 +174,15 @@ export class DerivFeedService {
     return this.accountInfo;
   }
 
-  public setSymbol(newSymbol: string) {
-    if (this.activeSymbol === newSymbol) return;
-    this.activeSymbol = newSymbol;
-    this.lastTickTimestamp = 0; // reset for new asset
-    this.lastFallbackPrice = 0;
-
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        // Forget previous tick subscriptions cleanly
-        this.ws.send(JSON.stringify({ forget_all: 'ticks' }));
-        this.requestHistoryAndSubscribe(this.activeSymbol);
-      } catch (err) {
-        console.warn('[DerivFeed] Symbol switch send notice', err);
-      }
-    }
-  }
-
-  public manualRetry() {
-    this.consecutiveFailures = 0;
-    this.backoffMs = 1000;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.connect();
-  }
-
   public destroy() {
     this.isDestroyed = true;
-    this.clearTimers();
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onmessage = null;
-      this.ws.onerror = null;
-      this.ws.onclose = null;
-      try {
-        this.ws.close();
-      } catch {}
-      this.ws = null;
+    if (this.unsubscribeTick) {
+      this.unsubscribeTick();
+      this.unsubscribeTick = null;
     }
-  }
-
-  private getActiveEndpoint(): string {
-    return DERIV_ENDPOINTS[this.currentEndpointIndex % DERIV_ENDPOINTS.length];
-  }
-
-  private connect() {
-    if (this.isDestroyed) return;
-
-    this.clearSocket();
-    const endpoint = this.getActiveEndpoint();
-    this.updateStatus('RECONNECTING');
-
-    try {
-      const ws = new WebSocket(endpoint);
-      this.ws = ws;
-
-      ws.onopen = () => {
-        if (this.isDestroyed || this.ws !== ws) return;
-        this.consecutiveFailures = 0;
-        this.backoffMs = 1000;
-        this.startHeartbeat();
-
-        // 1. Prefill with ~500 ticks history & subscribe
-        this.requestHistoryAndSubscribe(this.activeSymbol);
-
-        // 2. Authorize personal token if present
-        if (this.accountToken) {
-          try {
-            this.ws?.send(JSON.stringify({ authorize: this.accountToken }));
-          } catch {}
-        }
-      };
-
-      ws.onmessage = (event) => {
-        if (this.isDestroyed || this.ws !== ws) return;
-        this.handleMessage(event.data);
-      };
-
-      ws.onerror = (e) => {
-        if (this.isDestroyed || this.ws !== ws) return;
-        this.consecutiveFailures += 1;
-        console.warn(`[DerivFeed] Error on ${endpoint}:`, e);
-      };
-
-      ws.onclose = () => {
-        if (this.isDestroyed || this.ws !== ws) return;
-        this.handleClose();
-      };
-    } catch (err) {
-      console.warn('[DerivFeed] Socket constructor error', err);
-      this.handleClose();
+    if (this.unsubscribeStatus) {
+      this.unsubscribeStatus();
+      this.unsubscribeStatus = null;
     }
-  }
-
-  private requestHistoryAndSubscribe(symbol: string) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-    try {
-      // Send ticks_history with subscribe=1 (Deriv official API pattern)
-      this.ws.send(
-        JSON.stringify({
-          ticks_history: symbol,
-          adjust_start_time: 1,
-          count: 500,
-          end: 'latest',
-          start: 1,
-          style: 'ticks',
-          subscribe: 1,
-        })
-      );
-
-      // Backup standalone tick subscription
-      this.ws.send(
-        JSON.stringify({
-          ticks: symbol,
-          subscribe: 1,
-        })
-      );
-    } catch (err) {
-      console.warn('[DerivFeed] Subscription send failure', err);
-    }
-  }
-
-  private handleMessage(raw: string) {
-    try {
-      const data = JSON.parse(raw);
-
-      // Handle Ping Heartbeat
-      if (data.msg_type === 'ping') {
-        return;
-      }
-
-      // Handle Authorize Response (Deriv Account Login)
-      if (data.msg_type === 'authorize' && data.authorize) {
-        const a = data.authorize;
-        this.accountInfo = {
-          loginid: a.loginid,
-          balance: parseFloat(a.balance) || 0,
-          currency: a.currency || 'USD',
-          email: a.email || '',
-          isVirtual: Boolean(a.is_virtual),
-          fullname: a.fullname || a.loginid,
-        };
-        this.callbacks.onAccountUpdate?.(this.accountInfo);
-        // Subscribe to real-time balance stream
-        try {
-          this.ws?.send(JSON.stringify({ balance: 1, subscribe: 1 }));
-        } catch {}
-        return;
-      }
-
-      // Handle Real-Time Balance Updates
-      if (data.msg_type === 'balance' && data.balance && this.accountInfo) {
-        this.accountInfo.balance = parseFloat(data.balance.balance) || this.accountInfo.balance;
-        this.callbacks.onAccountUpdate?.({ ...this.accountInfo });
-        return;
-      }
-
-      // Handle Historical Ticks Prefill
-      if (data.msg_type === 'history' && data.history && Array.isArray(data.history.prices)) {
-        const prices = data.history.prices.map((p: any) => parseFloat(p)).filter((p: number) => !isNaN(p));
-        const times = (data.history.times || []).map((t: any) => parseInt(t, 10));
-        const sym = data.echo_req?.ticks_history || this.activeSymbol;
-
-        if (prices.length > 0) {
-          this.lastTickTimestamp = Date.now();
-          this.updateStatus('LIVE');
-
-          if (this.callbacks.onHistory) {
-            this.callbacks.onHistory({ prices, times, symbol: sym });
-          }
-
-          // Emit latest price as tick to initialize quote
-          const latestPrice = prices[prices.length - 1];
-          const latestTime = times.length > 0 ? times[times.length - 1] : Math.floor(Date.now() / 1000);
-          this.callbacks.onTick({ price: latestPrice, time: latestTime, symbol: sym });
-        }
-        return;
-      }
-
-      // Handle Streaming Tick
-      if ((data.msg_type === 'tick' || data.tick) && data.tick) {
-        const t = data.tick;
-        const sym = t.symbol || this.activeSymbol;
-
-        if (sym === this.activeSymbol) {
-          const quote = parseFloat(t.quote);
-          const epoch = parseInt(t.epoch, 10) || Math.floor(Date.now() / 1000);
-
-          if (!isNaN(quote)) {
-            this.lastTickTimestamp = Date.now();
-            this.updateStatus('LIVE');
-            this.callbacks.onTick({ price: quote, time: epoch, symbol: sym });
-          }
-        }
-        return;
-      }
-
-      // Handle Server Errors cleanly (e.g. market closed on weekend for forex or invalid token)
-      if (data.error) {
-        if (data.echo_req?.authorize) {
-          this.accountInfo = null;
-          this.callbacks.onAccountError?.(data.error.message || 'Invalid Deriv API token');
-          return;
-        }
-        const errorMsg = String(data.error.message || '').toLowerCase();
-        const errorCode = String(data.error.code || '').toLowerCase();
-        if (errorCode.includes('marketclosed') || errorMsg.includes('closed') || errorMsg.includes('trading is not allowed')) {
-          this.updateStatus('MARKET_CLOSED');
-          return;
-        }
-        console.info(`[DerivFeed Notice for ${this.activeSymbol}]:`, data.error.message);
-      }
-    } catch {
-      // Ignore JSON parse errors
-    }
-  }
-
-  private handleClose() {
-    this.consecutiveFailures += 1;
-
-    // Rotate to fallback endpoint after 2 failures on current endpoint
-    if (this.consecutiveFailures >= 2) {
-      this.currentEndpointIndex = (this.currentEndpointIndex + 1) % DERIV_ENDPOINTS.length;
-    }
-
-    const isSustainedFailure = this.consecutiveFailures >= 4;
-    this.updateStatus(isSustainedFailure ? 'OFFLINE' : 'RECONNECTING');
-
-    const delay = this.backoffMs;
-    this.backoffMs = Math.min(16000, this.backoffMs * 1.5);
-
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = setTimeout(() => {
-      this.connect();
-    }, delay);
-  }
-
-  private startHeartbeat() {
-    if (this.pingInterval) clearInterval(this.pingInterval);
-
-    this.pingInterval = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        try {
-          this.lastPingSentTime = Date.now();
-          this.ws.send(JSON.stringify({ ping: 1 }));
-        } catch {}
-      }
-    }, 20000); // 20-second heartbeat prevents proxy timeouts
-  }
-
-  /**
-   * Staleness Watchdog (User requirement #7):
-   * LIVE if last tick age <= 10 seconds (not 2s — 2s caused false OFFLINE).
-   * MARKET_CLOSED if traditional forex is inactive on weekend.
-   * RECONNECTING while socket is connecting.
-   * OFFLINE only after sustained failure.
-   */
-  private startWatchdog() {
-    if (this.watchdogInterval) clearInterval(this.watchdogInterval);
-
-    this.watchdogInterval = setInterval(() => {
-      if (this.isDestroyed) return;
-
-      const now = Date.now();
-      const ageMs = this.lastTickTimestamp > 0 ? now - this.lastTickTimestamp : 0;
-      const ageSec = this.lastTickTimestamp > 0 ? Math.floor(ageMs / 1000) : 0;
-      const isClosedWeekend = isWeekendForexClosed(this.activeSymbol);
-
-      // 1. If global market is closed for weekend, always report MARKET_CLOSED
-      if (isClosedWeekend) {
-        this.updateStatus('MARKET_CLOSED', 0);
-        return;
-      }
-
-      // If market is open and ticks are delayed (> 1.5s or awaiting initial quote), poll REST fallback
-      if (this.lastTickTimestamp === 0 || ageMs > 1500) {
-        this.pollRestFallback(this.activeSymbol);
-      }
-
-      // 2. LIVE CHECK: If we have received fresh ticks within the last 10 seconds (from WS or REST), status is LIVE!
-      if (this.lastTickTimestamp > 0 && ageMs <= 10000) {
-        this.updateStatus('LIVE', ageSec);
-        return;
-      }
-
-      // 3. STALE CHECK: Ticks arrived previously but haven't updated in > 10s:
-      if (this.lastTickTimestamp > 0 && ageMs > 10000 && ageMs <= 30000) {
-        this.updateStatus('STALE', ageSec);
-        return;
-      }
-
-      // 4. Awaiting initial quote or reconnecting:
-      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
-        this.updateStatus('RECONNECTING', 0);
-      } else {
-        const isSustained = this.consecutiveFailures >= 4;
-        this.updateStatus(isSustained ? 'OFFLINE' : 'RECONNECTING', ageSec);
-      }
-    }, 500);
-  }
-
-  /**
-   * Resilient REST fallback engine:
-   * Guarantees that even if Deriv's Cloudflare blocks WS or ISP throttles WebSocket,
-   * fresh live prices continue to flow for the active asset without interruption.
-   */
-  private async pollRestFallback(symbol: string) {
-    if (this.isDestroyed || this.isPollingRest) return;
-    const now = Date.now();
-    if (now - this.lastRestPollTime < 1500) return; // rate limit: 1 call per 1.5 seconds max
-    this.lastRestPollTime = now;
-    this.isPollingRest = true;
-
-    try {
-      let quote: number | null = null;
-
-      // 1. Real-time Crypto via Binance Public REST Ticker (CORS open worldwide)
-      if (symbol === 'cryBTCUSD') {
-        const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT');
-        if (res.ok) {
-          const data = await res.json();
-          quote = parseFloat(data.price);
-        }
-      } else if (symbol === 'cryETHUSD') {
-        const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT');
-        if (res.ok) {
-          const data = await res.json();
-          quote = parseFloat(data.price);
-        }
-      } else if (symbol.startsWith('frx')) {
-        // 2. Real Interbank Forex via Open Exchange Rates Public Endpoint
-        const res = await fetch('https://open.er-api.com/v6/latest/USD');
-        if (res.ok) {
-          const data = await res.json();
-          const rates = data.rates || {};
-          if (symbol === 'frxEURUSD' && rates.EUR) {
-            quote = parseFloat((1 / rates.EUR).toFixed(5));
-          } else if (symbol === 'frxGBPUSD' && rates.GBP) {
-            quote = parseFloat((1 / rates.GBP).toFixed(5));
-          } else if (symbol === 'frxUSDJPY' && rates.JPY) {
-            quote = parseFloat(rates.JPY.toFixed(3));
-          } else if (symbol === 'frxAUDUSD' && rates.AUD) {
-            quote = parseFloat((1 / rates.AUD).toFixed(5));
-          } else if (symbol === 'frxUSDCAD' && rates.CAD) {
-            quote = parseFloat(rates.CAD.toFixed(5));
-          } else if (symbol === 'frxUSDCHF' && rates.CHF) {
-            quote = parseFloat(rates.CHF.toFixed(5));
-          } else if (symbol === 'frxGBPJPY' && rates.GBP && rates.JPY) {
-            quote = parseFloat(((1 / rates.GBP) * rates.JPY).toFixed(3));
-          } else if (symbol === 'frxEURJPY' && rates.EUR && rates.JPY) {
-            quote = parseFloat(((1 / rates.EUR) * rates.JPY).toFixed(3));
-          } else if (symbol === 'frxXAUUSD') {
-            quote = 2684.50;
-          }
-        }
-      } else if (symbol.startsWith('R_') || symbol.startsWith('1HZ')) {
-        // 3. Deriv Volatility Synthetics continuous real-time model
-        const baseMap: Record<string, number> = {
-          R_100: 2415.80,
-          R_75: 48920.40,
-          R_50: 341.20,
-          R_25: 1820.60,
-          R_10: 6542.10,
-          '1HZ100V': 840.10,
-        };
-        const prevPrice = this.lastFallbackPrice || baseMap[symbol] || 2415.80;
-        const volatility = symbol === 'R_100' ? 0.8 : symbol === 'R_75' ? 1.5 : 0.3;
-        const delta = (Math.random() - 0.495) * volatility;
-        quote = parseFloat((prevPrice + delta).toFixed(2));
-        this.lastFallbackPrice = quote;
-      }
-
-      if (quote !== null && !isNaN(quote) && quote > 0) {
-        this.lastTickTimestamp = Date.now();
-        this.updateStatus('LIVE', 0);
-        this.callbacks.onTick({
-          price: quote,
-          time: Math.floor(Date.now() / 1000),
-          symbol,
-        });
-      }
-    } catch {
-      // Quietly continue; WS backoff loop will retry
-    } finally {
-      this.isPollingRest = false;
-    }
-  }
-
-  private updateStatus(newStatus: FeedHealthStatus, ageSec?: number) {
-    this.status = newStatus;
-    const computedAgeSec = ageSec !== undefined
-      ? ageSec
-      : this.lastTickTimestamp > 0
-      ? Math.floor((Date.now() - this.lastTickTimestamp) / 1000)
-      : 0;
-
-    this.callbacks.onStatusChange(newStatus, computedAgeSec, this.getActiveEndpoint());
-  }
-
-  private clearSocket() {
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onmessage = null;
-      this.ws.onerror = null;
-      this.ws.onclose = null;
-      try {
-        this.ws.close();
-      } catch {}
-      this.ws = null;
-    }
-  }
-
-  private clearTimers() {
-    if (this.pingInterval) clearInterval(this.pingInterval);
-    if (this.watchdogInterval) clearInterval(this.watchdogInterval);
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
   }
 }

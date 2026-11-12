@@ -1610,7 +1610,7 @@ export function generateDualModeSignal(params: {
   }
 
   // 3) REAL TICK BUFFER VALIDATION (MANDATORY — NEVER GUESS FROM MOCK/FILL PADDING)
-  if (!prices || prices.length < 8) {
+  if (!prices || prices.length < 15) {
     return {
       asset: symbol,
       timeframe: timeframe || '',
@@ -1620,12 +1620,12 @@ export function generateDualModeSignal(params: {
       velocity: 'Buffer Insufficient',
       generatedAt: Date.now(),
       status: 'ANALYSIS_BLOCKED',
-      blockedReason: `Live market feed insufficient: Captured only ${prices?.length || 0}/8 ticks for ${symbol}. Please wait 3-5 seconds for the live tick feed to establish.`,
-      plainLanguageReason: 'Analysis blocked: Real-time price stream insufficient to calculate micro momentum safely. PulseTrade strictly requires verified live WebSocket ticks before evaluating setups.',
+      blockedReason: `Live market feed insufficient: Captured only ${prices?.length || 0}/15 ticks for ${symbol}. Please wait a few seconds for the live tick feed to establish.`,
+      plainLanguageReason: 'Analysis blocked: Real-time price stream insufficient to calculate micro momentum safely. Tickvere strictly requires verified live WebSocket ticks before evaluating setups.',
       riskNote: 'Trading involves risk. Algorithmic telemetry is not financial advice.',
       marketStructure: 'NEUTRAL',
       structureCue: 'INSUFFICIENT_DATA',
-      structureSummary: `Awaiting active live tick buffer (${prices?.length || 0}/8 ticks).`,
+      structureSummary: `Awaiting active live tick buffer (${prices?.length || 0}/15 ticks).`,
       gatePassed: false,
       confluenceFactorsList: [],
     };
@@ -1987,43 +1987,33 @@ export function calculateSafeCloseAnalysis(
 const assetTickBuffers: Record<string, number[]> = {};
 const assetTimestampedTickBuffers: Record<string, TimestampedTick[]> = {};
 
+/**
+ * Returns real timestamped ticks accumulated from the live market feed.
+ * Never seeds fake sine-wave prices or simulated history.
+ */
 export function getOrInitializeTimestampedTicks(
   symbol: string,
-  basePrice: number = 1.08500,
-  pipSize: number = 0.0001,
-  decimals: number = 5,
-  count: number = 720 // ~30-60 mins of realistic ticks
+  _basePrice?: number,
+  _pipSize?: number,
+  _decimals?: number,
+  _count?: number
 ): TimestampedTick[] {
-  if (!assetTimestampedTickBuffers[symbol] || assetTimestampedTickBuffers[symbol].length < 20) {
-    const ticks: TimestampedTick[] = [];
-    const prices: number[] = [];
-    const nowSec = Math.floor(Date.now() / 1000);
-    const stepSeconds = 3;
-    const startTime = nowSec - count * stepSeconds;
-
-    let p = basePrice;
-    for (let i = 0; i < count; i++) {
-      const time = startTime + i * stepSeconds;
-      const wave = Math.sin(i / 15) * 1.8 + Math.cos(i / 7) * 1.2 + Math.sin(i / 3) * 0.4;
-      const delta = wave * pipSize * 0.4;
-      p = parseFloat((p + delta).toFixed(decimals));
-      ticks.push({ time, price: p });
-      prices.push(p);
-    }
-    assetTimestampedTickBuffers[symbol] = ticks;
-    assetTickBuffers[symbol] = prices.slice(-100);
+  if (!assetTimestampedTickBuffers[symbol]) {
+    assetTimestampedTickBuffers[symbol] = [];
   }
   return assetTimestampedTickBuffers[symbol];
 }
 
+/**
+ * Returns raw numeric tick buffer from real feed. Starts empty.
+ */
 export function getOrInitializeAssetTicks(
   symbol: string,
-  basePrice: number = 1.08500,
-  pipSize: number = 0.0001,
-  decimals: number = 5,
-  count: number = 35
+  _basePrice?: number,
+  _pipSize?: number,
+  _decimals?: number,
+  _count?: number
 ): number[] {
-  getOrInitializeTimestampedTicks(symbol, basePrice, pipSize, decimals, 360);
   return assetTickBuffers[symbol] || [];
 }
 

@@ -60,17 +60,8 @@ export function VipSafeRadarModal({
     const tfMinutes = selectedTimeframe === '30s' ? 0.5 : selectedTimeframe === '1h' ? 60 : parseInt(selectedTimeframe) || 1;
 
     return ASSETS.map((asset) => {
-      // 1. Fetch real price series for this instrument from active tick buffer
       const existing = getAssetTicks(asset.symbol);
-      const ticks = existing.length >= 6
-        ? existing
-        : getOrInitializeAssetTicks(
-            asset.symbol,
-            asset.basePrice || (asset.decimals === 5 ? 1.08500 : 100.0),
-            asset.pipSize,
-            asset.decimals,
-            60
-          );
+      const ticks = existing;
 
       // 2. Perform real multi-window live confirmation (Anti-Opposite Signals Gate)
       const multiWindow = evaluateMultiWindowLiveConfirmation(ticks, asset.pipSize, tfMinutes, asset.symbol);

@@ -237,13 +237,7 @@ export function LiveChart({
       chartRef.current = chart;
 
       // Ingest reliable tick history
-      const ticks = getOrInitializeTimestampedTicks(
-        activeAsset.symbol,
-        activeAsset.basePrice || currentPrice,
-        pipSize,
-        decimals,
-        interval === '5m' ? 600 : interval === '1m' ? 400 : 250
-      );
+      const ticks = getOrInitializeTimestampedTicks(activeAsset.symbol);
 
       // Compute metrics safely
       if (ticks.length > 0) {
@@ -375,13 +369,7 @@ export function LiveChart({
     } catch (err) {
       console.warn('[LiveChart init warning, activating resilient fallback]', err);
       setUseFallbackCanvas(true);
-      const ticks = getOrInitializeTimestampedTicks(
-        activeAsset.symbol,
-        activeAsset.basePrice || currentPrice,
-        pipSize,
-        decimals,
-        100
-      );
+      const ticks = getOrInitializeTimestampedTicks(activeAsset.symbol);
       drawFallbackChart(ticks);
     }
 

@@ -94,6 +94,24 @@ export function SignalEngine({
   const analysisProfile: AnalysisProfile = currentPlatform.profile;
   const analysisMode: AnalysisMode = analysisProfile === 'MT5' ? 'mt5' : 'quick';
 
+  // Broker availability & OTC check (Stage 2 Requirement #8 & #10)
+  const isOtc = useMemo(() => {
+    return (
+      Boolean((activeAsset as any)?.is_otc) ||
+      Boolean((currentPlatform as any)?.is_otc) ||
+      (activeAsset?.name || '').toUpperCase().includes('OTC') ||
+      (activeAsset?.symbol || '').toUpperCase().includes('OTC')
+    );
+  }, [activeAsset, currentPlatform]);
+
+  // Track latest tick arrival timestamp for tick freshness interlock (< 6s)
+  const lastTickTimeRef = useRef<number>(Date.now());
+  useEffect(() => {
+    if (ticks && ticks.length > 0) {
+      lastTickTimeRef.current = Date.now();
+    }
+  }, [ticks, currentPrice]);
+
   const handlePlatformChange = (id: string) => {
     setSelectedPlatformId(id);
     try {
@@ -237,8 +255,52 @@ export function SignalEngine({
 
     if (isLocked || isRechecking || activeTrade) return;
 
-    // Live Feed Health Check: Block signal generation if WebSocket feed is dead or stale
-    if (!isFeedActive && !isDemoMode) {
+    // 0) Safety Interlock: OTC Check (Requirement #8 & #10)
+    if (isOtc) {
+      const blockedSignal: SignalData = {
+        asset: activeAsset?.name || 'OTC Asset',
+        timeframe: selectedTf,
+        direction: 'WAIT',
+        confidence: 0,
+        trend: 'Neutral',
+        velocity: 'Blocked',
+        generatedAt: Date.now(),
+        status: 'ANALYSIS_BLOCKED',
+        blockedReason: 'OTC prices are set by your broker; we cannot analyse them',
+        plainLanguageReason: 'This asset uses broker-internal OTC pricing with no independent public market feed. Analysis is disabled to protect your capital.',
+        riskNote: 'Trading involves risk. Algorithmic telemetry is not financial advice.',
+        gatePassed: false,
+        confluenceFactorsList: [],
+      };
+      setSignal(blockedSignal);
+      setCreditNotice('Analysis disabled for broker-internal OTC assets.');
+      return;
+    }
+
+    // 1) Market Closed Check (Requirement #10)
+    if (feedHealthStatus === 'MARKET_CLOSED') {
+      const blockedSignal: SignalData = {
+        asset: activeAsset?.name || 'Forex Asset',
+        timeframe: selectedTf,
+        direction: 'WAIT',
+        confidence: 0,
+        trend: 'Neutral',
+        velocity: 'Market Closed',
+        generatedAt: Date.now(),
+        status: 'ANALYSIS_BLOCKED',
+        blockedReason: 'Market is closed. Real-time feeds resume Sunday 21:00 UTC.',
+        plainLanguageReason: 'Forex and equities markets close over the weekend. Live algorithmic analysis is disabled. You can switch to 24/7 Deriv Synthetics or Crypto.',
+        riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
+        gatePassed: false,
+        confluenceFactorsList: [],
+      };
+      setSignal(blockedSignal);
+      setCreditNotice('No credits deducted while market is closed.');
+      return;
+    }
+
+    // 2) Live Feed Health Check: Block signal generation if WebSocket feed is dead or stale
+    if ((!isFeedActive || (feedHealthStatus !== 'LIVE' && feedHealthStatus !== 'NORMAL')) && !isDemoMode) {
       const blockedSignal: SignalData = {
         asset: activeAsset?.name || 'EUR/USD',
         timeframe: selectedTf,
@@ -248,8 +310,8 @@ export function SignalEngine({
         velocity: 'Feed Offline',
         generatedAt: Date.now(),
         status: 'ANALYSIS_BLOCKED',
-        blockedReason: 'NO LIVE DATA: Market feed is offline or tick stream is stale (>10s).',
-        plainLanguageReason: 'Signal generation is paused to protect capital. Tolvexa strictly executes signals from verified live market ticks. No credits deducted.',
+        blockedReason: `NO LIVE DATA: Market feed status is ${feedHealthStatus || 'CONNECTING'}.`,
+        plainLanguageReason: 'Signal generation is paused to protect capital. PulseTrade strictly executes signals from verified live market ticks. No credits deducted.',
         riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -259,7 +321,32 @@ export function SignalEngine({
       return;
     }
 
-    // 2) Instrument & Timeframe check
+    // 3) Binary Expiry Tick Freshness Check (< 6 seconds) (Requirement #10)
+    if (analysisMode === 'quick' && !isDemoMode) {
+      const tickAgeSec = (Date.now() - lastTickTimeRef.current) / 1000;
+      if (tickAgeSec > 6.0) {
+        const blockedSignal: SignalData = {
+          asset: activeAsset?.name || 'Asset',
+          timeframe: selectedTf,
+          direction: 'WAIT',
+          confidence: 0,
+          trend: 'Neutral',
+          velocity: 'Tick Delayed',
+          generatedAt: Date.now(),
+          status: 'ANALYSIS_BLOCKED',
+          blockedReason: `Tick feed delayed (${tickAgeSec.toFixed(1)}s old > 6s limit). Waiting for fresh live market tick.`,
+          plainLanguageReason: 'Binary options micro-structure signals require real-time tick telemetry under 6 seconds. Waiting for fresh tick from Deriv WebSocket before evaluating setups.',
+          riskNote: 'Trading involves risk. Sub-minute expiries require verified low-latency feeds.',
+          gatePassed: false,
+          confluenceFactorsList: [],
+        };
+        setSignal(blockedSignal);
+        setCreditNotice('No credits deducted for delayed tick stream.');
+        return;
+      }
+    }
+
+    // 4) Instrument & Timeframe check
     if (!activeAsset || !activeAsset.symbol) {
       const blockedSignal: SignalData = {
         asset: 'UNKNOWN',
@@ -300,19 +387,19 @@ export function SignalEngine({
       return;
     }
 
-    // 3) Live Stream Buffer Check (MANDATORY — NEVER GUESS FROM MOCK/FILL PADDING)
-    if (safeTicks.length < 8) {
+    // 5) Live Stream Buffer Check (MANDATORY >= 15 verified real ticks)
+    if (safeTicks.length < 15 && !isDemoMode) {
       const blockedSignal: SignalData = {
         asset: activeAsset.name,
         timeframe: selectedTf,
         direction: 'WAIT',
         confidence: 0,
         trend: 'Neutral',
-        velocity: 'Stream Loading',
+        velocity: 'Collecting Ticks',
         generatedAt: Date.now(),
         status: 'ANALYSIS_BLOCKED',
-        blockedReason: `Live market data insufficient (${safeTicks.length}/8 ticks captured for ${activeAsset.name}). Please wait 3-5 seconds and try again.`,
-        plainLanguageReason: 'Live tick buffer insufficient to compute micro momentum safely. PulseTrade strictly requires verified live WebSocket ticks before evaluating setups. No credits deducted.',
+        blockedReason: `Live market data insufficient (${safeTicks.length}/15 real ticks captured for ${activeAsset.name}). Collecting live ticks...`,
+        plainLanguageReason: 'PulseTrade strictly requires at least 15 verified live WebSocket ticks before evaluating setups. Buffers start empty and never use fake seed data. No credits deducted.',
         riskNote: 'Trading involves risk. Always wait for confirmed live market velocity.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -931,6 +1018,19 @@ export function SignalEngine({
               <span>⭐ LOCK PROFIT / SAFE CLOSE NOW ({activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} pips)</span>
             </button>
           )}
+        </div>
+      )}
+
+      {/* OTC Broker Warning Banner (Requirement #8) */}
+      {isOtc && (
+        <div className="bg-amber-950/40 border border-amber-500/50 rounded-2xl p-4 font-mono text-xs text-amber-200 flex items-start gap-3 shadow-xl">
+          <span className="text-xl">⚠️</span>
+          <div className="space-y-1">
+            <div className="font-bold text-amber-300 uppercase tracking-wide">OTC Proprietary Broker Instrument</div>
+            <p className="text-[11px] text-amber-100/90 leading-relaxed">
+              OTC prices are set by your broker; we cannot analyse them. Please select a standardized market instrument (Forex, Crypto, Commodities, or Deriv 24/7 Synthetics) from the asset picker.
+            </p>
+          </div>
         </div>
       )}
 
@@ -1562,6 +1662,14 @@ export function SignalEngine({
             </div>
           </div>
         )}
+
+        {/* Broker Disclaimer Notice (Requirement #8) */}
+        <div className="mt-3 pt-2.5 border-t border-slate-800/80 px-2.5 py-1.5 rounded-xl bg-slate-950/60 text-[11px] font-mono text-slate-400 flex items-center gap-2">
+          <span className="text-emerald-400 text-xs shrink-0 font-bold">ℹ</span>
+          <span className="leading-tight">
+            Prices come from the Deriv market feed. Your broker&apos;s price can differ slightly, which matters most on 30 s to 1 min expiries.
+          </span>
+        </div>
       </div>
 
       {/* 7. MANDATORY OUTCOME FEEDBACK LOOP */}
@@ -1611,10 +1719,24 @@ export function SignalEngine({
           id="btn-analyse-trigger"
           data-tour="generate-signal"
           onClick={handleTriggerAnalysis}
-          disabled={isLocked || isRechecking || Boolean(activeTrade) || (!isFeedActive && !isDemoMode)}
+          disabled={
+            isLocked ||
+            isRechecking ||
+            Boolean(activeTrade) ||
+            isOtc ||
+            feedHealthStatus === 'MARKET_CLOSED' ||
+            (!isFeedActive && !isDemoMode) ||
+            (safeTicks.length < 15 && !isDemoMode)
+          }
           className={`w-full py-3.5 px-4 rounded-2xl font-black font-mono text-xs sm:text-sm uppercase tracking-wider shadow-2xl transition-all duration-200 flex items-center justify-center gap-2 ${
-            !isFeedActive && !isDemoMode
+            isOtc
+              ? 'bg-amber-950/40 text-amber-300 border border-amber-500/50 cursor-not-allowed opacity-90'
+              : feedHealthStatus === 'MARKET_CLOSED'
+              ? 'bg-amber-950/30 text-amber-300 border border-amber-600/40 cursor-not-allowed'
+              : !isFeedActive && !isDemoMode
               ? 'bg-rose-950/40 text-rose-300 border border-rose-500/50 cursor-not-allowed opacity-80'
+              : safeTicks.length < 15 && !isDemoMode
+              ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
               : isLocked || Boolean(activeTrade)
               ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
               : isRechecking
@@ -1624,14 +1746,18 @@ export function SignalEngine({
               : 'bg-gradient-to-r from-blue-500 via-indigo-500 to-blue-400 hover:from-blue-400 hover:to-indigo-400 text-white shadow-blue-500/30 active:scale-98 cursor-pointer'
           }`}
         >
-          {!isFeedActive && !isDemoMode ? (
-            feedHealthStatus === 'MARKET_CLOSED' ? (
-              <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
-            ) : feedHealthStatus === 'OFFLINE' ? (
+          {isOtc ? (
+            <span>🚫 OTC ASSET — PROPRIETARY BROKER PRICING</span>
+          ) : feedHealthStatus === 'MARKET_CLOSED' ? (
+            <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
+          ) : !isFeedActive && !isDemoMode ? (
+            feedHealthStatus === 'OFFLINE' ? (
               <span>⚠️ FEED OFFLINE — RETRYING...</span>
             ) : (
               <span>⚡ CONNECTING TO LIVE FEED...</span>
             )
+          ) : safeTicks.length < 15 && !isDemoMode ? (
+            <span>⏳ COLLECTING LIVE TICKS ({safeTicks.length}/15)...</span>
           ) : isRechecking ? (
             <>
               <svg className="animate-spin h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24">

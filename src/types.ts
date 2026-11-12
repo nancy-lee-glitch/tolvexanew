@@ -11,6 +11,7 @@ export interface AssetConfig {
   basePrice?: number;
   marketHours?: string;
   category?: string;
+  is_otc?: boolean;
 }
 
 export interface TimestampedTick {

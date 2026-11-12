@@ -279,6 +279,12 @@ export function AuthModal({
       setErrorMessage(err?.message || 'Warning: Failed to invalidate session on server. Local session cleared.');
     }
 
+    try {
+      sessionStorage.removeItem('tickvere_deriv_token');
+    } catch {
+      // Silently handled
+    }
+
     onUserUpdated(null);
     setCurrentMode('login');
     setSuccessMessage('Logged out safely.');
