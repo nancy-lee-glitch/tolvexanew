@@ -26,7 +26,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
     const w = logged.filter((s) => s.outcome === 'WIN').length;
     const l = logged.filter((s) => s.outcome === 'LOSS').length;
     const total = w + l;
-    const rate = total > 0 ? `${((w / total) * 100).toFixed(1)}%` : '--';
+    const rate = total > 0 ? `${((w / total) * 100).toFixed(1)}%` : '—';
     return { wins: w, losses: l, totalLogged: total, winRateStr: rate };
   }, [actionableSignals]);
 
@@ -158,7 +158,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
         {/* Real Accuracy Metric Box (No fake baseline) */}
         <div className="flex items-center gap-2 self-start sm:self-auto bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs">
           <span className="text-slate-400">Session Accuracy:</span>
-          <span className={`font-black ${winRateStr !== '--' && parseFloat(winRateStr) >= 50 ? 'text-emerald-400' : 'text-slate-200'}`}>
+          <span className={`font-black ${winRateStr !== '—' && parseFloat(winRateStr) >= 50 ? 'text-emerald-400' : 'text-slate-200'}`}>
             {winRateStr}
           </span>
           <span className="text-slate-600">|</span>

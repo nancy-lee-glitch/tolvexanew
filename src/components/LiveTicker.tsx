@@ -23,8 +23,6 @@ interface LiveTickerProps {
   onTicksUpdate?: (ticks: number[]) => void;
   onOpenVipRadar?: () => void;
   isVIP?: boolean;
-  isDemoMode?: boolean;
-  onToggleDemoMode?: (isDemo: boolean) => void;
   onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus) => void;
   user?: UserProfile | null;
 }
@@ -36,8 +34,6 @@ export function LiveTicker({
   onTicksUpdate,
   onOpenVipRadar,
   isVIP: _isVIP,
-  isDemoMode = false,
-  onToggleDemoMode,
   onFeedStatusChange,
   user,
 }: LiveTickerProps) {
@@ -213,29 +209,8 @@ export function LiveTicker({
 
   return (
     <div id="live-ticker-container" className="space-y-2.5">
-      {/* 1. DEMO MODE NOTICE (Only if explicitly toggled) */}
-      {isDemoMode && (
-        <div className="bg-amber-950/70 border border-amber-500/40 rounded-2xl p-2.5 sm:p-3 text-xs font-mono text-amber-200 flex items-center justify-between gap-3 shadow-lg">
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse shrink-0" />
-            <span className="leading-tight">
-              <strong>SIMULATED – NOT REAL DATA</strong> — Live market analysis is paused.
-            </span>
-          </div>
-          {onToggleDemoMode && (
-            <button
-              type="button"
-              onClick={() => onToggleDemoMode(false)}
-              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs shrink-0 cursor-pointer shadow-sm transition"
-            >
-              Switch to Live Feed
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 2. MARKET CLOSED NOTICE */}
-      {!isDemoMode && feedStatus === 'MARKET_CLOSED' && (
+      {/* MARKET CLOSED NOTICE */}
+      {feedStatus === 'MARKET_CLOSED' && (
         <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-3 text-xs font-mono text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-lg animate-in fade-in">
           <div className="flex items-center gap-2.5">
             <span className="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0" />
@@ -273,8 +248,8 @@ export function LiveTicker({
         </div>
       )}
 
-      {/* 3. RECONNECTING / DELAYED / OFFLINE STATUS NOTICE */}
-      {!isDemoMode && feedStatus !== 'LIVE' && feedStatus !== 'MARKET_CLOSED' && (
+      {/* RECONNECTING / DELAYED / OFFLINE STATUS NOTICE */}
+      {feedStatus !== 'LIVE' && feedStatus !== 'MARKET_CLOSED' && (
         <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-2.5 sm:p-3 text-xs font-mono text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-lg">
           <div className="flex items-center gap-2.5">
             <span

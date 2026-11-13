@@ -39,7 +39,6 @@ interface SignalEngineProps {
   onOpenVipRadar?: () => void;
   isFeedActive?: boolean;
   feedHealthStatus?: string;
-  isDemoMode?: boolean;
 }
 
 export const TIMEFRAMES = [
@@ -65,7 +64,6 @@ export function SignalEngine({
   onOpenVipRadar,
   isFeedActive = true,
   feedHealthStatus = 'LIVE',
-  isDemoMode = false,
 }: SignalEngineProps) {
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
   const [platforms] = useState<BrokerPlatformItem[]>(() => getBrokerPlatforms());
@@ -147,14 +145,14 @@ export function SignalEngine({
     };
   }, []);
 
-  // Stop auto-scan if live feed is interrupted (Requirement #4)
+  // Stop auto-scan if live feed is interrupted
   useEffect(() => {
-    if (!isFeedActive && !isDemoMode) {
+    if (!isFeedActive) {
       if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
       setAutoScanSecondsRemaining(0);
       setAutoScanAttempt(0);
     }
-  }, [isFeedActive, isDemoMode]);
+  }, [isFeedActive]);
   
   // Signal State
   const [signal, setSignal] = useState<SignalData | null>(null);
@@ -197,21 +195,7 @@ export function SignalEngine({
     } catch (err) {
       console.warn('[SignalEngine] Failed to read signal history from storage:', err);
     }
-    return [
-      {
-        id: 'sig_init_1',
-        asset: activeAsset?.name || 'EUR/USD',
-        timeframe: '1m',
-        direction: 'CALL',
-        entryPrice: currentPrice || 1.0852,
-        targetPrice: (currentPrice || 1.0852) + (activeAsset?.pipSize || 0.0001) * 4,
-        confidence: 91.4,
-        generatedAt: Date.now() - 180000,
-        outcome: 'WIN',
-        pipDiff: 3.2,
-        sparkline: [1.0848, 1.0849, 1.0850, 1.0851, 1.08515, 1.0852, 1.08535, 1.0854, 1.08548, 1.08552],
-      },
-    ];
+    return [];
   });
 
   useEffect(() => {
@@ -300,7 +284,7 @@ export function SignalEngine({
     }
 
     // 2) Live Feed Health Check: Block signal generation if WebSocket feed is dead or stale
-    if ((!isFeedActive || (feedHealthStatus !== 'LIVE' && feedHealthStatus !== 'NORMAL')) && !isDemoMode) {
+    if (!isFeedActive || feedHealthStatus !== 'LIVE') {
       const blockedSignal: SignalData = {
         asset: activeAsset?.name || 'EUR/USD',
         timeframe: selectedTf,
@@ -321,8 +305,8 @@ export function SignalEngine({
       return;
     }
 
-    // 3) Binary Expiry Tick Freshness Check (< 6 seconds) (Requirement #10)
-    if (analysisMode === 'quick' && !isDemoMode) {
+    // 3) Binary Expiry Tick Freshness Check (< 6 seconds)
+    if (analysisMode === 'quick') {
       const tickAgeSec = (Date.now() - lastTickTimeRef.current) / 1000;
       if (tickAgeSec > 6.0) {
         const blockedSignal: SignalData = {
@@ -388,7 +372,7 @@ export function SignalEngine({
     }
 
     // 5) Live Stream Buffer Check (MANDATORY >= 15 verified real ticks)
-    if (safeTicks.length < 15 && !isDemoMode) {
+    if (safeTicks.length < 15) {
       const blockedSignal: SignalData = {
         asset: activeAsset.name,
         timeframe: selectedTf,
@@ -556,7 +540,7 @@ export function SignalEngine({
         }
 
         // AUTO-SCAN RULE: If autoScanEnabled and attempt < MAX_AUTO_SCAN_ATTEMPTS, schedule 8s countdown ONLY if feed is LIVE
-        if (autoScanEnabled && autoScanAttempt < MAX_AUTO_SCAN_ATTEMPTS && (isFeedActive || isDemoMode)) {
+        if (autoScanEnabled && autoScanAttempt < MAX_AUTO_SCAN_ATTEMPTS && isFeedActive) {
           if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
           let remaining = 8;
           setAutoScanSecondsRemaining(remaining);
@@ -614,8 +598,7 @@ export function SignalEngine({
     if (!activeTrade) return;
 
     setActiveTrade((prev) => (prev ? { ...prev, completed: true } : null));
-    // Live Data Integrity: Never write demo outcomes to persistent history or stats
-    if (signal && !isDemoMode) {
+    if (signal) {
       onLogOutcome(outcome, signal);
       logOutcomeToSupabase(outcome, signal, user?.id || null);
     }
@@ -663,11 +646,8 @@ export function SignalEngine({
   // Handle post-trade feedback
   const handleOutcome = (outcome: 'WIN' | 'LOSS') => {
     if (!signal) return;
-    // Live Data Integrity: Never write demo outcomes to persistent history or stats
-    if (!isDemoMode) {
-      onLogOutcome(outcome, signal);
-      logOutcomeToSupabase(outcome, signal, user?.id || null);
-    }
+    onLogOutcome(outcome, signal);
+    logOutcomeToSupabase(outcome, signal, user?.id || null);
 
     if (signalHistory.length > 0) {
       handleUpdateHistoryOutcome(signalHistory[0].id, outcome);
@@ -702,7 +682,7 @@ export function SignalEngine({
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-xl font-mono text-xs">
         <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
           <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${isFeedActive || isDemoMode ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+            <span className={`w-2.5 h-2.5 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
             <span className="font-bold text-white text-xs sm:text-sm">
               Live Quant Gate &bull; {activeAsset?.name || 'EUR/USD'}
             </span>
@@ -1725,17 +1705,17 @@ export function SignalEngine({
             Boolean(activeTrade) ||
             isOtc ||
             feedHealthStatus === 'MARKET_CLOSED' ||
-            (!isFeedActive && !isDemoMode) ||
-            (safeTicks.length < 15 && !isDemoMode)
+            !isFeedActive ||
+            safeTicks.length < 15
           }
           className={`w-full py-3.5 px-4 rounded-2xl font-black font-mono text-xs sm:text-sm uppercase tracking-wider shadow-2xl transition-all duration-200 flex items-center justify-center gap-2 ${
             isOtc
               ? 'bg-amber-950/40 text-amber-300 border border-amber-500/50 cursor-not-allowed opacity-90'
               : feedHealthStatus === 'MARKET_CLOSED'
               ? 'bg-amber-950/30 text-amber-300 border border-amber-600/40 cursor-not-allowed'
-              : !isFeedActive && !isDemoMode
+              : !isFeedActive
               ? 'bg-rose-950/40 text-rose-300 border border-rose-500/50 cursor-not-allowed opacity-80'
-              : safeTicks.length < 15 && !isDemoMode
+              : safeTicks.length < 15
               ? 'bg-slate-800 text-slate-400 border border-slate-700 cursor-not-allowed'
               : isLocked || Boolean(activeTrade)
               ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
@@ -1750,13 +1730,13 @@ export function SignalEngine({
             <span>🚫 OTC ASSET — PROPRIETARY BROKER PRICING</span>
           ) : feedHealthStatus === 'MARKET_CLOSED' ? (
             <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
-          ) : !isFeedActive && !isDemoMode ? (
+          ) : !isFeedActive ? (
             feedHealthStatus === 'OFFLINE' ? (
               <span>⚠️ FEED OFFLINE — RETRYING...</span>
             ) : (
               <span>⚡ CONNECTING TO LIVE FEED...</span>
             )
-          ) : safeTicks.length < 15 && !isDemoMode ? (
+          ) : safeTicks.length < 15 ? (
             <span>⏳ COLLECTING LIVE TICKS ({safeTicks.length}/15)...</span>
           ) : isRechecking ? (
             <>

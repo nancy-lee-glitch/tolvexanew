@@ -275,7 +275,7 @@ export interface SessionStats {
   total: number;
   wins: number;
   losses: number;
-  winRate: number;
+  winRate: number | null;
 }
 
 export interface PricingTier {

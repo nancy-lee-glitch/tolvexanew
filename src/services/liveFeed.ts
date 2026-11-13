@@ -393,7 +393,6 @@ export function attachBrowserEvents(feed: LiveFeed): () => void {
   g.document.addEventListener('visibilitychange', vis);
   g.window.addEventListener('online', on);
   g.window.addEventListener('offline', off);
-  g.window.addEventListener('pagehide', () => feed.destroy());
   return () => {
     g.document.removeEventListener('visibilitychange', vis);
     g.window.removeEventListener('online', on);

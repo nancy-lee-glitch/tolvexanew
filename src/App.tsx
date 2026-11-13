@@ -16,6 +16,7 @@ import { LiveTicker, ASSETS } from './components/LiveTicker.tsx';
 import { getDefaultActiveAsset } from './services/symbolMap.ts';
 import { SignalEngine } from './components/SignalEngine.tsx';
 import { RiskAdvisor } from './components/RiskAdvisor.tsx';
+import { DebugDiagnosticsPanel } from './components/DebugDiagnosticsPanel.tsx';
 import { CryptoCheckout } from './components/CryptoCheckout.tsx';
 const AdminCenter = React.lazy(() =>
   import('./components/AdminCenter.tsx').then((m) => ({ default: m.AdminCenter }))
@@ -116,13 +117,14 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState<number>(1);
   const [isFeedActive, setIsFeedActive] = useState<boolean>(true);
   const [feedHealthStatus, setFeedHealthStatus] = useState<string>('CONNECTING');
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
+  const isDebugMode =
+    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
 
   const [stats, setStats] = useState<SessionStats>({
     total: 0,
     wins: 0,
     losses: 0,
-    winRate: 85.7,
+    winRate: null,
   });
 
   // Check initial user authentication & VIP 30-day status via Supabase Auth
@@ -283,7 +285,7 @@ export default function App() {
       const wins = outcome === 'WIN' ? prev.wins + 1 : prev.wins;
       const losses = outcome === 'LOSS' ? prev.losses + 1 : prev.losses;
       const total = wins + losses;
-      const winRate = total > 0 ? parseFloat(((wins / total) * 100).toFixed(1)) : 85.7;
+      const winRate = total > 0 ? parseFloat(((wins / total) * 100).toFixed(1)) : null;
       return { total, wins, losses, winRate };
     });
   };
@@ -582,6 +584,11 @@ export default function App() {
 
       {/* Main Responsive View Container: full-bleed on mobile (360-430px) with bottom nav clearance */}
       <main className="flex-1 w-full max-w-none md:max-w-6xl mx-0 md:mx-auto px-2.5 sm:px-4 py-2 sm:py-4 pb-28 md:pb-6 overflow-visible">
+        {isDebugMode && (
+          <div className="mb-4">
+            <DebugDiagnosticsPanel />
+          </div>
+        )}
         {/* VIEW 1: LANDING PAGE */}
         {currentPage === 'landing' && (
           <LandingPage
@@ -646,8 +653,6 @@ export default function App() {
                   setIsFeedActive(active);
                   setFeedHealthStatus(status);
                 }}
-                isDemoMode={isDemoMode}
-                onToggleDemoMode={() => setIsDemoMode((d) => !d)}
                 user={user}
               />
 
@@ -666,7 +671,6 @@ export default function App() {
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
                 isFeedActive={isFeedActive}
                 feedHealthStatus={feedHealthStatus}
-                isDemoMode={isDemoMode}
               />
 
               {/* Risk Advisor & 2% Stake Protection */}
