@@ -78,8 +78,8 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="generate-signal"]', '#btn-analyse-trigger'],
     title: '6. Algorithmic Signal Execution',
     description:
-      'Tap here to initiate real-time mathematical computation. Confirmed signals feature a strict 6-second radial freshness window for zero slippage. If conditions are unconfirmed, it displays WAIT—and WAIT signals NEVER consume credits!',
-    tip: 'Execute your trade on your broker within the 6-second window for peak mathematical expectancy.',
+      'Tap here to initiate real-time mathematical computation. Confirmed signals feature a strict 6-second radial freshness window so stale setups cannot be acted on. If conditions are unconfirmed, it displays WAIT—and WAIT signals NEVER consume credits!',
+    tip: 'Execute your trade on your broker within the 6-second window before live quotes shift.',
     badge: 'Step 6 of 9 • Execution',
     shape: 'pill',
     preferredPosition: 'top',
@@ -102,7 +102,7 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="radar-control"]', '#vip-radar-screener-btn'],
     title: '8. VIP Multi-Asset Safe Screener',
     description:
-      'Continuous 24/7 multi-asset screener monitoring synthetics, forex, and crypto simultaneously. Automatically rates market safety so you immediately identify the highest-probability trends.',
+      'Continuous 24/7 multi-asset screener monitoring synthetics, forex, and crypto simultaneously so you can inspect live trend alignment and volatility conditions across markets.',
     tip: 'Tap the Radar button on desktop or mobile bottom navigation to scan the whole market in one glance.',
     badge: 'Step 8 of 9 • Radar Screener',
     shape: 'pill',

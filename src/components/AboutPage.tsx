@@ -45,7 +45,7 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
             Our Mission
           </span>
           <h2 className="text-xl sm:text-2xl font-black text-white font-mono">
-            Democratizing High-Frequency Edge for Retail Traders
+            Structured Multi-Timeframe Analysis for Retail Traders
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
             Institutional trading firms spend hundreds of millions on low-latency data feeds and statistical models. Retail traders are often left relying on laggy indicators or scam bots that promise unrealistic 100% win rates.
@@ -91,14 +91,14 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-2">
             <div className="text-emerald-400 font-bold text-sm">01. Multi-Timeframe Confluence</div>
             <p className="text-slate-400 leading-relaxed">
-              Signals are only generated when the 1-hour macro vector, the 1-minute micro-candle structure, and raw tick momentum agree on direction with an 85%+ confidence score.
+              Signals are only generated when trend structure, micro-candle alignment, and live tick momentum agree on direction.
             </p>
           </div>
 
           <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-2">
             <div className="text-teal-400 font-bold text-sm">02. 6-Second Radial Freshness</div>
             <p className="text-slate-400 leading-relaxed">
-              If an options trade is placed more than 6 seconds after inflection, broker re-quoting destroys the edge. Our radial countdown locks expired setups automatically.
+              If an options trade is placed more than 6 seconds after a setup triggers, market price movement increases slippage. Our radial countdown locks expired setups automatically.
             </p>
           </div>
 
@@ -133,7 +133,7 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
 
       {/* CTA Footer */}
       <div className="text-center space-y-4 pt-4">
-        <h3 className="text-lg font-bold text-white font-mono">Ready to experience the edge?</h3>
+        <h3 className="text-lg font-bold text-white font-mono">Ready to explore the terminal?</h3>
         <div className="flex flex-wrap justify-center gap-3 font-mono">
           <button
             type="button"

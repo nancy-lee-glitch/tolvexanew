@@ -171,10 +171,10 @@ export function BlogSection({
           Quantitative Trading Academy
         </span>
         <h1 className="text-2xl sm:text-4xl font-black text-white font-mono">
-          Research, Market Mechanics &amp; Execution Edge
+          Research, Market Mechanics &amp; Execution Timing
         </h1>
         <p className="text-xs sm:text-sm text-slate-400">
-          In-depth algorithmic analysis of binary options pricing, order-flow velocity, latency arbitrage, and capital survival.
+          Educational articles on binary options pricing, order-flow velocity, execution latency, and capital risk management.
         </p>
       </div>
 

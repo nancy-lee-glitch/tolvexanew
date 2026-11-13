@@ -147,10 +147,10 @@ export function LandingPage({
 
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4">
                   <span className="text-[10px] text-slate-400 uppercase block tracking-wider">
-                    Tick Latency
+                    Market Data Feed
                   </span>
-                  <div className="text-xl sm:text-3xl font-black text-teal-300 mt-1">&lt;25ms</div>
-                  <span className="text-[10px] sm:text-[11px] text-slate-500">Direct Gateway</span>
+                  <div className="text-xl sm:text-3xl font-black text-teal-300 mt-1">Direct WS</div>
+                  <span className="text-[10px] sm:text-[11px] text-slate-500">Live Deriv Stream</span>
                 </div>
 
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4">
@@ -198,7 +198,7 @@ export function LandingPage({
             </div>
             <h3 className="text-lg font-bold text-white font-mono">1. The 6-Second Freshness Window</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              When micro-momentum triggers, broker quote spreads adjust within 800ms. Our radial timer counts down from 6 seconds. If you cannot place the trade before expiration, the signal locks out to protect you from chasing bad strikes.
+              When micro-momentum triggers, broker quote spreads can shift quickly. Our radial timer counts down from 6 seconds and locks expired setups automatically so you do not act on stale quotes.
             </p>
           </div>
 
@@ -211,7 +211,7 @@ export function LandingPage({
             </div>
             <h3 className="text-lg font-bold text-white font-mono">2. Strict 2% Stake Sizing</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Martingale and 20% stakes wipe accounts during normal variance clusters. PulseTrade Pro calculates your mathematically sound 2% stake based on your broker balance, keeping drawdown strictly contained under 18%.
+              Oversized or martingale stakes can rapidly deplete trading accounts during losing streaks. Tolvexa calculates a fixed 2% stake size from your stated broker balance to help manage per-trade exposure.
             </p>
           </div>
 
@@ -259,7 +259,7 @@ export function LandingPage({
               </div>
               <h4 className="text-sm font-bold text-white uppercase">Monitor Confluence</h4>
               <p className="text-xs text-slate-400 leading-relaxed">
-                The multi-timeframe algorithm aggregates 1H trend vectors and 1M tick momentum from the live Deriv feed. Audio chimes alert you the millisecond confidence hits 85%+.
+                The multi-timeframe engine aggregates trend direction and tick momentum from the live Deriv feed. Audio chimes alert you when an actionable confluence setup is ready.
               </p>
             </div>
 
@@ -568,7 +568,7 @@ export function LandingPage({
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-2">
             <h4 className="text-sm font-bold text-white">What is the 6-Second Freshness Window?</h4>
             <p className="text-xs text-slate-400 leading-relaxed">
-              In short-expiry binary options (1–5 minutes), broker algorithms re-anchor prices within seconds of an impulse. If you enter after 6 seconds, the statistical advantage degrades into negative expectation. Our radial timer locks expired signals to protect you from bad fills.
+              In short-expiry binary options, market prices can re-anchor quickly after a setup forms. To guard against stale entries, our radial timer counts down 6 seconds and locks expired signals so you must request a fresh evaluation.
             </p>
           </div>
         </div>

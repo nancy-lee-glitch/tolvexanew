@@ -77,27 +77,27 @@ const TUTORIAL_STEPS: TutorialStep[] = [
         text: 'New traders start with 10 free starter credits. Each calculated signal consumes 1 credit.',
       },
       {
-        title: '85%+ Confluence Threshold',
-        text: 'Signals are only generated when multi-indicator confluence exceeds institutional safety criteria.',
+        title: 'Multi-Factor Confluence Gate',
+        text: 'Signals are only generated when multi-indicator confluence passes alignment checks; otherwise WAIT is displayed.',
       },
       {
         title: 'Outcome Tracking & Recalibration',
-        text: 'Log your WIN/LOSS outcomes directly in the terminal to help refine mathematical risk boundaries.',
+        text: 'Log your WIN/LOSS outcomes directly in the terminal to track your session history and risk boundaries.',
       },
     ],
   },
   {
     title: 'Safe Radar & Exit Optimization',
-    subtitle: 'Protecting Profits with Peak Momentum Windows',
+    subtitle: 'Monitoring Volatility & Momentum Windows',
     badge: 'Step 4 of 5 • Risk Shield',
     icon: '🛡️',
     accent: 'amber',
     description:
-      'Binary and micro-scalp contracts often fail during the last few seconds due to sharp mean reversion. Safe Radar predicts the exact window when profit momentum peaks.',
+      'Binary and micro-scalp contracts can reverse quickly near expiry due to sharp mean reversion. Safe Radar monitors live volatility and directional momentum conditions.',
     bulletPoints: [
       {
-        title: 'Peak Momentum Window',
-        text: 'Informs you when contract gains are highest (e.g. 18s–26s into a 60s trade) for early close opportunities.',
+        title: 'Momentum Window Guidance',
+        text: 'Highlights active tick velocity and potential exhaustion zones to assist trade management.',
       },
       {
         title: 'Reversal Risk Warning',
