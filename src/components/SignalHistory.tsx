@@ -60,12 +60,14 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
   const renderSparkline = (
     sparkline: number[] = [],
     entryPrice: number,
-    direction: 'CALL' | 'PUT' | 'WAIT',
+    direction: 'CALL' | 'PUT' | 'BUY' | 'SELL' | 'WAIT',
     outcome?: 'WIN' | 'LOSS' | 'IN_TRADE' | 'PENDING' | 'WAIT'
   ) => {
-    const points = sparkline && sparkline.length >= 4 
-      ? sparkline 
-      : [entryPrice - 0.0001, entryPrice, entryPrice + 0.0001, entryPrice + (direction === 'CALL' ? 0.0002 : -0.0002)];
+    if (!sparkline || sparkline.length < 2) {
+      return <span className="text-[10px] text-slate-600 font-mono">No spark</span>;
+    }
+    const points = sparkline;
+    const isBull = direction === 'CALL' || direction === 'BUY';
 
     const min = Math.min(...points, entryPrice);
     const max = Math.max(...points, entryPrice);
@@ -90,7 +92,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
 
     const areaData = `${pathData} L ${coords[coords.length - 1].x.toFixed(1)} ${height} L ${coords[0].x.toFixed(1)} ${height} Z`;
 
-    const isFavorable = outcome === 'WIN' || (!outcome && (direction === 'CALL' ? points[points.length - 1] >= entryPrice : points[points.length - 1] <= entryPrice));
+    const isFavorable = outcome === 'WIN' || (!outcome && (isBull ? points[points.length - 1] >= entryPrice : points[points.length - 1] <= entryPrice));
     const strokeColor = isFavorable ? '#10b981' : outcome === 'LOSS' ? '#f43f5e' : '#38bdf8';
     const fillColor = isFavorable ? 'rgba(16, 185, 129, 0.15)' : outcome === 'LOSS' ? 'rgba(244, 63, 94, 0.15)' : 'rgba(56, 189, 248, 0.15)';
 
@@ -216,7 +218,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
           </p>
           <p className="text-[11px] text-slate-500 max-w-md mx-auto">
             {filterTab === 'ALL'
-              ? 'Click "Re-Check & Scan" above to compute an institutional setup. Confirmed CALL/PUT trades will appear here automatically.'
+              ? 'Click "Scan Binary Signal" or "Scan MT5 Setup" above to evaluate market conditions. Confirmed CALL/PUT/BUY/SELL setups appear here.'
               : 'Trades marked with outcomes will appear under this category tab.'}
           </p>
         </div>
@@ -271,7 +273,9 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                       <span>&bull;</span>
                       <span className="text-slate-500">{formatTime(sig.generatedAt)}</span>
                       <span>&bull;</span>
-                      <span className="text-emerald-400/90">{sig.confidence}% Conf</span>
+                      <span className="text-emerald-400/90">
+                        {sig.strength ? `${sig.strength} Strength` : 'Recorded'}
+                      </span>
                     </div>
                   </div>
                 </div>

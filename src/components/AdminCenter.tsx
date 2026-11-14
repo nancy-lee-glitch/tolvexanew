@@ -848,7 +848,7 @@ export function AdminCenter({
             Access Restricted
           </h2>
           <p className="text-xs text-slate-400 font-sans leading-relaxed">
-            Institutional Administrator role required. Admin privileges are verified strictly through your authenticated session profile in Supabase Auth.
+            Administrator role required. Admin privileges are verified strictly through your authenticated session profile in Supabase Auth.
           </p>
         </div>
 
@@ -994,7 +994,7 @@ export function AdminCenter({
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-black text-white font-mono tracking-tight">
-            Institutional Operations &amp; Monetization Hub
+            Operations &amp; Monetization Hub
           </h1>
           <p className="text-xs text-slate-400 max-w-xl">
             Live management of all registered users, 30-day VIP activations, single-use VIP codes, dynamic pricing packages, and NOWPayments crypto gateway.

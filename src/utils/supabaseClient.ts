@@ -570,6 +570,101 @@ export async function sendSupabasePresence(
   }
 }
 
+export interface BrokerAssetMeta {
+  payoutPct: number;
+  isOtc: boolean;
+  enabled: boolean;
+}
+
+export interface MarketEventRow {
+  id: string;
+  starts_at: string;
+  ends_at?: string | null;
+  currency: string;
+  title: string;
+  impact: 'LOW' | 'MEDIUM' | 'HIGH' | 'HOLIDAY';
+}
+
+const brokerMetaCache = new Map<string, { data: BrokerAssetMeta; fetchedAt: number }>();
+let marketEventsCache: { data: MarketEventRow[]; fetchedAt: number } | null = null;
+const META_TTL_MS = 60_000;
+
+/**
+ * Fetch broker asset payout percentage and OTC status from public.broker_assets.
+ * Falls back to { payoutPct: 85, isOtc: false, enabled: true } when unavailable.
+ */
+export async function fetchBrokerAssetMeta(brokerId: string, symbol: string): Promise<BrokerAssetMeta> {
+  const key = `${brokerId}:${symbol}`;
+  const cached = brokerMetaCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < META_TTL_MS) {
+    return cached.data;
+  }
+
+  const fallback: BrokerAssetMeta = { payoutPct: 85, isOtc: false, enabled: true };
+  const client = getSupabaseClient();
+  if (!client || !brokerId || !symbol) return fallback;
+
+  try {
+    const { data, error } = await client
+      .from('broker_assets')
+      .select('payout_pct, is_otc, enabled')
+      .eq('broker_id', brokerId)
+      .eq('symbol', symbol)
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      brokerMetaCache.set(key, { data: fallback, fetchedAt: Date.now() });
+      return fallback;
+    }
+
+    const resolved: BrokerAssetMeta = {
+      payoutPct: typeof data.payout_pct === 'number' && data.payout_pct > 0 ? Number(data.payout_pct) : 85,
+      isOtc: Boolean(data.is_otc),
+      enabled: data.enabled !== false,
+    };
+    brokerMetaCache.set(key, { data: resolved, fetchedAt: Date.now() });
+    return resolved;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Fetch upcoming/recent market events within ±2 hours from public.market_events.
+ */
+export async function fetchUpcomingMarketEvents(): Promise<MarketEventRow[]> {
+  if (marketEventsCache && Date.now() - marketEventsCache.fetchedAt < META_TTL_MS) {
+    return marketEventsCache.data;
+  }
+
+  const client = getSupabaseClient();
+  if (!client) return [];
+
+  try {
+    const now = Date.now();
+    const minIso = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    const maxIso = new Date(now + 2 * 60 * 60 * 1000).toISOString();
+
+    const { data, error } = await client
+      .from('market_events')
+      .select('id, starts_at, ends_at, currency, title, impact')
+      .gte('starts_at', minIso)
+      .lte('starts_at', maxIso)
+      .order('starts_at', { ascending: true });
+
+    if (error || !Array.isArray(data)) {
+      return [];
+    }
+
+    const rows = data as MarketEventRow[];
+    marketEventsCache = { data: rows, fetchedAt: Date.now() };
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Record Quantitative Signal via server-authoritative POST /api/signals/log
  * User ID is extracted from verified token on server; client direct inserts to signals are revoked.
@@ -587,17 +682,26 @@ export async function logSignalToSupabase(signal: any, _userId?: number | null):
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify({
-        asset: signal.asset,
-        timeframe: signal.timeframe,
+        asset: signal.symbol || signal.asset,
+        timeframe: signal.expiry || signal.timeframe,
         direction: signal.direction,
-        entry_price: Number(signal.entryPrice),
+        entry_price: Number(signal.entryPrice || 0),
         target_price: signal.targetPrice ? Number(signal.targetPrice) : null,
         stop_loss: signal.mt5?.stopLossPrice ? Number(signal.mt5.stopLossPrice) : null,
         take_profit_1: signal.mt5?.takeProfit1Price ? Number(signal.mt5.takeProfit1Price) : null,
         take_profit_2: signal.mt5?.takeProfit2Price ? Number(signal.mt5.takeProfit2Price) : null,
-        confidence: Number(signal.confidence),
-        confluence_factors: signal.technicalAudit?.confluenceFactors || [],
-        setup_name: signal.technicalAudit?.setupName || 'Algorithmic Signal',
+        confidence: 0,
+        confluence_factors: signal.reasons || signal.technicalAudit?.confluenceFactors || [],
+        setup_name: signal.technicalAudit?.setupName || signal.engine || 'Algorithmic Signal',
+        engine: signal.engine,
+        profile: signal.profile || signal.analysisProfile,
+        platform: signal.platform,
+        expiry: signal.expiry || signal.timeframe,
+        strength: signal.strength,
+        inputs_snapshot: signal.inputsSnapshot || {},
+        feed_source: signal.feedSource || 'deriv_ws',
+        created_at: signal.createdAt || new Date().toISOString(),
+        valid_until: signal.validUntil || null,
       }),
     });
 

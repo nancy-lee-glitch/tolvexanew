@@ -13,7 +13,7 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
       <div className="text-center space-y-3 max-w-2xl mx-auto">
         <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/30 text-xs font-mono text-emerald-400">
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>Institutional Research &amp; Quantitative Engineering</span>
+          <span>Quantitative Engineering &amp; Risk Discipline</span>
         </div>
         <h1 className="text-2xl sm:text-4xl font-black text-white font-mono">
           About PulseTrade Pro
@@ -48,10 +48,10 @@ export function AboutPage({ onGetStarted, onLaunchCockpit }: AboutPageProps) {
             Structured Multi-Timeframe Analysis for Retail Traders
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            Institutional trading firms spend hundreds of millions on low-latency data feeds and statistical models. Retail traders are often left relying on laggy indicators or scam bots that promise unrealistic 100% win rates.
+            Large trading firms rely on low-latency data feeds and disciplined statistical models, while retail traders are often left with laggy indicators or bots making unrealistic win-rate promises.
           </p>
           <p className="text-xs sm:text-sm text-slate-400 leading-relaxed">
-            PulseTrade Pro was founded to bridge this gap. We provide a rigorous, transparent quantitative companion that combines 1-hour macro trend direction with 1-minute order-flow exhaustion, enforces an unyielding 6-second freshness entry window, and forces adherence to a 2% account preservation rule.
+            PulseTrade Pro was built as a transparent quantitative companion that combines M1/M5/M15 candle trend direction with live tick momentum, enforces a 6-second entry freshness countdown, and promotes a strict 1%–2% risk-per-trade discipline.
           </p>
         </div>
 

@@ -1,6 +1,6 @@
 /**
  * Tolvexa Quantitative Indicators & Security Test Suite
- * Tests mathematical purity of EMA, RSI, MACD, Bollinger Bands, Order Flow, and NOWPayments HMAC-SHA512.
+ * Tests mathematical purity of EMA, RSI, MACD, Bollinger Bands, Price Momentum Proxy, and NOWPayments HMAC-SHA512.
  * Run with: npx tsx scripts/test-indicators.ts
  */
 
@@ -10,7 +10,7 @@ import {
   calculateRSI,
   calculateMACD,
   calculateBollingerBands,
-  calculateOrderFlow,
+  calculatePriceMomentumProxy,
 } from '../src/utils/quantEngine.ts';
 
 let passedTests = 0;
@@ -82,8 +82,8 @@ console.log('\n3. Moving Average Convergence Divergence (MACD 12, 26, 9):');
   assertClose(macd.histogram, macd.macdLine - macd.signalLine, 0.0001, 'Histogram equals MACD line minus signal line');
 }
 
-// 4. Bollinger Bands & Order Flow
-console.log('\n4. Volatility Dispersion & Order Flow Proxy:');
+// 4. Bollinger Bands & Price Momentum Proxy
+console.log('\n4. Volatility Dispersion & Price Momentum Proxy:');
 {
   const prices = Array.from({ length: 30 }, (_, i) => 1.0850 + Math.sin(i / 2) * 0.0020);
   const bb = calculateBollingerBands(prices, 20, 2.0);
@@ -91,9 +91,9 @@ console.log('\n4. Volatility Dispersion & Order Flow Proxy:');
   assert(bb.lower < bb.middle, 'Bollinger lower band is strictly below middle SMA');
   assert(bb.pctB >= 0 && bb.pctB <= 1.5, '%B metric correctly bounds relative price location');
 
-  const of = calculateOrderFlow([1.0850, 1.0852, 1.0855, 1.0858, 1.0860]);
-  assert(of.buyPct > 70, 'Ascending ticks indicate buy-dominant tick delta (>70%)');
-  assert(of.buyPct + of.sellPct === 100, 'Buy + Sell percentage sums to exactly 100%');
+  const pm = calculatePriceMomentumProxy([1.0850, 1.0852, 1.0855, 1.0858, 1.0860]);
+  assert(pm.buyPct > 70, 'Ascending ticks indicate upward-dominant tick delta (>70%)');
+  assert(pm.buyPct + pm.sellPct === 100, 'Up + Down percentage sums to exactly 100%');
 }
 
 // 5. NOWPayments HMAC-SHA512 Webhook Security Tests

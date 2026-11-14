@@ -4,17 +4,26 @@ import { authenticateRequest } from '../_lib/auth.js';
 import { checkRateLimit } from '../_lib/rateLimit.js';
 
 const SignalLogSchema = z.object({
-  asset: z.string().min(1).max(32),
+  asset: z.string().min(1).max(64),
   timeframe: z.string().min(1).max(16),
-  direction: z.enum(['CALL', 'PUT', 'BUY', 'SELL']),
-  entry_price: z.number().positive(),
+  direction: z.enum(['CALL', 'PUT', 'BUY', 'SELL', 'WAIT']),
+  entry_price: z.number().nonnegative(),
   target_price: z.number().positive().optional().nullable(),
   stop_loss: z.number().positive().optional().nullable(),
   take_profit_1: z.number().positive().optional().nullable(),
   take_profit_2: z.number().positive().optional().nullable(),
-  confidence: z.number().min(0).max(100),
+  confidence: z.number().min(0).max(100).optional().default(0),
   confluence_factors: z.array(z.string()).optional(),
   setup_name: z.string().max(128).optional(),
+  engine: z.string().max(64).optional(),
+  profile: z.enum(['BINARY_QUICK', 'MT5']).optional(),
+  platform: z.string().max(64).optional(),
+  expiry: z.string().max(16).optional().nullable(),
+  strength: z.enum(['Low', 'Medium', 'High']).optional(),
+  inputs_snapshot: z.record(z.string(), z.unknown()).optional(),
+  feed_source: z.string().max(256).optional(),
+  created_at: z.string().optional(),
+  valid_until: z.string().optional().nullable(),
 });
 
 export default async function handler(req: any, res: any) {
@@ -34,7 +43,7 @@ export default async function handler(req: any, res: any) {
 
   const payload = parseResult.data;
 
-// 2. Authentication check: derive user_id from verified token, reject unauthenticated
+  // 2. Authentication check: derive user_id from verified token, reject unauthenticated
   const auth = await authenticateRequest(req);
   if (!auth || !auth.userId) {
     return res.status(401).json({
@@ -69,9 +78,17 @@ export default async function handler(req: any, res: any) {
         stop_loss: payload.stop_loss || null,
         take_profit_1: payload.take_profit_1 || null,
         take_profit_2: payload.take_profit_2 || null,
-        confidence: payload.confidence,
+        confidence: payload.confidence ?? 0,
         confluence_factors: payload.confluence_factors || [],
         setup_name: payload.setup_name || 'Algorithmic Signal',
+        engine: payload.engine || null,
+        profile: payload.profile || null,
+        platform: payload.platform || null,
+        expiry: payload.expiry || null,
+        strength: payload.strength || null,
+        inputs_snapshot: payload.inputs_snapshot || {},
+        feed_source: payload.feed_source || null,
+        valid_until: payload.valid_until || null,
       })
       .select('id, created_at')
       .single();

@@ -275,8 +275,10 @@ export function LiveTicker({
               </strong>
               <span>
                 {activeAsset.name} feed {feedStatus.toLowerCase()}
-                {lastTickAgeSec > 0 ? ` (last tick ${lastTickAgeSec}s ago)` : ''}.
-                Analysis requires fresh verified ticks before evaluating signals.
+                {lastTickAgeSec > 0 ? ` (last tick ${lastTickAgeSec}s ago)` : ''}.{' '}
+                {feedStatus === 'DELAYED'
+                  ? 'Binary options scans require fresh live ticks; candle-based MT5 analysis can still run during quiet sessions.'
+                  : 'Analysis requires live market data before evaluating signals.'}
               </span>
             </div>
           </div>

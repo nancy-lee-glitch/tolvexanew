@@ -84,7 +84,7 @@ export const DEFAULT_PRICING_PACKAGES: PricingPackage[] = [
     bonus_credits: 60,
     price_usd: 45.0,
     badge_label: 'BEST VALUE',
-    description: '150 + 60 Institutional bonus credits for high-frequency desks',
+    description: '150 + 60 Bonus credits for active high-frequency traders',
     is_active: true,
     sort_order: 4,
   },

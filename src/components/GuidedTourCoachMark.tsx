@@ -42,8 +42,8 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="mode-switcher"]', '#mode-toggle-quick'],
     title: '3. Dual Quantitative Analysis Modes',
     description:
-      'Select your execution profile: Quick Expiry (calibrated for 30s to 15m binary CALL/PUT contracts) or MT5 Style (institutional BUY/SELL setups with structural Stop Loss & TP1/TP2 targets).',
-    tip: 'Quick mode uses an agile soft gate for binary speed; MT5 mode enforces strict institutional invalidation levels.',
+      'Select your execution profile: Binary Options (30s to 5m CALL/PUT contracts with payout break-even math) or MT5 Style (BUY/SELL setups with structural Stop Loss & TP1/TP2 targets).',
+    tip: 'Binary mode requires fresh live ticks; MT5 mode uses candle structure and works even during quiet FX sessions.',
     badge: 'Step 3 of 9 • Dual Engines',
     shape: 'box',
     preferredPosition: 'bottom',
@@ -64,10 +64,10 @@ export const TOUR_STEPS: TourStep[] = [
   {
     targetKey: 'confluence-gate',
     fallbackSelectors: ['[data-tour="confluence-gate"]', '#signal-display-container'],
-    title: '5. Institutional Confluence Gate',
+    title: '5. Multi-Factor Confluence Gate',
     description:
-      'Before recommending any trade, the confirmation gate tests 5 factors: Microstructure (HH/HL vs LH/LL), Fast/Slow EMA alignment, RSI momentum, and Volume Profile (POC). If the market is choppy, it outputs WAIT to protect your balance.',
-    tip: 'Preserving capital during chop is the hallmark of professional quants. Tolvexa never forces trades in uncertainty.',
+      'Before recommending any trade, the gate tests M1/M5/M15 candle structure, EMA alignment, RSI momentum, ATR volatility, and price distribution proxy. If the market is choppy or near high-impact news, it outputs WAIT.',
+    tip: 'Preserving capital during chop is essential. Tolvexa outputs WAIT when conditions are unclear.',
     badge: 'Step 5 of 9 • Risk Gate',
     shape: 'box',
     preferredPosition: 'top',
@@ -114,7 +114,7 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="credits-control"]', '[data-tour="credits-badge"]'],
     title: '9. Starter Credits & 30-Day VIP Pass',
     description:
-      'Every new account receives 10 free starter credits. Actionable setups consume 1 credit (WAIT states are always free!). Upgrade to the 30-Day VIP Pass for unlimited calculations, zero deductions, and full institutional depth.',
+      'Every new account receives 10 free starter credits. Actionable setups consume 1 credit (WAIT states are always free!). Both Free and VIP users receive identical signal calculations; the 30-Day VIP Pass unlocks unlimited scans, full Radar view, and history access.',
     tip: 'Instant automated crypto checkout via NOWPayments with automatic blockchain activation.',
     badge: 'Step 9 of 9 • Terminal Access',
     shape: 'pill',

@@ -55,7 +55,7 @@ export function VipSafeRadarModal({
     setSecondsUntilRefresh(30);
   };
 
-  // Generate institutional screener data for all assets using real live confirmation path
+  // Generate multi-asset screener data using real live confirmation path
   const screenerData: VipScreenerAsset[] = useMemo(() => {
     const tfMinutes = selectedTimeframe === '30s' ? 0.5 : selectedTimeframe === '1h' ? 60 : parseInt(selectedTimeframe) || 1;
 
@@ -63,7 +63,7 @@ export function VipSafeRadarModal({
       const existing = getAssetTicks(asset.symbol);
       const ticks = existing;
 
-      // 2. Perform real multi-window live confirmation (Anti-Opposite Signals Gate)
+      // Perform real multi-window live confirmation
       const multiWindow = evaluateMultiWindowLiveConfirmation(ticks, asset.pipSize, tfMinutes, asset.symbol);
       const audit = analyzeMarketConfluence(ticks, selectedTimeframe, asset.pipSize, isVIP);
       const safeClose = calculateSafeCloseAnalysis(ticks, selectedTimeframe, asset.pipSize);
@@ -72,7 +72,6 @@ export function VipSafeRadarModal({
       const firstP = ticks[0] || currentP;
       const change24h = parseFloat((((currentP - firstP) / (firstP || 1)) * 100).toFixed(2));
 
-      // 3. Strict Rule: If buffer insufficient or multi-window disagrees -> WAIT
       let safetyRating: 'SAFE TO TRADE' | 'MODERATE RISK' | 'WAIT / VOLATILE' = 'WAIT / VOLATILE';
       let recommendedAction: 'CALL' | 'PUT' | 'WAIT' = 'WAIT';
       let safeCloseTiming = 'Standby: Lookback Conflict';
@@ -89,10 +88,9 @@ export function VipSafeRadarModal({
         reasonText = multiWindow.conflictSummary || 'Multi-window momentum in conflict across lookbacks. WAIT advised.';
         safeCloseTiming = 'Standby: Trend Disagreement';
       } else {
-        // Multi-window aligned! Direction is confirmed by real live path
         recommendedAction = multiWindow.shortBias === 'BULLISH' ? 'CALL' : multiWindow.shortBias === 'BEARISH' ? 'PUT' : 'WAIT';
 
-        if (recommendedAction !== 'WAIT' && audit.confluenceScore >= 85) {
+        if (recommendedAction !== 'WAIT' && audit.strength === 'High') {
           safetyRating = 'SAFE TO TRADE';
           safeCloseTiming = `Safe Exit: ${safeClose.peakMomentumWindow}`;
           reasonText = `All 3 windows aligned (${multiWindow.shortBias}) · ${audit.confluenceFactors.slice(0, 2).join(' · ')}`;
@@ -125,6 +123,7 @@ export function VipSafeRadarModal({
         recommendedAction,
         bestTimeframe: selectedTimeframe,
         confluenceScore: recommendedAction === 'WAIT' ? Math.min(audit.confluenceScore, 48) : audit.confluenceScore,
+        strength: recommendedAction === 'WAIT' ? 'Low' : audit.strength,
         safeCloseTiming,
         reason: reasonText,
         sparkline: ticks.slice(-10),
@@ -369,8 +368,8 @@ export function VipSafeRadarModal({
                         >
                           {isCall ? 'BUY' : isPut ? 'SELL' : 'WAIT'}
                         </span>
-                        <span className={`text-xs font-mono font-bold ${item.confluenceScore >= 88 ? 'text-emerald-400' : 'text-amber-400'}`}>
-                          {item.confluenceScore}%
+                        <span className={`text-xs font-mono font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
+                          {item.strength}
                         </span>
                       </div>
                     </div>
@@ -409,8 +408,8 @@ export function VipSafeRadarModal({
                           >
                             {isCall ? 'CALL (BUY)' : isPut ? 'PUT (SELL)' : 'WAIT'}
                           </span>
-                          <span className={`text-xs font-bold ${item.confluenceScore >= 88 ? 'text-emerald-400' : item.confluenceScore >= 82 ? 'text-amber-400' : 'text-slate-400'}`}>
-                            {item.confluenceScore}%
+                          <span className={`text-xs font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
+                            {item.strength} Strength
                           </span>
                         </div>
                       </div>

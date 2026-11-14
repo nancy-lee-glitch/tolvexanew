@@ -68,7 +68,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
     ],
     content: [
       'Most simple signal bots fail because they examine a single timeframe in isolation. A 1-minute chart might appear to present a textbook double bottom, prompting a CALL alert. But if the 1-hour chart is in a steady downtrend, that 1-minute bounce may be merely a brief pause before lower lows.',
-      'Tolvexa evaluates multi-window trend vectors, micro-candle structure, and real-time tick velocity from the live Deriv WebSocket feed to check whether short-term order flow aligns with broader direction.',
+      'Tolvexa evaluates multi-window trend vectors, micro-candle structure, and real-time price momentum from the live Deriv WebSocket feed to check whether short-term price velocity aligns with broader direction.',
       'A directional signal is only issued when these analysis layers reach consensus; otherwise the engine outputs WAIT to avoid forcing trades in unclear conditions.',
       'Furthermore, traders can log WIN or LOSS outcomes in their local session ledger. When recent settled setups show unfavorable conditions on an asset, the adaptive gate raises confirmation requirements before issuing new actionable alerts.',
     ],
@@ -91,7 +91,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
       'Synthetic indices like Volatility 100 operate 24/7 with pure mathematical volatility unaffected by bank holidays.',
     ],
     content: [
-      'Market liquidity is not uniform. The time of day at which you trade has as much impact on your win rate as your underlying chart analysis. For Forex pairs like EUR/USD and GBP/USD, trading during the London / New York overlap (12:00 to 16:00 UTC) provides massive institutional order flow and clean directional impulses.',
+      'Market liquidity is not uniform. The time of day at which you trade has as much impact on your outcomes as your underlying chart analysis. For Forex pairs like EUR/USD and GBP/USD, trading during the London / New York overlap (12:00 to 16:00 UTC) generally offers tighter spreads and clearer directional impulses.',
       'Conversely, the twilight period between 21:00 and 01:00 UTC often presents a "liquidity vacuum". Volume dries up, spreads widen, and algorithmic market makers hunt retail stop losses with micro-whipsaws that ruin short-duration binary contracts.',
       'This is why we built the Floating Market Radar into PulseTrade Pro. At a glance, traders can view the active liquidity state—Optimal, Normal, or High Risk—alongside an active UTC reference clock. For traders who need 24/7 action, our synthetic indices (Vol 100, Vol 75) simulate continuous volatility with constant tick distributions, unhindered by economic calendar releases.',
     ],

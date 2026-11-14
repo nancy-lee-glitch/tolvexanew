@@ -174,7 +174,7 @@ export function BlogSection({
           Research, Market Mechanics &amp; Execution Timing
         </h1>
         <p className="text-xs sm:text-sm text-slate-400">
-          Educational articles on binary options pricing, order-flow velocity, execution latency, and capital risk management.
+          Educational articles on binary options payout math, price momentum velocity, execution timing, and capital risk management.
         </p>
       </div>
 

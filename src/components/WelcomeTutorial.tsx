@@ -18,25 +18,25 @@ interface TutorialStep {
 
 const TUTORIAL_STEPS: TutorialStep[] = [
   {
-    title: 'Institutional Cockpit Overview',
-    subtitle: 'High-Frequency Quantitative Telemetry',
+    title: 'Quantitative Cockpit Overview',
+    subtitle: 'Real-Time Market Telemetry',
     badge: 'Step 1 of 5 • Architecture',
     icon: '⚡',
     accent: 'emerald',
     description:
-      'Welcome to the Tolvexa Citadel Cockpit. Our algorithmic terminal interfaces directly with live market feeds to compute micro-volatility opportunities in real time.',
+      'Welcome to the Tolvexa Execution Cockpit. Our terminal reads live market candles and ticks directly from Deriv WebSocket streams.',
     bulletPoints: [
       {
         title: '6-Second Execution Window',
-        text: 'Signals are calculated on precise micro-bursts to capture entry momentum before mean reversion occurs.',
+        text: 'Signals include a strict 6-second entry countdown so you avoid acting on stale quotes.',
       },
       {
         title: 'Live WebSocket Heartbeat',
         text: 'Real-time price ticks stream continuously across active sessions with zero polling lag.',
       },
       {
-        title: 'Active Session Presence',
-        text: 'The terminal monitors institutional liquidity and active traders across global desks in real time.',
+        title: 'Multi-Market Coverage',
+        text: 'Switch seamlessly between Forex, Crypto, Commodities, and 24/7 Synthetic Indices.',
       },
     ],
   },
@@ -54,8 +54,8 @@ const TUTORIAL_STEPS: TutorialStep[] = [
         text: 'Engineered for uninterrupted trading with mathematical constant volatility and no weekend market closures.',
       },
       {
-        title: 'Optimal Timeframes',
-        text: 'Select between ultra-fast 30s/1m micro-scalps or higher-confidence 5m/15m trend-following momentum.',
+        title: 'Dynamic Expiries',
+        text: 'Select from 30s, 1m, 2m, 3m, or 5m expiry windows matched to current candle momentum and volatility.',
       },
       {
         title: 'Multi-Asset Radar',
@@ -111,7 +111,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
   },
   {
     title: 'VIP 30-Day Pass & Instant Crypto Activation',
-    subtitle: 'Unlimited Institutional Access',
+    subtitle: 'Unlimited Terminal Features',
     badge: 'Step 5 of 5 • VIP Status',
     icon: '👑',
     accent: 'amber',

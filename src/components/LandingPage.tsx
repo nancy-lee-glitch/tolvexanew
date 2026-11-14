@@ -121,7 +121,7 @@ export function LandingPage({
                   <div className="flex flex-wrap items-center justify-between w-full gap-2">
                     <div className="text-left font-mono">
                       <span className="text-[10px] text-emerald-400 uppercase tracking-wider block font-bold">
-                        Institutional Order Flow Sync
+                        Live Multi-Timeframe Candle &amp; Tick Sync
                       </span>
                       <div className="text-xs sm:text-base font-bold text-white">
                         Deriv Live WebSocket • EUR/USD &amp; Volatility Synthetics
@@ -178,7 +178,7 @@ export function LandingPage({
       <section className="px-4 max-w-6xl mx-auto space-y-12">
         <div className="text-center space-y-3 max-w-2xl mx-auto">
           <span className="text-xs font-mono font-bold uppercase text-emerald-400 tracking-widest">
-            Institutional Discipline
+            Quantitative Discipline
           </span>
           <h2 className="text-2xl sm:text-4xl font-black text-white">
             Built to Eliminate the 4 Fatal Mistakes of Retail Traders
@@ -367,7 +367,7 @@ export function LandingPage({
                 <span className="text-xs text-slate-400 ml-2">/ 30 Days Fixed Access</span>
               </div>
               <p className="text-xs text-slate-300 leading-relaxed">
-                Full institutional privilege. Strictly assigned via cryptographic activation key or crypto invoice to ensure only verified traders receive the VIP slot.
+                Full platform feature access. Strictly assigned via activation code or crypto invoice for verified 30-day VIP members. Both Free and VIP receive identical signal math.
               </p>
               <ul className="space-y-2.5 text-xs text-slate-200 font-mono pt-2">
                 <li className="flex items-center gap-2">
@@ -380,7 +380,7 @@ export function LandingPage({
                   <span className="text-amber-400 font-bold">★</span> Strict 30-day timeframe (never exceeds without renewal)
                 </li>
                 <li className="flex items-center gap-2">
-                  <span className="text-amber-400 font-bold">★</span> Priority Deriv WebSocket order-flow stream
+                  <span className="text-amber-400 font-bold">★</span> Full Safe Radar multi-asset scanner
                 </li>
                 <li className="flex items-center gap-2">
                   <span className="text-amber-400 font-bold">★</span> VIP quantitative Discord/Telegram channel
@@ -409,7 +409,7 @@ export function LandingPage({
             Supported Trading Platforms
           </h2>
           <p className="text-xs sm:text-sm text-slate-400">
-            Tolvexa provides synchronized multi-timeframe quantitative signals tailored for both Binary Expiry brokers and MetaTrader 5 institutional accounts.
+            Tolvexa provides multi-timeframe quantitative signals tailored for both Binary Expiry brokers and MetaTrader 5 accounts.
           </p>
         </div>
 
@@ -466,7 +466,7 @@ export function LandingPage({
             </h2>
           </div>
           <p className="text-xs text-slate-400 max-w-sm">
-            Institutional research on latency arbitrage, stake sizing, and multi-timeframe divergence.
+            Educational guides on execution timing, payout break-even math, stake sizing, and multi-timeframe analysis.
           </p>
         </div>
 
@@ -578,7 +578,7 @@ export function LandingPage({
       <section className="px-4 max-w-5xl mx-auto">
         <div className="bg-gradient-to-r from-emerald-950/80 via-slate-900 to-teal-950/80 border border-emerald-500/40 rounded-3xl p-8 sm:p-12 text-center space-y-6 shadow-2xl">
           <h2 className="text-2xl sm:text-4xl font-black text-white font-mono tracking-tight">
-            Ready to Trade with Institutional Confluence?
+            Ready to Trade with Quantitative Discipline?
           </h2>
           <p className="text-xs sm:text-sm text-slate-300 max-w-xl mx-auto leading-relaxed">
             Create your trader handle now and get 10 free starter credits automatically credited to your session. Zero credit card required.

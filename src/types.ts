@@ -29,21 +29,26 @@ export interface SafeCloseAnalysis {
   reversalRisk: 'LOW' | 'MODERATE' | 'ELEVATED';
 }
 
+export type SignalStrength = 'Low' | 'Medium' | 'High';
+export type BinaryExpiryWindow = '30s' | '1m' | '2m' | '3m' | '5m';
+
 export interface SignalHistoryItem {
   id: string;
   asset: string;
   timeframe: string;
-  direction: 'CALL' | 'PUT' | 'WAIT';
+  direction: 'CALL' | 'PUT' | 'BUY' | 'SELL' | 'WAIT';
   entryPrice: number;
   targetPrice?: number;
   generatedAt: number;
-  confidence: number;
+  strength?: SignalStrength;
+  confidence?: number;
   outcome?: 'WIN' | 'LOSS' | 'IN_TRADE' | 'PENDING' | 'WAIT';
   sparkline: number[];
   pipDiff?: number;
   safeCloseSuggestion?: string;
   platform?: string;
   platformProfile?: AnalysisProfile;
+  expiry?: string;
 }
 
 export interface LiveRegimeInfo {
@@ -71,6 +76,7 @@ export interface VipScreenerAsset {
   recommendedAction: 'CALL' | 'PUT' | 'WAIT';
   bestTimeframe: '30s' | '1m' | '5m' | '15m' | '1h';
   confluenceScore: number;
+  strength: SignalStrength;
   safeCloseTiming: string;
   reason: string;
   sparkline: number[];
@@ -83,13 +89,14 @@ export interface TechnicalAudit {
   emaSlow: number;
   emaSpread: number;
   emaTrend: 'BULLISH' | 'BEARISH' | 'CROSSOVER_UP' | 'CROSSOVER_DOWN';
-  orderFlowBuyPct: number;
-  orderFlowSellPct: number;
+  momentumBuyPct: number;
+  momentumSellPct: number;
   tickVelocity: number;
   tickAcceleration: number;
   bollingerBandStatus: 'PIERCED_LOWER' | 'PIERCED_UPPER' | 'MIDDLE_EXPANDING' | 'SQUEEZE';
   bollingerPctB: number;
   confluenceScore: number;
+  strength: SignalStrength;
   confluenceFactors: string[];
   recheckSteps: string[];
   setupName: string;
@@ -102,7 +109,7 @@ export type AnalysisMode = 'quick' | 'mt5';
 export type FactorSeverity = 'HARD' | 'CORE' | 'SOFT' | 'CONTEXT';
 
 export interface ConfluenceFactorItem {
-  id: 'live_path' | 'ema' | 'rsi' | 'volume' | 'liquidity_sweep' | 'fvg' | 'volatility';
+  id: 'live_path' | 'ema' | 'rsi' | 'price_momentum' | 'liquidity_sweep' | 'fvg' | 'volatility';
   name: string;
   status: 'PASS' | 'FAIL' | 'UNSURE' | 'WARN';
   detail: string;
@@ -110,11 +117,11 @@ export interface ConfluenceFactorItem {
   isAdvanced?: boolean;
 }
 
-export interface VolumeProfileContext {
-  pocPrice: number;
+export interface PriceDistributionProxy {
+  modePrice: number;
   valueAreaHigh: number;
   valueAreaLow: number;
-  highVolumeNodePips: number;
+  highDensityNodePips: number;
   rangeHigh: number;
   rangeLow: number;
 }
@@ -131,7 +138,7 @@ export interface ConfluenceGateResult {
   allFactorsPassed: boolean;
   corePassed: boolean;
   failReasons: string[];
-  volumeProfile?: VolumeProfileContext;
+  priceDistribution?: PriceDistributionProxy;
 }
 
 export interface EntryZone {
@@ -157,13 +164,31 @@ export interface MT5TradeParameters {
 }
 
 export interface SignalData {
+  // Shared Engine Contract (Section C)
+  engine?: string;
+  profile?: AnalysisProfile;
   asset: string;
+  symbol?: string;
   timeframe: string;
-  direction: 'CALL' | 'PUT' | 'WAIT';
-  confidence: number;
+  direction: 'CALL' | 'PUT' | 'BUY' | 'SELL' | 'WAIT';
+  strength?: SignalStrength;
+  rawScore?: number;
+  confidence?: number;
   trend: 'Bullish' | 'Bearish' | 'Neutral';
   velocity: string;
   generatedAt: number;
+  createdAt?: string;
+  validUntil?: string;
+  enterWithinSeconds?: number;
+  expiry?: BinaryExpiryWindow | string;
+  reasons?: string[];
+  whyNotTrade?: string;
+  payoutPct?: number;
+  breakEvenWinRatePct?: number;
+  breakEvenMessage?: string;
+  feedSource?: string;
+  inputsSnapshot?: Record<string, unknown>;
+
   targetPrice?: number;
   entryPrice?: number;
   technicalAudit?: TechnicalAudit;
@@ -186,7 +211,7 @@ export interface SignalData {
   riskNote?: string;
   shortHoldGuidance?: string;
   peakMomentumWindow?: string;
-  volumeProfile?: VolumeProfileContext;
+  priceDistribution?: PriceDistributionProxy;
   accountSizingWarning?: string;
   whyBullets?: string[];
   sessionNote?: string;
@@ -454,7 +479,7 @@ export interface NowPaymentsPayment {
   actuallyPaid?: number;
 }
 
-export type FeedHealthStatus = 'LIVE' | 'RECONNECTING' | 'STALE' | 'OFFLINE' | 'MARKET_CLOSED';
+export type FeedHealthStatus = 'CONNECTING' | 'LIVE' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED';
 
 export type PageView =
   | 'landing'
