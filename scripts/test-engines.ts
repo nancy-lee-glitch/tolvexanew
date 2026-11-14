@@ -7,7 +7,10 @@ import {
   analyzeBinarySignal,
   calculateBreakEvenWinRate,
   formatBreakEvenStatement,
+  mapStrength,
 } from '../src/utils/engines/binaryEngine.ts';
+import { isSyntheticAsset } from '../src/services/symbolMap.ts';
+import signalsLogHandler from '../api/signals/log.ts';
 import type { Candle, MarketEventItem } from '../src/utils/engines/types.ts';
 import type { AssetConfig, TimestampedTick } from '../src/types.ts';
 
@@ -338,6 +341,10 @@ console.log('\n4. Safety Gate Blockers (WAIT + whyNotTrade):');
     synthWeekendRes.direction === 'CALL',
     `24/7 Synthetic Index trades cleanly over weekend & FX news (got ${synthWeekendRes.direction})`
   );
+  assert(
+    synthWeekendRes.strength !== 'High',
+    `Synthetic Index strength is capped at Medium and never shows High (got ${synthWeekendRes.strength})`
+  );
 }
 
 // 5. Higher Timeframe M15 Counter-Trend & Chop Filters
@@ -382,10 +389,180 @@ console.log('\n5. M15 Counter-Trend & Chop Filters:');
   assert(chopRes.direction === 'WAIT', `Choppy alternating candles produce honest WAIT (got ${chopRes.direction})`);
 }
 
-console.log('\n------------------------------------------------------------');
-console.log(`Binary Engine Results: ${passed}/${total} tests passed`);
-console.log('------------------------------------------------------------\n');
+// 6. Stage 3.1 Strength Mapping & Synthetic Cap
+console.log('\n6. Stage 3.1 Strength Calibration & Synthetic Medium Cap:');
+{
+  assert(
+    mapStrength({
+      rawScore: 94,
+      direction: 'CALL',
+      m5Agreed: true,
+      m15Agreed: true,
+      hasProximityWarning: false,
+      hasChopWarning: false,
+      isSynthetic: false,
+    }) === 'High',
+    'rawScore >= 90 with M5/M15 agreement and zero warnings produces High on non-synthetic'
+  );
+  assert(
+    mapStrength({
+      rawScore: 94,
+      direction: 'CALL',
+      m5Agreed: false,
+      m15Agreed: true,
+      hasProximityWarning: false,
+      hasChopWarning: false,
+      isSynthetic: false,
+    }) === 'Medium',
+    'rawScore >= 90 without M5 agreement drops to Medium'
+  );
+  assert(
+    mapStrength({
+      rawScore: 94,
+      direction: 'CALL',
+      m5Agreed: true,
+      m15Agreed: true,
+      hasProximityWarning: true,
+      hasChopWarning: false,
+      isSynthetic: false,
+    }) === 'Medium',
+    'rawScore >= 90 with proximity warning drops to Medium'
+  );
+  assert(
+    mapStrength({
+      rawScore: 94,
+      direction: 'CALL',
+      m5Agreed: true,
+      m15Agreed: true,
+      hasProximityWarning: false,
+      hasChopWarning: true,
+      isSynthetic: false,
+    }) === 'Medium',
+    'rawScore >= 90 with chop warning drops to Medium'
+  );
+  assert(
+    mapStrength({
+      rawScore: 94,
+      direction: 'CALL',
+      m5Agreed: true,
+      m15Agreed: true,
+      hasProximityWarning: false,
+      hasChopWarning: false,
+      isSynthetic: true,
+    }) === 'Medium',
+    'Synthetic indices cap High -> Medium even when all gates pass'
+  );
+  assert(mapStrength({ rawScore: 80, direction: 'CALL' }) === 'Medium', 'Score 76-89 maps to Medium');
+  assert(mapStrength({ rawScore: 75, direction: 'CALL' }) === 'Low', 'Score below 76 maps to Low');
 
-if (passed !== total) {
-  process.exit(1);
+  assert(
+    isSyntheticAsset({ symbol: '1HZ100V' }) &&
+      isSyntheticAsset({ symbol: 'BOOM1000' }) &&
+      isSyntheticAsset({ symbol: 'CRASH500' }) &&
+      isSyntheticAsset({ symbol: 'JD75' }) &&
+      isSyntheticAsset({ symbol: 'stpRNG' }) &&
+      !isSyntheticAsset({ symbol: 'frxEURUSD', type: 'FOREX' }),
+    'isSyntheticAsset accurately detects R_*, 1HZ*, BOOM/CRASH, Jump, and Step symbols'
+  );
 }
+
+// 7. Stage 3.1 api/signals/log.ts Validation Hardening
+console.log('\n7. Stage 3.1 api/signals/log.ts Validation Hardening:');
+async function runSignalLogValidationTests() {
+  const invoke = async (body: Record<string, unknown>) => {
+    let statusCode = 200;
+    let jsonBody: any = null;
+    const req = { method: 'POST', headers: {}, body };
+    const res = {
+      setHeader() {},
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        jsonBody = payload;
+        return this;
+      },
+    };
+    await signalsLogHandler(req, res);
+    return { statusCode, jsonBody };
+  };
+
+  // Oversize inputs_snapshot (> 8 KB) -> 413
+  const bigSnap = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'CALL',
+    entry_price: 1.085,
+    inputs_snapshot: { padding: 'x'.repeat(9000) },
+  });
+  assert(bigSnap.statusCode === 413, `inputs_snapshot > 8KB returns 413 (got ${bigSnap.statusCode})`);
+
+  // Oversize confluence_factors (> 12 items) -> 413
+  const tooManyFactors = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'CALL',
+    entry_price: 1.085,
+    confluence_factors: Array.from({ length: 13 }, (_, i) => `factor ${i}`),
+  });
+  assert(
+    tooManyFactors.statusCode === 413,
+    `confluence_factors > 12 items returns 413 (got ${tooManyFactors.statusCode})`
+  );
+
+  // Oversize confluence_factors item (> 200 chars) -> 413
+  const longFactor = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'CALL',
+    entry_price: 1.085,
+    confluence_factors: ['a'.repeat(201)],
+  });
+  assert(
+    longFactor.statusCode === 413,
+    `confluence_factors item > 200 chars returns 413 (got ${longFactor.statusCode})`
+  );
+
+  // WAIT carrying stop_loss or targets -> 400
+  const waitWithSl = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'WAIT',
+    entry_price: 1.085,
+    stop_loss: 1.084,
+  });
+  assert(waitWithSl.statusCode === 400, `WAIT with stop_loss returns 400 (got ${waitWithSl.statusCode})`);
+
+  const waitWithTp = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'WAIT',
+    entry_price: 1.085,
+    take_profit_1: 1.087,
+  });
+  assert(waitWithTp.statusCode === 400, `WAIT with take_profit_1 returns 400 (got ${waitWithTp.statusCode})`);
+
+  // Valid size WAIT without SL/TP reaches 401 auth check cleanly
+  const validWaitNoAuth = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: '1m',
+    direction: 'WAIT',
+    entry_price: 1.085,
+    created_at: '1999-01-01T00:00:00.000Z',
+  });
+  assert(
+    validWaitNoAuth.statusCode === 401,
+    `Valid payload (ignoring client created_at) passes schema checks and hits 401 auth gate (got ${validWaitNoAuth.statusCode})`
+  );
+}
+
+runSignalLogValidationTests().then(() => {
+  console.log('\n------------------------------------------------------------');
+  console.log(`Binary Engine Results: ${passed}/${total} tests passed`);
+  console.log('------------------------------------------------------------\n');
+
+  if (passed !== total) {
+    process.exit(1);
+  }
+});

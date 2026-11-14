@@ -812,7 +812,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     profile: 'BINARY_QUICK',
     enabled: true,
     referralUrl: 'https://track.deriv.com/_tolvexa',
-    badge: 'SYNTHETICS & FX',
+    badge: 'FX & CRYPTO',
     icon: '🎯',
     sortOrder: 2,
   },

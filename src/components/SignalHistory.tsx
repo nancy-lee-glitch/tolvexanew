@@ -274,7 +274,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                       <span className="text-slate-500">{formatTime(sig.generatedAt)}</span>
                       <span>&bull;</span>
                       <span className="text-emerald-400/90">
-                        {sig.strength ? `${sig.strength} Strength` : 'Recorded'}
+                        {sig.strength ? `Setup strength (not a win probability): ${sig.strength}` : 'Recorded'}
                       </span>
                     </div>
                   </div>

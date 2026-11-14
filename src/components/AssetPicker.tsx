@@ -8,6 +8,7 @@ import {
   type AssetCategory,
 } from '../services/assetRegistry.ts';
 import { useFavorites } from '../services/favorites.ts';
+import { isSyntheticAsset, SYNTHETIC_INDICES_NOTICE } from '../services/symbolMap.ts';
 
 interface AssetPickerProps {
   activeAsset: AssetConfig;
@@ -20,7 +21,7 @@ const CATEGORIES: { id: 'ALL' | 'FAVORITES' | AssetCategory; label: string; icon
   { id: 'ALL', label: 'All Markets' },
   { id: 'FAVORITES', label: '★ Favorites' },
   { id: 'Forex', label: 'Forex' },
-  { id: 'Synthetics', label: 'Synthetics (24/7)' },
+  { id: 'Synthetics', label: 'Synthetics (Practice Only)' },
   { id: 'Crypto', label: 'Crypto (24/7)' },
   { id: 'Commodities', label: 'Commodities' },
   { id: 'Indices', label: 'Indices' },
@@ -150,6 +151,15 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
         })}
       </div>
 
+      {/* Permanent Synthetic Indices Notice */}
+      <div
+        data-testid="synthetic-picker-notice"
+        className="bg-amber-950/35 border border-amber-500/35 rounded-xl px-3 py-2 text-[11px] font-mono text-amber-200 flex items-start gap-2"
+      >
+        <span className="text-amber-400 shrink-0 font-bold">⚠️</span>
+        <span className="leading-snug">{SYNTHETIC_INDICES_NOTICE}</span>
+      </div>
+
       {/* Asset Grid / List */}
       <div className="max-h-72 sm:max-h-80 overflow-y-auto space-y-1.5 pr-1 scrollbar-thin scrollbar-thumb-slate-800">
         {filteredAssets.length === 0 ? (
@@ -220,7 +230,13 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
                   {isOpen ? (
                     <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-emerald-950/60 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
                       <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <span>{asset.categoryName === 'Synthetics' || asset.categoryName === 'Crypto' ? '24/7 LIVE' : 'OPEN'}</span>
+                      <span>
+                        {isSyntheticAsset(asset)
+                          ? 'Practice Only'
+                          : asset.categoryName === 'Crypto'
+                          ? '24/7 LIVE'
+                          : 'OPEN'}
+                      </span>
                     </span>
                   ) : (
                     <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-rose-950/60 text-rose-300 border border-rose-500/30">

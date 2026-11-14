@@ -219,7 +219,7 @@ export function LiveTicker({
                 🏛️ Global Interbank Market Closed
               </strong>
               <span>
-                {activeAsset.name} is currently closed (opens Sun 21:00 UTC). Volatility Synthetics and Crypto operate 24/7/365 with uninterrupted live tick streams.
+                {activeAsset.name} is currently closed (opens Sun 21:00 UTC). Crypto operates 24/7 with live exchange liquidity (synthetics are practice only).
               </span>
             </div>
           </div>
@@ -227,22 +227,22 @@ export function LiveTicker({
             <button
               type="button"
               onClick={() => {
-                const vol100 = registered.find((a) => a.symbol === 'R_100') || ASSETS.find((a) => a.symbol === 'R_100');
-                if (vol100) onAssetChange(vol100);
+                const btc = registered.find((a) => a.symbol === 'cryBTCUSD') || ASSETS.find((a) => a.symbol === 'cryBTCUSD');
+                if (btc) onAssetChange(btc);
               }}
               className="px-2.5 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-sm"
             >
-              <span>⚡ Switch to VOL 100 (24/7)</span>
+              <span>🪙 Switch to BTC/USD (24/7)</span>
             </button>
             <button
               type="button"
               onClick={() => {
-                const btc = registered.find((a) => a.symbol === 'cryBTCUSD') || ASSETS.find((a) => a.symbol === 'cryBTCUSD');
-                if (btc) onAssetChange(btc);
+                const eth = registered.find((a) => a.symbol === 'cryETHUSD') || ASSETS.find((a) => a.symbol === 'cryETHUSD');
+                if (eth) onAssetChange(eth);
               }}
               className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-200 border border-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer shadow-sm"
             >
-              <span>🪙 BTC/USD</span>
+              <span>ETH/USD</span>
             </button>
           </div>
         </div>
@@ -309,7 +309,7 @@ export function LiveTicker({
             { id: 'ALL', label: 'All' },
             { id: 'FOREX', label: 'Forex' },
             { id: 'CRYPTO', label: 'Crypto' },
-            { id: 'SYNTH', label: 'Synthetics' },
+            { id: 'SYNTH', label: 'Synthetics (Practice)' },
           ].map((cat) => (
             <button
               key={cat.id}

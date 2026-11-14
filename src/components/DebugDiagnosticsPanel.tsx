@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  getLiveFeed,
   getFeedDiagnostics,
   subscribeDiagnostics,
   type FeedDiagnosticsSnapshot,
@@ -11,6 +12,9 @@ export function DebugDiagnosticsPanel() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    getLiveFeed();
+    setDiag(getFeedDiagnostics());
+
     const unsubDiag = subscribeDiagnostics((next) => setDiag(next));
     const unsubReg = subscribeAssetRegistry(() => {
       setDiag(getFeedDiagnostics());

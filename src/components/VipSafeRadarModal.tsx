@@ -65,7 +65,7 @@ export function VipSafeRadarModal({
 
       // Perform real multi-window live confirmation
       const multiWindow = evaluateMultiWindowLiveConfirmation(ticks, asset.pipSize, tfMinutes, asset.symbol);
-      const audit = analyzeMarketConfluence(ticks, selectedTimeframe, asset.pipSize, isVIP);
+      const audit = analyzeMarketConfluence(ticks, selectedTimeframe, asset.pipSize, isVIP, undefined, asset);
       const safeClose = calculateSafeCloseAnalysis(ticks, selectedTimeframe, asset.pipSize);
 
       const currentP = ticks[ticks.length - 1];
@@ -408,8 +408,8 @@ export function VipSafeRadarModal({
                           >
                             {isCall ? 'CALL (BUY)' : isPut ? 'PUT (SELL)' : 'WAIT'}
                           </span>
-                          <span className={`text-xs font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
-                            {item.strength} Strength
+                          <span className={`text-[11px] font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
+                            Setup strength (not a win probability): {item.strength}
                           </span>
                         </div>
                       </div>
@@ -458,7 +458,7 @@ export function VipSafeRadarModal({
         <div className="p-4 border-t border-slate-800 bg-slate-950/50 flex flex-col sm:flex-row items-center justify-between text-xs font-mono text-slate-400 gap-2">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Scanning 24 Instruments across Crypto, Equities, Forex &amp; Deriv Volatility Indices</span>
+            <span>Scanning Instruments across Crypto, Equities, Forex &amp; Indices</span>
           </div>
           <button
             type="button"

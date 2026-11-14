@@ -691,7 +691,11 @@ export async function logSignalToSupabase(signal: any, _userId?: number | null):
         take_profit_1: signal.mt5?.takeProfit1Price ? Number(signal.mt5.takeProfit1Price) : null,
         take_profit_2: signal.mt5?.takeProfit2Price ? Number(signal.mt5.takeProfit2Price) : null,
         confidence: 0,
-        confluence_factors: signal.reasons || signal.technicalAudit?.confluenceFactors || [],
+        confluence_factors: Array.isArray(signal.reasons || signal.technicalAudit?.confluenceFactors)
+          ? (signal.reasons || signal.technicalAudit?.confluenceFactors)
+              .slice(0, 12)
+              .map((item: unknown) => String(item).slice(0, 200))
+          : [],
         setup_name: signal.technicalAudit?.setupName || signal.engine || 'Algorithmic Signal',
         engine: signal.engine,
         profile: signal.profile || signal.analysisProfile,
@@ -700,7 +704,6 @@ export async function logSignalToSupabase(signal: any, _userId?: number | null):
         strength: signal.strength,
         inputs_snapshot: signal.inputsSnapshot || {},
         feed_source: signal.feedSource || 'deriv_ws',
-        created_at: signal.createdAt || new Date().toISOString(),
         valid_until: signal.validUntil || null,
       }),
     });

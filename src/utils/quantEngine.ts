@@ -24,7 +24,9 @@ import type {
   TimestampedTick,
   LiveRegimeInfo,
   SignalStrength,
+  AssetConfig,
 } from '../types.ts';
+import { isSyntheticAsset } from '../services/symbolMap.ts';
 
 export type { TimestampedTick, LiveRegimeInfo };
 
@@ -293,7 +295,7 @@ export function getSessionAdvisor(symbol: string = 'EUR/USD'): SessionAdvisorInf
         utcTime: utcTimeStr,
         localTimeHint,
         quality: 'THIN',
-        note: 'Forex markets are closed or entering thin liquidity. Switch to 24/7 synthetic volatility indices or crypto.',
+        note: 'Forex markets are closed or entering thin liquidity. Switch to 24/7 crypto for live spot sessions (synthetics are practice only).',
         isWeakSession: true,
       };
     }
@@ -364,7 +366,7 @@ export function getSessionAdvisor(symbol: string = 'EUR/USD'): SessionAdvisorInf
     utcTime: utcTimeStr,
     localTimeHint,
     quality: 'CAUTION',
-    note: 'Asian session is predominantly mean-reverting range on EUR/USD and GBP pairs. Short expiries less directional; favor 5m+ or synthetics.',
+    note: 'Asian session is predominantly mean-reverting range on EUR/USD and GBP pairs. Short expiries less directional; favor higher timeframes or pause for London open.',
     isWeakSession: isMajorForex,
   };
 }
@@ -1388,7 +1390,8 @@ export function analyzeMarketConfluence(
   activeTimeframe: string = '1m',
   pipSize: number = 0.0001,
   _isVIP: boolean = false,
-  mode?: AnalysisMode
+  mode?: AnalysisMode,
+  assetOrSymbol?: string | AssetConfig
 ): TechnicalAudit {
   if (!prices || prices.length < 2) {
     return {
@@ -1471,8 +1474,11 @@ export function analyzeMarketConfluence(
     ? (passCount + unsureCount * 0.4) / gateResult.factors.length
     : 0;
   const computedScore = parseFloat((factorRatio * 100).toFixed(1));
-  const computedStrength: SignalStrength =
+  const rawBandStrength: SignalStrength =
     computedScore >= 80 ? 'High' : computedScore >= 58 ? 'Medium' : 'Low';
+  const isSynthetic = isSyntheticAsset(assetOrSymbol);
+  const computedStrength: SignalStrength =
+    isSynthetic && rawBandStrength === 'High' ? 'Medium' : rawBandStrength;
 
   let recommendedAction: 'CALL' | 'PUT' | 'WAIT' = 'WAIT';
   let confluenceFactors: string[] = [];
@@ -1659,7 +1665,7 @@ export function generateDualModeSignal(params: {
     mode,
   });
 
-  const liveAudit = analyzeMarketConfluence(safePrices, timeframe, pipSize, isVIP, mode);
+  const liveAudit = analyzeMarketConfluence(safePrices, timeframe, pipSize, isVIP, mode, symbol);
   const safeClose = calculateSafeCloseAnalysis(safePrices, timeframe, pipSize);
 
   // Live Micro Movement Check

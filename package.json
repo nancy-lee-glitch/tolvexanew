@@ -11,7 +11,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts",
+    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts",
+    "stress": "tsx scripts/stress-binary.ts",
     "verify:security": "node scripts/verify-security.mjs"
   },
   "dependencies": {

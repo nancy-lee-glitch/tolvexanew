@@ -18,8 +18,8 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['#asset-selector-tabs', '[data-tour="asset-selector"]'],
     title: '1. Select Your Trading Market',
     description:
-      'Choose your instrument from 24/7 Synthetic Volatility Indices (Vol 75, Vol 100), major Forex currency pairs (EUR/USD, GBP/USD), and Crypto assets with constant liquidity.',
-    tip: 'Deriv Synthetics trade continuously 365 days a year without weekend closures or bank holidays.',
+      'Choose your instrument from major Forex currency pairs (EUR/USD, GBP/USD), 24/7 Crypto assets (BTC/USD, ETH/USD), and global Commodities/Indices.',
+    tip: 'Crypto markets operate continuously 24/7; simulated synthetic indices are marked practice-only.',
     badge: 'Step 1 of 9 • Markets',
     shape: 'box',
     preferredPosition: 'bottom',
@@ -102,7 +102,7 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="radar-control"]', '#vip-radar-screener-btn'],
     title: '8. VIP Multi-Asset Safe Screener',
     description:
-      'Continuous 24/7 multi-asset screener monitoring synthetics, forex, and crypto simultaneously so you can inspect live trend alignment and volatility conditions across markets.',
+      'Continuous 24/7 multi-asset screener monitoring forex, crypto, commodities, and indices simultaneously so you can inspect live trend alignment and volatility conditions across markets.',
     tip: 'Tap the Radar button on desktop or mobile bottom navigation to scan the whole market in one glance.',
     badge: 'Step 8 of 9 • Radar Screener',
     shape: 'pill',

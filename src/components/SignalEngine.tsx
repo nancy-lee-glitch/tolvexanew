@@ -39,6 +39,7 @@ import {
   type MarketEventRow,
 } from '../utils/supabaseClient.ts';
 import { getBrokerPlatforms } from '../utils/siteConfigManager.ts';
+import { isSyntheticAsset, SYNTHETIC_INDICES_NOTICE } from '../services/symbolMap.ts';
 import { SignalHistory } from './SignalHistory.tsx';
 
 interface SignalEngineProps {
@@ -266,9 +267,11 @@ export function SignalEngine({
   }, [ticks]);
 
   // Live telemetry audit
+  const isSynthetic = useMemo(() => isSyntheticAsset(activeAsset), [activeAsset]);
+
   const liveAudit: TechnicalAudit = useMemo(() => {
-    return analyzeMarketConfluence(safeTicks, selectedTf, activeAsset?.pipSize || 0.0001, isVIP, analysisMode);
-  }, [safeTicks, selectedTf, activeAsset?.pipSize, isVIP, analysisMode]);
+    return analyzeMarketConfluence(safeTicks, selectedTf, activeAsset?.pipSize || 0.0001, isVIP, analysisMode, activeAsset);
+  }, [safeTicks, selectedTf, activeAsset, isVIP, analysisMode]);
 
   // Safe close analysis
   const safeCloseAnalysis = useMemo(() => {
@@ -363,8 +366,8 @@ export function SignalEngine({
         status: 'ANALYSIS_BLOCKED',
         blockedReason: 'Market is closed. Real-time feeds resume Sunday 21:00 UTC.',
         plainLanguageReason:
-          'Forex and equities markets close over the weekend. Live algorithmic analysis is disabled. You can switch to 24/7 Deriv Synthetics or Crypto.',
-        whyNotTrade: 'Market is closed over the weekend. Switch to Synthetics or Crypto for 24/7 data.',
+          'Forex and equities markets close over the weekend. Live algorithmic analysis is disabled. You can switch to 24/7 Crypto pairs (synthetics are practice only).',
+        whyNotTrade: 'Market is closed over the weekend. Switch to 24/7 Crypto for live market data.',
         riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -731,6 +734,10 @@ export function SignalEngine({
         generatedSignal.plainLanguageReason = `${historyLearning.note} Market regime currently hostile; WAIT enforced until high-strength confluence is reached.`;
       }
 
+      if (isSynthetic && generatedSignal.strength === 'High') {
+        generatedSignal.strength = 'Medium';
+      }
+
       setSignal(generatedSignal);
       setIsRechecking(false);
 
@@ -997,9 +1004,9 @@ export function SignalEngine({
             </span>
           </div>
 
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between">
-            <span className="text-slate-400">Signal Strength:</span>
-            <span className={`font-bold ${
+          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
+            <span className="text-slate-400">Setup strength (not a win probability):</span>
+            <span className={`font-bold shrink-0 ${
               liveAudit.strength === 'High'
                 ? 'text-emerald-400'
                 : liveAudit.strength === 'Medium'
@@ -1275,7 +1282,7 @@ export function SignalEngine({
           <div className="space-y-1">
             <div className="font-bold text-amber-300 uppercase tracking-wide">OTC Proprietary Broker Instrument</div>
             <p className="text-[11px] text-amber-100/90 leading-relaxed">
-              OTC prices are set by your broker; we cannot analyse them. Please select a standardized market instrument (Forex, Crypto, Commodities, or Deriv 24/7 Synthetics) from the asset picker.
+              OTC prices are set by your broker; we cannot analyse them. Please select a standardized market instrument (Forex, Crypto, or Commodities) from the asset picker.
             </p>
           </div>
         </div>
@@ -1310,8 +1317,18 @@ export function SignalEngine({
       <div
         id="signal-display-container"
         data-tour="confluence-gate"
-        className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden transition-all duration-300"
+        className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden transition-all duration-300 space-y-3"
       >
+        {/* Permanent Synthetic Indices Notice on Analysis Card */}
+        {isSynthetic && (
+          <div
+            data-testid="synthetic-analysis-notice"
+            className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-3 font-mono text-[11px] text-amber-200 flex items-start gap-2.5"
+          >
+            <span className="text-amber-400 shrink-0 font-bold">⚠️</span>
+            <span className="leading-relaxed">{SYNTHETIC_INDICES_NOTICE}</span>
+          </div>
+        )}
         {!signal ? (
           /* Standby / Initial State */
           <div className="text-center py-5 space-y-2">
@@ -1383,7 +1400,7 @@ export function SignalEngine({
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-slate-400">
-                    Platform: {currentPlatform.name} &bull; Strength:{' '}
+                    Platform: {currentPlatform.name} &bull; Setup strength (not a win probability):{' '}
                     <strong className={
                       signal.strength === 'High'
                         ? 'text-emerald-400'
@@ -1453,7 +1470,7 @@ export function SignalEngine({
                     <span>NO TRADE SIGNAL RIGHT NOW</span>
                   </span>
                   <span className="text-[10px] text-amber-300 font-bold bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800">
-                    Strength: {signal.strength || 'Low'}
+                    Setup strength (not a win probability): {signal.strength || 'Low'}
                   </span>
                 </div>
                 <p className="text-slate-200 text-[11px] leading-relaxed font-semibold">
@@ -1507,7 +1524,7 @@ export function SignalEngine({
                 </span>
               </div>
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] text-slate-500 uppercase block">Signal Strength</span>
+                <span className="text-[9px] text-slate-500 uppercase block leading-tight">Setup strength (not a win probability)</span>
                 <span className={`text-xs font-black block mt-0.5 ${
                   signal.strength === 'High' ? 'text-emerald-400' : signal.strength === 'Medium' ? 'text-amber-400' : 'text-slate-300'
                 }`}>
@@ -1611,7 +1628,7 @@ export function SignalEngine({
                 </span>
               </div>
               <span className="text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                Mode: MT5 Style ({signal.strength || 'Low'})
+                Setup strength (not a win probability): {signal.strength || 'Low'}
               </span>
             </div>
 

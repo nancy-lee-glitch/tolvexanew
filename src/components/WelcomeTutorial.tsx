@@ -36,22 +36,22 @@ const TUTORIAL_STEPS: TutorialStep[] = [
       },
       {
         title: 'Multi-Market Coverage',
-        text: 'Switch seamlessly between Forex, Crypto, Commodities, and 24/7 Synthetic Indices.',
+        text: 'Switch seamlessly between Forex, Crypto, Commodities, and Indices (synthetic feeds available for practice only).',
       },
     ],
   },
   {
     title: 'Selecting Your Asset & Timeframe',
-    subtitle: 'Synthetics, Forex, Crypto & Commodities',
+    subtitle: 'Forex, Crypto, Commodities & Indices',
     badge: 'Step 2 of 5 • Markets',
     icon: '🎯',
     accent: 'cyan',
     description:
-      'Choose from continuous 24/7 Synthetic Indices (Volatility 75, Volatility 100, Crash/Boom) or standard Forex pairs and Crypto assets.',
+      'Choose from major Forex currency pairs, 24/7 Crypto assets (BTC/USD, ETH/USD), and global Commodities/Indices.',
     bulletPoints: [
       {
-        title: 'Synthetic Indices (24/7/365)',
-        text: 'Engineered for uninterrupted trading with mathematical constant volatility and no weekend market closures.',
+        title: '24/7 Spot Crypto Coverage',
+        text: 'Crypto assets like BTC/USD and ETH/USD stream continuously over weekends while interbank FX is closed. Simulated synthetic indices are practice-only.',
       },
       {
         title: 'Dynamic Expiries',

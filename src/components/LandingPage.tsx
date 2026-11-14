@@ -124,7 +124,7 @@ export function LandingPage({
                         Live Multi-Timeframe Candle &amp; Tick Sync
                       </span>
                       <div className="text-xs sm:text-base font-bold text-white">
-                        Deriv Live WebSocket • EUR/USD &amp; Volatility Synthetics
+                        Deriv Live WebSocket • Forex, Crypto &amp; Commodities
                       </div>
                     </div>
                     <div className="flex items-center gap-1.5 bg-slate-900/90 border border-emerald-500/40 px-2.5 py-1 rounded-xl font-mono text-[11px] sm:text-xs text-emerald-300">

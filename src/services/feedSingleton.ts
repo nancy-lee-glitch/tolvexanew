@@ -10,7 +10,14 @@
  * - Tracks non-sensitive feed diagnostics for ?debug=1 view.
  */
 
-import { LiveFeed, attachBrowserEvents, type Tick, type StatusEvent, type FeedStatus } from './liveFeed.ts';
+import {
+  LiveFeed,
+  attachBrowserEvents,
+  type Tick,
+  type StatusEvent,
+  type FeedStatus,
+  type FeedOptions,
+} from './liveFeed.ts';
 import {
   isSymbolMarketOpen,
   initializeAssetRegistry,
@@ -24,6 +31,7 @@ const APP_ID = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_DERI
 
 export const PRIMARY_ENDPOINT = ENV_PRIMARY || 'wss://api.derivws.com/trading/v1/options/ws/public';
 export const FALLBACK_ENDPOINT = ENV_FALLBACK || `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+export const REGISTRY_RETRY_DELAYS_MS = [1000, 3000, 6000, 12000, 24000] as const;
 
 export interface FeedDiagnosticsSnapshot {
   endpoint: string;
@@ -36,8 +44,17 @@ export interface FeedDiagnosticsSnapshot {
   registry: AssetRegistryInfo;
 }
 
+export interface FeedSingletonOverrides {
+  endpoints?: string[];
+  wsFactory?: FeedOptions['wsFactory'];
+  clock?: FeedOptions['clock'];
+  isMarketOpen?: FeedOptions['isMarketOpen'];
+  random?: FeedOptions['random'];
+}
+
 let sharedFeed: LiveFeed | null = null;
 let detachEvents: (() => void) | null = null;
+let singletonOverrides: FeedSingletonOverrides | null = null;
 
 const tickListeners = new Set<(tick: Tick) => void>();
 const statusListeners = new Set<(event: StatusEvent) => void>();
@@ -53,10 +70,83 @@ let lastTickAtMs: number | null = null;
 let reconnectCount = 0;
 let lastError: string | null = null;
 
+let registryFetchPromise: Promise<void> | null = null;
+let registryRetryTimers: unknown[] = [];
+
+function getTimerApi() {
+  const clock = singletonOverrides?.clock;
+  if (clock) {
+    return {
+      setTimeout: (fn: () => void, ms: number) => clock.setTimeout(fn, ms),
+      clearTimeout: (id: unknown) => clock.clearTimeout(id),
+    };
+  }
+  return {
+    setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+    clearTimeout: (id: unknown) => clearTimeout(id as any),
+  };
+}
+
+function clearRegistryRetryTimers() {
+  const { clearTimeout: clearT } = getTimerApi();
+  for (const id of registryRetryTimers) {
+    clearT(id);
+  }
+  registryRetryTimers = [];
+}
+
+function triggerRegistryLoad(): Promise<void> {
+  if (!sharedFeed) return Promise.resolve();
+  if (getAssetRegistryInfo().source === 'live') {
+    clearRegistryRetryTimers();
+    return Promise.resolve();
+  }
+  if (!sharedFeed.isSocketOpen()) {
+    return Promise.resolve();
+  }
+  if (registryFetchPromise) {
+    return registryFetchPromise;
+  }
+
+  const targetFeed = sharedFeed;
+  registryFetchPromise = initializeAssetRegistry(targetFeed)
+    .then(() => {
+      if (getAssetRegistryInfo().source === 'live') {
+        clearRegistryRetryTimers();
+      }
+      notifyDiagListeners();
+    })
+    .catch(() => {})
+    .finally(() => {
+      registryFetchPromise = null;
+    });
+
+  return registryFetchPromise;
+}
+
+function scheduleRegistryRetries() {
+  clearRegistryRetryTimers();
+  const { setTimeout: setT } = getTimerApi();
+  for (const delayMs of REGISTRY_RETRY_DELAYS_MS) {
+    const timerId = setT(() => {
+      if (!sharedFeed || getAssetRegistryInfo().source === 'live') {
+        clearRegistryRetryTimers();
+        return;
+      }
+      if (!sharedFeed.isSocketOpen()) {
+        return;
+      }
+      void triggerRegistryLoad();
+    }, delayMs);
+    registryRetryTimers.push(timerId);
+  }
+}
+
 function buildDiagnosticsSnapshot(): FeedDiagnosticsSnapshot {
+  const now = singletonOverrides?.clock ? singletonOverrides.clock.now() : Date.now();
   const ageSec =
     lastTickAtMs !== null
-      ? Math.max(0, Math.round((Date.now() - lastTickAtMs) / 1000))
+      ? Math.max(0, Math.round((now - lastTickAtMs) / 1000))
       : latestStatus.tickAgeMs !== null
       ? Math.max(0, Math.round(latestStatus.tickAgeMs / 1000))
       : null;
@@ -85,18 +175,36 @@ function notifyDiagListeners() {
 }
 
 /**
+ * Optional configuration overrides for tests (must be called before getLiveFeed()).
+ */
+export function configureFeedSingletonForTest(overrides: FeedSingletonOverrides | null): void {
+  singletonOverrides = overrides;
+}
+
+/**
  * Returns or creates the module-level singleton LiveFeed instance.
  */
 export function getLiveFeed(): LiveFeed {
   if (!sharedFeed) {
+    const endpoints = singletonOverrides?.endpoints ?? [PRIMARY_ENDPOINT, FALLBACK_ENDPOINT];
+    latestStatus = {
+      status: 'CONNECTING',
+      tickAgeMs: null,
+      endpoint: endpoints[0] || PRIMARY_ENDPOINT,
+      reason: 'initial',
+    };
+
     sharedFeed = new LiveFeed({
-      endpoints: [PRIMARY_ENDPOINT, FALLBACK_ENDPOINT],
-      isMarketOpen: (symbol: string) => isSymbolMarketOpen(symbol),
+      endpoints,
+      wsFactory: singletonOverrides?.wsFactory,
+      clock: singletonOverrides?.clock,
+      random: singletonOverrides?.random,
+      isMarketOpen: singletonOverrides?.isMarketOpen ?? ((symbol: string) => isSymbolMarketOpen(symbol)),
       onTick: (tick: Tick) => {
-        lastTickAtMs = Date.now();
+        lastTickAtMs = singletonOverrides?.clock ? singletonOverrides.clock.now() : Date.now();
         // Ensure active_symbols is loaded once socket proves live
         if (getAssetRegistryInfo().source !== 'live' && sharedFeed) {
-          initializeAssetRegistry(sharedFeed).then(() => notifyDiagListeners()).catch(() => {});
+          void triggerRegistryLoad();
         }
         for (const listener of tickListeners) {
           try {
@@ -112,8 +220,12 @@ export function getLiveFeed(): LiveFeed {
         if (event.status === 'RECONNECTING' && prevStatus !== 'RECONNECTING') {
           reconnectCount += 1;
         }
-        if ((event.status === 'LIVE' || event.status === 'DELAYED') && getAssetRegistryInfo().source !== 'live' && sharedFeed) {
-          initializeAssetRegistry(sharedFeed).then(() => notifyDiagListeners()).catch(() => {});
+        if (
+          (event.status === 'LIVE' || event.status === 'DELAYED' || event.status === 'MARKET_CLOSED') &&
+          getAssetRegistryInfo().source !== 'live' &&
+          sharedFeed
+        ) {
+          void triggerRegistryLoad();
         }
         for (const listener of statusListeners) {
           try {
@@ -131,6 +243,7 @@ export function getLiveFeed(): LiveFeed {
     });
 
     detachEvents = attachBrowserEvents(sharedFeed);
+    scheduleRegistryRetries();
   }
 
   return sharedFeed;
@@ -191,6 +304,8 @@ export function subscribeDiagnostics(listener: (diag: FeedDiagnosticsSnapshot) =
  * Teardown helper for full unmount or tests.
  */
 export function destroySharedFeed(): void {
+  clearRegistryRetryTimers();
+  registryFetchPromise = null;
   if (detachEvents) {
     detachEvents();
     detachEvents = null;
@@ -202,4 +317,13 @@ export function destroySharedFeed(): void {
   tickListeners.clear();
   statusListeners.clear();
   diagListeners.clear();
+  latestStatus = {
+    status: 'CONNECTING',
+    tickAgeMs: null,
+    endpoint: singletonOverrides?.endpoints?.[0] || PRIMARY_ENDPOINT,
+    reason: 'initial',
+  };
+  lastTickAtMs = null;
+  reconnectCount = 0;
+  lastError = null;
 }

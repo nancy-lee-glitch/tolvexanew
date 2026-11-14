@@ -151,6 +151,7 @@ export class LiveFeed {
   }
 
   getStatus(): StatusEvent { return this.snapshot('snapshot'); }
+  isSocketOpen(): boolean { return this.isOpen(); }
 
   /** Call from visibilitychange (visible), online, offline. attachBrowserEvents() wires them for you. */
   handleVisible() {
