@@ -17,24 +17,29 @@ import { playCallAudioChime, playPutAudioChime } from '../utils/audio.ts';
 import {
   analyzeMarketConfluence,
   calculateSafeCloseAnalysis,
-  generateDualModeSignal,
-  evaluateMultiWindowLiveConfirmation,
   computeSignalHistoryLearning,
   getAssetTimestampedTicks,
 } from '../utils/quantEngine.ts';
 import {
   analyzeBinarySignal,
+  analyzeMT5Signal,
   formatBreakEvenStatement,
+  inferAssetCurrencies,
+  normalizeSpecKey,
   type BinaryExpiry,
 } from '../utils/engines/index.ts';
 import { getOrFetchCandles } from '../services/candleStore.ts';
 import { getCurrentFeedStatus } from '../services/feedSingleton.ts';
 import type { FeedStatus } from '../services/liveFeed.ts';
 import {
-  logSignalToSupabase,
-  logOutcomeToSupabase,
+  DEFAULT_USER_TRADING_PROFILE,
   fetchBrokerAssetMeta,
+  fetchInstrumentSpec,
   fetchUpcomingMarketEvents,
+  fetchUserTradingProfile,
+  logOutcomeToSupabase,
+  logSignalToSupabase,
+  saveUserTradingProfile,
   type BrokerAssetMeta,
   type MarketEventRow,
 } from '../utils/supabaseClient.ts';
@@ -210,11 +215,66 @@ export function SignalEngine({
   const [binaryRiskPct, setBinaryRiskPct] = useState<number>(1);
   const [breakAcknowledged, setBreakAcknowledged] = useState<boolean>(false);
 
-  // MT5 Risk & Lot size adjustments (includes $10 for small account testing)
-  const [mt5Balance, setMt5Balance] = useState<number>(10000);
-  const [mt5RiskPct, setMt5RiskPct] = useState<number>(1.0);
+  // MT5 Risk & Account Profile (persisted to Supabase for signed-in users)
+  const [mt5AccountCurrency, setMt5AccountCurrency] = useState<'USD' | 'EUR' | 'GBP' | 'JPY' | 'AUD' | 'CAD' | 'CHF'>(
+    () => user?.trading_profile?.accountCurrency || DEFAULT_USER_TRADING_PROFILE.accountCurrency
+  );
+  const [mt5Balance, setMt5Balance] = useState<number>(
+    () => user?.trading_profile?.accountBalance ?? DEFAULT_USER_TRADING_PROFILE.accountBalance
+  );
+  const [mt5RiskPct, setMt5RiskPct] = useState<number>(
+    () => user?.trading_profile?.riskPct ?? DEFAULT_USER_TRADING_PROFILE.riskPct
+  );
+  const [mt5Leverage, setMt5Leverage] = useState<number>(
+    () => user?.trading_profile?.leverage ?? DEFAULT_USER_TRADING_PROFILE.leverage
+  );
+  const [mt5SpreadPips, setMt5SpreadPips] = useState<number>(
+    () => user?.trading_profile?.brokerSpreadPips ?? DEFAULT_USER_TRADING_PROFILE.brokerSpreadPips
+  );
+  const [mt5ContractOverrides, setMt5ContractOverrides] = useState<Record<string, number>>(
+    () => user?.trading_profile?.contractSizeOverrides || {}
+  );
   const [copiedMt5Text, setCopiedMt5Text] = useState<boolean>(false);
   const [copiedMt5Json, setCopiedMt5Json] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!user) return;
+    if (user.trading_profile) {
+      setMt5AccountCurrency(user.trading_profile.accountCurrency);
+      setMt5Balance(user.trading_profile.accountBalance);
+      setMt5RiskPct(user.trading_profile.riskPct);
+      setMt5Leverage(user.trading_profile.leverage);
+      setMt5SpreadPips(user.trading_profile.brokerSpreadPips);
+      setMt5ContractOverrides(user.trading_profile.contractSizeOverrides || {});
+      return;
+    }
+    let cancelled = false;
+    fetchUserTradingProfile()
+      .then((tp) => {
+        if (cancelled) return;
+        setMt5AccountCurrency(tp.accountCurrency);
+        setMt5Balance(tp.accountBalance);
+        setMt5RiskPct(tp.riskPct);
+        setMt5Leverage(tp.leverage);
+        setMt5SpreadPips(tp.brokerSpreadPips);
+        setMt5ContractOverrides(tp.contractSizeOverrides || {});
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.trading_profile]);
+
+  const handleUpdateMt5Balance = (nextBal: number) => {
+    setMt5Balance(nextBal);
+    if (user) saveUserTradingProfile({ accountBalance: nextBal }).catch(() => {});
+  };
+
+  const handleUpdateMt5RiskPct = (nextRisk: number) => {
+    const clamped = Math.min(3.0, Math.max(0.1, nextRisk));
+    setMt5RiskPct(clamped);
+    if (user) saveUserTradingProfile({ riskPct: clamped }).catch(() => {});
+  };
 
   // Re-check animation state
   const [isRechecking, setIsRechecking] = useState<boolean>(false);
@@ -486,7 +546,11 @@ export function SignalEngine({
     setCreditNotice(null);
     setIsRechecking(true);
     setRecheckStage(1);
-    setRecheckNote(`[1/4] Fetching M1, M5, M15 candles & ticks for ${activeAsset.name}...`);
+    setRecheckNote(
+      analysisProfile === 'BINARY_QUICK'
+        ? `[1/4] Fetching M1, M5, M15 candles & ticks for ${activeAsset.name}...`
+        : `[1/4] Fetching D1, H4, H1, M15 & M5 candles for ${activeAsset.name}...`
+    );
 
     setTimeout(() => {
       setRecheckStage(2);
@@ -498,7 +562,7 @@ export function SignalEngine({
       setRecheckNote(
         analysisProfile === 'BINARY_QUICK'
           ? `[3/4] Checking news events, session guard, payout breakeven & M15 filter...`
-          : `[3/4] Evaluating MT5 Gate (EMA + RSI + Price Distribution Proxy + Sweep + FVG)...`
+          : `[3/4] Evaluating D1/H4 bias, H1/M15 swings, ATR(14), spread & lot sizing...`
       );
     }, 450);
 
@@ -667,101 +731,185 @@ export function SignalEngine({
         return;
       }
 
-      // SECTION B (MT5): Kept operational with Rule 1 & Rule 3 compliance until Part 2
-      const m1CandlesFallback =
-        safeTicks.length < 15
-          ? await getOrFetchCandles(activeAsset.symbol, '1m', 60).catch(() => [])
-          : [];
-      const mt5InputPrices =
-        safeTicks.length >= 15 ? safeTicks : m1CandlesFallback.map((c) => c.close);
+      // SECTION B: DEDICATED CANDLE-BASED MT5 ENGINE (Stage 3 Part 2)
+      const [d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, dbSpec, latestEvents, tradingProfile] =
+        await Promise.all([
+          getOrFetchCandles(activeAsset.symbol, '1d', 90).catch(() => []),
+          getOrFetchCandles(activeAsset.symbol, '4h', 120).catch(() => []),
+          getOrFetchCandles(activeAsset.symbol, '1h', 160).catch(() => []),
+          getOrFetchCandles(activeAsset.symbol, '15m', 160).catch(() => []),
+          getOrFetchCandles(activeAsset.symbol, '5m', 160).catch(() => []),
+          fetchInstrumentSpec(activeAsset.symbol).catch(() => undefined),
+          fetchUpcomingMarketEvents().catch(() => marketEvents),
+          fetchUserTradingProfile().catch(() => ({
+            accountCurrency: mt5AccountCurrency,
+            accountBalance: mt5Balance,
+            riskPct: mt5RiskPct,
+            leverage: mt5Leverage,
+            brokerSpreadPips: mt5SpreadPips,
+            contractSizeOverrides: mt5ContractOverrides,
+          })),
+        ]);
 
-      const tfMinutes = selectedTf.endsWith('s') ? 0.5 : parseInt(selectedTf) || 1;
-      const multiWindow = evaluateMultiWindowLiveConfirmation(
-        mt5InputPrices,
-        activeAsset.pipSize || 0.0001,
-        tfMinutes,
-        activeAsset.symbol
-      );
+      setMarketEvents(latestEvents);
+
+      // Fetch live conversion quotes when quote currency != account currency
+      const conversionRates: Record<string, number> = {};
+      const resolvedQuoteCcy = (dbSpec?.quoteCcy || inferAssetCurrencies(activeAsset).quoteCcy || 'USD').toUpperCase();
+      const acctCcy = (tradingProfile.accountCurrency || mt5AccountCurrency || 'USD').toUpperCase();
+      if (resolvedQuoteCcy !== acctCcy) {
+        const neededPairs = Array.from(
+          new Set([
+            resolvedQuoteCcy !== 'USD' ? `frx${resolvedQuoteCcy}USD` : '',
+            resolvedQuoteCcy !== 'USD' ? `frxUSD${resolvedQuoteCcy}` : '',
+            acctCcy !== 'USD' ? `frx${acctCcy}USD` : '',
+            acctCcy !== 'USD' ? `frxUSD${acctCcy}` : '',
+          ].filter(Boolean))
+        );
+        await Promise.all(
+          neededPairs.map(async (pairSym) => {
+            const c = await getOrFetchCandles(pairSym, '5m', 5).catch(() => []);
+            const last = c[c.length - 1]?.close;
+            if (last && last > 0) {
+              conversionRates[pairSym] = last;
+            }
+          })
+        );
+      }
+
+      const feedDiag = getCurrentFeedStatus();
+      const specKey = normalizeSpecKey(activeAsset.symbol);
+      const activeOverrides = {
+        ...(tradingProfile.contractSizeOverrides || {}),
+        ...(mt5ContractOverrides || {}),
+      };
+      const overrideContract =
+        activeOverrides[activeAsset.symbol] ??
+        activeOverrides[specKey];
+
+      const structureTf = selectedTf === '15m' ? 'M15' : 'H1';
+      const mt5Res = analyzeMT5Signal({
+        asset: activeAsset,
+        platform: currentPlatform.id,
+        platformName: currentPlatform.name,
+        d1Candles,
+        h4Candles,
+        h1Candles,
+        m15Candles,
+        m5Candles,
+        structureTimeframe: structureTf,
+        feedStatus: (feedHealthStatus || 'LIVE') as FeedStatus,
+        feedSource: feedDiag.endpoint,
+        isOtc,
+        marketEvents: latestEvents,
+        instrumentSpec: dbSpec,
+        accountCurrency: mt5AccountCurrency || tradingProfile.accountCurrency,
+        accountBalance: mt5Balance ?? tradingProfile.accountBalance,
+        riskPct: mt5RiskPct ?? tradingProfile.riskPct,
+        leverage: mt5Leverage ?? tradingProfile.leverage,
+        spreadPips: mt5SpreadPips ?? tradingProfile.brokerSpreadPips,
+        contractSizeOverride: overrideContract,
+        conversionRates,
+      });
 
       const historyLearning = computeSignalHistoryLearning(
         activeAsset.symbol || activeAsset.name,
-        analysisProfile,
-        selectedTf
+        'MT5',
+        mt5Res.timeframe
       );
 
-      const generatedSignal = generateDualModeSignal({
-        symbol: activeAsset.name,
-        timeframe: selectedTf,
-        prices: mt5InputPrices,
-        currentPrice: currentPrice || mt5InputPrices[mt5InputPrices.length - 1] || 0,
-        pipSize: activeAsset.pipSize || 0.0001,
-        decimals: activeAsset.decimals || 5,
-        mode: analysisMode,
-        isVIP,
-        accountBalance: mt5Balance,
-        riskPercent: mt5RiskPct,
-      });
-
-      generatedSignal.platform = currentPlatform.name;
-      generatedSignal.analysisProfile = analysisProfile;
-      generatedSignal.profile = analysisProfile;
-      generatedSignal.multiWindow = multiWindow;
-      generatedSignal.historyLearning = historyLearning;
-      generatedSignal.suggestedExpiryMinutes = multiWindow.suggestedExpiryMinutes;
-      generatedSignal.suggestedExpiryReason = multiWindow.suggestedExpiryReason;
-
-      if (
-        !multiWindow.allAgreed &&
-        (generatedSignal.direction === 'CALL' ||
-          generatedSignal.direction === 'PUT' ||
-          (generatedSignal.direction as string) === 'BUY' ||
-          (generatedSignal.direction as string) === 'SELL')
-      ) {
-        generatedSignal.direction = 'WAIT';
-        generatedSignal.gatePassed = false;
-        generatedSignal.strength = 'Low';
-        generatedSignal.plainLanguageReason =
-          multiWindow.conflictSummary ||
-          'Multi-window momentum disagreement detected across lookbacks. Trade aborted to protect capital.';
-      }
-
-      if (
-        historyLearning.status === 'CAUTION_RAISED_THRESHOLD' &&
-        generatedSignal.strength !== 'High'
-      ) {
-        generatedSignal.direction = 'WAIT';
-        generatedSignal.gatePassed = false;
-        generatedSignal.plainLanguageReason = `${historyLearning.note} Market regime currently hostile; WAIT enforced until high-strength confluence is reached.`;
-      }
-
-      if (isSynthetic && generatedSignal.strength === 'High') {
-        generatedSignal.strength = 'Medium';
-      }
+      const isActionable = mt5Res.direction === 'BUY' || mt5Res.direction === 'SELL';
+      const generatedSignal: SignalData = {
+        engine: mt5Res.engine,
+        profile: 'MT5',
+        analysisProfile: 'MT5',
+        mode: 'mt5',
+        asset: mt5Res.asset,
+        symbol: mt5Res.symbol,
+        platform: currentPlatform.name,
+        platformName: currentPlatform.name,
+        timeframe: mt5Res.timeframe,
+        direction: mt5Res.direction,
+        orderKind: mt5Res.orderKind,
+        strength: mt5Res.strength,
+        rawScore: mt5Res.rawScore,
+        trend: mt5Res.direction === 'BUY' ? 'Bullish' : mt5Res.direction === 'SELL' ? 'Bearish' : 'Neutral',
+        velocity: feedHealthStatus === 'DELAYED' ? 'Candle Sync (Delayed Ticks)' : 'Candle Structure',
+        generatedAt: mt5Res.generatedAt,
+        createdAt: mt5Res.createdAt,
+        validUntil: mt5Res.validUntil,
+        validityWindowDesc: mt5Res.validityWindowDesc,
+        reasons: mt5Res.reasons,
+        whyNotTrade: mt5Res.whyNotTrade,
+        feedSource: mt5Res.feedSource,
+        inputsSnapshot: mt5Res.inputsSnapshot,
+        entryPrice: mt5Res.entryPrice,
+        targetPrice: mt5Res.takeProfit1 ?? undefined,
+        entryZone: mt5Res.entryZone ?? undefined,
+        invalidationLevel: mt5Res.invalidationLevel ?? undefined,
+        invalidationReason: mt5Res.invalidationRule,
+        sessionNote: mt5Res.sessionNote,
+        sessionQuality: mt5Res.sessionQuality,
+        tradeManagementNote: mt5Res.tradeManagementNote,
+        accountSizingWarning: mt5Res.accountSizingWarning || mt5Res.riskWarning,
+        plainLanguageReason: mt5Res.whyNotTrade || mt5Res.reasons.join(' '),
+        riskNote:
+          mt5Res.riskWarning ||
+          `${mt5Res.tradeManagementNote} Algorithmic setups are educational and not financial advice.`,
+        gatePassed: isActionable,
+        status: 'READY',
+        historyLearning,
+        mt5:
+          isActionable && mt5Res.stopLoss !== null && mt5Res.takeProfit1 !== null && mt5Res.takeProfit2 !== null
+            ? {
+                symbol: mt5Res.asset.replace(/[^A-Za-z0-9]/g, ''),
+                orderType: mt5Res.direction as 'BUY' | 'SELL',
+                orderKind: mt5Res.orderKind,
+                entryPrice: mt5Res.entryPrice,
+                entryZone: mt5Res.entryZone ?? undefined,
+                stopLossPrice: mt5Res.stopLoss,
+                stopLossPips: mt5Res.stopLossPips ?? 0,
+                takeProfit1Price: mt5Res.takeProfit1,
+                takeProfit1Pips: mt5Res.takeProfit1Pips ?? 0,
+                takeProfit2Price: mt5Res.takeProfit2,
+                takeProfit2Pips: mt5Res.takeProfit2Pips ?? 0,
+                rewardRiskTp1: mt5Res.rewardRiskTp1 ?? 0,
+                rewardRiskTp2: mt5Res.rewardRiskTp2 ?? 0,
+                riskRewardRatio: mt5Res.rewardRiskRatio,
+                recommendedLot: mt5Res.lotSize,
+                accountRiskAmount: mt5Res.riskMoney,
+                accountCurrency: mt5Res.accountCurrency,
+                validityCandles: mt5Res.validityCandles,
+                validityWindowDesc: mt5Res.validityWindowDesc,
+                validUntil: mt5Res.validUntil,
+                invalidationLevel: mt5Res.invalidationLevel ?? undefined,
+                invalidationRule: mt5Res.invalidationRule,
+                sessionNote: mt5Res.sessionNote,
+                tradeManagementNote: mt5Res.tradeManagementNote,
+                formattedText: mt5Res.copyOrderText,
+                accountSizingWarning: mt5Res.accountSizingWarning,
+              }
+            : undefined,
+      };
 
       setSignal(generatedSignal);
       setIsRechecking(false);
 
-      const isActionable =
-        generatedSignal.direction === 'CALL' ||
-        generatedSignal.direction === 'PUT' ||
-        (analysisProfile === 'MT5' &&
-          ((generatedSignal.direction as string) === 'BUY' ||
-            (generatedSignal.direction as string) === 'SELL'));
-
       if (isActionable) {
+        const spark = m5Candles.slice(-10).map((c) => c.close);
         const historyItem: SignalHistoryItem = {
           id: 'sig_' + Date.now(),
           asset: activeAsset.name,
           platform: currentPlatform.name,
-          platformProfile: analysisProfile,
-          timeframe: selectedTf,
-          direction: generatedSignal.direction,
-          entryPrice: currentPrice || mt5InputPrices[mt5InputPrices.length - 1] || 0,
-          targetPrice: generatedSignal.targetPrice,
-          strength: generatedSignal.strength || 'Medium',
+          platformProfile: 'MT5',
+          timeframe: mt5Res.timeframe,
+          direction: mt5Res.direction,
+          entryPrice: mt5Res.entryPrice,
+          targetPrice: mt5Res.takeProfit1 ?? undefined,
+          strength: mt5Res.strength,
           generatedAt: Date.now(),
           outcome: 'PENDING',
-          sparkline: mt5InputPrices.slice(-10),
+          sparkline: spark,
         };
         setSignalHistory((prev) => [historyItem, ...prev]);
 
@@ -778,7 +926,7 @@ export function SignalEngine({
         setIsExpired(false);
         setFreshnessSec(6.0);
 
-        if (generatedSignal.direction === 'CALL' || (generatedSignal.direction as string) === 'BUY') {
+        if (mt5Res.direction === 'BUY') {
           playCallAudioChime();
         } else {
           playPutAudioChime();
@@ -1181,7 +1329,7 @@ export function SignalEngine({
                 <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
               </span>
               <h4 className="font-mono text-xs font-black text-white uppercase tracking-wider">
-                Auditing Tick Buffer &bull; {analysisMode === 'quick' ? 'Quick Expiry Soft Gate' : 'MT5 Strict Gate'}
+                {analysisMode === 'quick' ? 'Auditing Tick & Candle Confluence' : 'Auditing Multi-Timeframe MT5 Candles'}
               </h4>
             </div>
             <span className="font-mono text-[11px] font-bold text-emerald-400">
@@ -1655,13 +1803,17 @@ export function SignalEngine({
             <div className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-xl p-3">
               <span className="text-xs text-slate-400 uppercase font-bold">3) Actionable Direction:</span>
               <span className={`text-sm font-black uppercase px-3 py-1 rounded-lg ${
-                signal.direction === 'CALL'
+                signal.direction === 'BUY' || signal.direction === 'CALL'
                   ? 'bg-emerald-400 text-slate-950'
-                  : signal.direction === 'PUT'
+                  : signal.direction === 'SELL' || signal.direction === 'PUT'
                   ? 'bg-rose-500 text-white'
                   : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
               }`}>
-                {signal.direction === 'CALL' ? 'BUY (LONG)' : signal.direction === 'PUT' ? 'SELL (SHORT)' : 'WAIT / NO TRADE'}
+                {signal.direction === 'BUY' || signal.direction === 'CALL'
+                  ? `BUY (${signal.orderKind || 'MARKET'})`
+                  : signal.direction === 'SELL' || signal.direction === 'PUT'
+                  ? `SELL (${signal.orderKind || 'MARKET'})`
+                  : 'WAIT / NO TRADE'}
               </span>
             </div>
 
@@ -1785,32 +1937,40 @@ export function SignalEngine({
                   <div className="bg-slate-950 border border-emerald-500/30 rounded-xl p-2">
                     <span className="text-[10px] text-emerald-400 uppercase block">7) Take Profit 1</span>
                     <span className="text-xs font-bold text-emerald-300 block mt-0.5">{signal.mt5.takeProfit1Price}</span>
-                    <span className="text-[9px] text-emerald-400/80">+{signal.mt5.takeProfit1Pips} pips (1:1.5)</span>
+                    <span className="text-[9px] text-emerald-400/80">
+                      +{signal.mt5.takeProfit1Pips} pips (1:{(signal.mt5.rewardRiskTp1 || 1.5).toFixed(2)})
+                    </span>
                   </div>
                   <div className="bg-slate-950 border border-teal-500/30 rounded-xl p-2">
                     <span className="text-[10px] text-teal-400 uppercase block">7) Take Profit 2</span>
                     <span className="text-xs font-bold text-teal-300 block mt-0.5">{signal.mt5.takeProfit2Price}</span>
-                    <span className="text-[9px] text-teal-400/80">+{signal.mt5.takeProfit2Pips} pips (1:2.5)</span>
+                    <span className="text-[9px] text-teal-400/80">
+                      +{signal.mt5.takeProfit2Pips} pips (1:{(signal.mt5.rewardRiskTp2 || 2.5).toFixed(2)})
+                    </span>
                   </div>
                 </div>
 
                 {/* MT5 Position Size Calculator */}
                 <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-300 font-bold">Position Size Calculator:</span>
+                    <span className="text-slate-300 font-bold">Position Size ({mt5AccountCurrency}):</span>
                     <span className="text-emerald-400 font-bold">
-                      Recommended: <strong className="text-white text-sm">{signal.mt5.recommendedLot} Lots</strong>
+                      {signal.mt5.recommendedLot > 0 ? (
+                        <>Recommended: <strong className="text-white text-sm">{signal.mt5.recommendedLot} Lots</strong></>
+                      ) : (
+                        <strong className="text-amber-300 text-xs">Below min lot (0 Lots)</strong>
+                      )}
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 text-[10px]">
                     <div>
-                      <span className="text-slate-400 block mb-1">Account Balance ($):</span>
+                      <span className="text-slate-400 block mb-1">Account Balance ({mt5AccountCurrency}):</span>
                       <div className="flex items-center gap-1">
                         {[10, 100, 1000, 5000, 10000].map((b) => (
                           <button
                             key={b}
                             type="button"
-                            onClick={() => setMt5Balance(b)}
+                            onClick={() => handleUpdateMt5Balance(b)}
                             className={`flex-1 py-1 rounded text-center transition ${
                               mt5Balance === b ? 'bg-blue-500 text-white font-bold' : 'bg-slate-900 text-slate-400'
                             }`}
@@ -1821,13 +1981,13 @@ export function SignalEngine({
                       </div>
                     </div>
                     <div>
-                      <span className="text-slate-400 block mb-1">Risk (% of balance):</span>
+                      <span className="text-slate-400 block mb-1">Risk (% of balance, max 3%):</span>
                       <div className="flex items-center gap-1">
-                        {[0.5, 1.0, 2.0].map((r) => (
+                        {[0.5, 1.0, 2.0, 3.0].map((r) => (
                           <button
                             key={r}
                             type="button"
-                            onClick={() => setMt5RiskPct(r)}
+                            onClick={() => handleUpdateMt5RiskPct(r)}
                             className={`flex-1 py-1 rounded text-center transition ${
                               mt5RiskPct === r ? 'bg-blue-500 text-white font-bold' : 'bg-slate-900 text-slate-400'
                             }`}

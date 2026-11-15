@@ -1,23 +1,26 @@
 /**
  * Tolvexa - Quantitative Backtest & Accuracy Audit Engine
- * 
- * Replays tick sequences through quantEngine.ts confluence gates
+ *
+ * Replays historical walk-forward ticks & OHLC bars through analyzeBinarySignal()
  * and reports:
  *  - Sample size (actionable signals, excluding WAIT)
  *  - Win / Loss counts
  *  - Win rate with Wilson Score 95% Confidence Interval
  *  - Payout-adjusted mathematical expectancy (e.g. 85% broker payout)
  *  - Breakeven accuracy requirement: 1 / (1 + Payout) = 54.05%
- * 
+ *
  * Usage:
- *  npx tsx scripts/backtest.ts [--asset=EUR/USD] [--expiry=60] [--payout=0.85]
+ *  npx tsx scripts/backtest.ts
  */
 
-import { generateDualModeSignal, evaluateMultiWindowLiveConfirmation } from '../src/utils/quantEngine.ts';
+import { analyzeBinarySignal } from '../src/utils/engines/binaryEngine.ts';
+import type { Candle } from '../src/utils/engines/types.ts';
+import type { AssetConfig, TimestampedTick } from '../src/types.ts';
 
 interface BacktestConfig {
   assetName: string;
   symbol: string;
+  type: AssetConfig['type'];
   pipSize: number;
   decimals: number;
   basePrice: number;
@@ -70,13 +73,13 @@ function createSeededRng(seed: number = 42) {
 }
 
 /**
- * Generate synthetic realistic market walk for historical tick replay
+ * Generate deterministic walk-forward tick stream (1 tick / 2 seconds)
  */
 function generateHistoricalTicks(
   basePrice: number,
   pipSize: number,
   decimals: number,
-  count: number = 2400,
+  count: number = 7200,
   seed: number = 101
 ): number[] {
   const rng = createSeededRng(seed);
@@ -85,13 +88,12 @@ function generateHistoricalTicks(
   let trendBias = 0;
 
   for (let i = 1; i < count; i++) {
-    // Regime shifts every ~120 ticks
-    if (i % 120 === 0) {
-      trendBias = (rng() - 0.5) * 0.4;
+    if (i % 150 === 0) {
+      trendBias = (rng() - 0.5) * 0.45;
     }
 
-    const shock = rng() > 0.96 ? (rng() - 0.5) * 3.5 : (rng() - 0.5);
-    const step = (trendBias + shock) * pipSize * 1.5;
+    const shock = rng() > 0.96 ? (rng() - 0.5) * 3.0 : (rng() - 0.5);
+    const step = (trendBias + shock) * pipSize * 1.4;
     price = Math.max(pipSize, price + step);
     ticks.push(parseFloat(price.toFixed(decimals)));
   }
@@ -100,77 +102,117 @@ function generateHistoricalTicks(
 }
 
 /**
- * Run walk-forward replay backtest on tick buffer
+ * Group tick stream (2s spacing) into OHLC candles of bucketSeconds duration.
  */
-export function runBacktest(
-  ticks: number[],
-  config: BacktestConfig
-): BacktestResult {
+function buildCandlesFromTicks(
+  slice: number[],
+  endEpochSec: number,
+  tickIntervalSec: number,
+  bucketSeconds: number
+): Candle[] {
+  const candles: Candle[] = [];
+  const startEpochSec = endEpochSec - (slice.length - 1) * tickIntervalSec;
+  let currentBucket = -1;
+  let bar: Candle | null = null;
+
+  for (let idx = 0; idx < slice.length; idx++) {
+    const tSec = startEpochSec + idx * tickIntervalSec;
+    const bucket = Math.floor(tSec / bucketSeconds) * bucketSeconds;
+    const price = slice[idx];
+
+    if (bucket !== currentBucket) {
+      if (bar) candles.push(bar);
+      currentBucket = bucket;
+      bar = { time: bucket, open: price, high: price, low: price, close: price };
+    } else if (bar) {
+      if (price > bar.high) bar.high = price;
+      if (price < bar.low) bar.low = price;
+      bar.close = price;
+    }
+  }
+  if (bar) candles.push(bar);
+  return candles;
+}
+
+/**
+ * Run walk-forward replay backtest on tick buffer using analyzeBinarySignal()
+ */
+export function runBacktest(ticks: number[], config: BacktestConfig): BacktestResult {
   const { assetName, pipSize, decimals, expirySeconds, brokerPayout } = config;
-  const minLookback = 60; // Minimum tick buffer required before evaluating
-  const stepInterval = 10; // Evaluate a signal candidate every 10 ticks
+  const tickIntervalSec = 2;
+  const minLookback = 2400; // Enough bars for M1/M5/M15 candle aggregation (~80m of 2s ticks)
+  const stepInterval = 30; // Evaluate once per minute (30 × 2s ticks)
+  const forwardTicks = Math.max(1, Math.round(expirySeconds / tickIntervalSec));
+  // Anchor inside Wednesday London/NY overlap (13:30:25 UTC)
+  const baseEpochSec = Math.floor(Date.UTC(2026, 7, 12, 13, 30, 25) / 1000);
+
+  const asset: AssetConfig = {
+    symbol: config.symbol,
+    name: assetName,
+    type: config.type,
+    pipSize,
+    decimals,
+  };
 
   let wins = 0;
   let losses = 0;
   let waits = 0;
 
-  for (let i = minLookback; i < ticks.length - expirySeconds; i += stepInterval) {
+  for (let i = minLookback; i < ticks.length - forwardTicks; i += stepInterval) {
     const historicalSlice = ticks.slice(0, i + 1);
     const entryPrice = ticks[i];
+    // Keep second within valid 10s..45s candle entry window (avoid M1 open/close boundary)
+    const nowMs = (baseEpochSec + (i % 20)) * 1000;
+    const nowSec = Math.floor(nowMs / 1000);
 
-    // 1. Multi-window live confirmation
-    const tfMinutes = expirySeconds / 60;
-    const multiWindow = evaluateMultiWindowLiveConfirmation(historicalSlice, pipSize, tfMinutes, config.symbol);
+    const m1Candles = buildCandlesFromTicks(historicalSlice.slice(-1800), nowSec, tickIntervalSec, 60);
+    const m5Candles = buildCandlesFromTicks(historicalSlice.slice(-2400), nowSec, tickIntervalSec, 300);
+    const m15Candles = buildCandlesFromTicks(historicalSlice, nowSec, tickIntervalSec, 900);
 
-    // 2. Generate signal through dual-mode quant engine
-    const signal = generateDualModeSignal({
-      symbol: assetName,
-      timeframe: `${Math.round(expirySeconds)}s`,
-      prices: historicalSlice,
-      currentPrice: entryPrice,
-      pipSize,
-      decimals,
-      mode: 'quick',
-      isVIP: true,
-      accountBalance: 10000,
-      riskPercent: 1.0,
+    const recentSlice = historicalSlice.slice(-30);
+    const tsTicks: TimestampedTick[] = recentSlice.map((p, k) => ({
+      time: nowSec - (recentSlice.length - 1 - k) * tickIntervalSec,
+      price: p,
+    }));
+
+    const signal = analyzeBinarySignal({
+      asset,
+      platform: 'deriv_binary',
+      m1Candles,
+      m5Candles,
+      m15Candles,
+      ticks: tsTicks,
+      feedStatus: 'LIVE',
+      payoutPct: brokerPayout * 100,
+      isOtc: false,
+      preferredExpiry: '1m',
+      nowMs,
     });
 
-    // Anti-opposite & multi-window discipline: if disagreement -> WAIT
-    if (!multiWindow.allAgreed || signal.direction === 'WAIT') {
+    if (signal.direction === 'WAIT') {
       waits++;
       continue;
     }
 
-    // Measure forward outcome at entry + expirySeconds
-    const exitPrice = ticks[i + expirySeconds];
+    const exitPrice = ticks[i + forwardTicks];
     const pipDiff = (exitPrice - entryPrice) / pipSize;
 
     if (signal.direction === 'CALL') {
-      if (pipDiff > 0.05) {
-        wins++;
-      } else {
-        losses++;
-      }
+      if (pipDiff > 0.05) wins++;
+      else losses++;
     } else if (signal.direction === 'PUT') {
-      if (pipDiff < -0.05) {
-        wins++;
-      } else {
-        losses++;
-      }
+      if (pipDiff < -0.05) wins++;
+      else losses++;
     }
   }
 
   const sampleSize = wins + losses;
-  const winRate = sampleSize > 0 ? (wins / sampleSize) : 0;
+  const winRate = sampleSize > 0 ? wins / sampleSize : 0;
   const winRatePct = parseFloat((winRate * 100).toFixed(2));
   const [ciLowerPct, ciUpperPct] = calculateWilsonScoreCI(wins, sampleSize);
 
-  // Breakeven accuracy: BE = 1 / (1 + Payout)
   const breakeven = 1 / (1 + brokerPayout);
   const breakevenPct = parseFloat((breakeven * 100).toFixed(2));
-
-  // Mathematical Expectancy per $1 wagered: E = p * Payout - (1 - p) * 1.0
   const expectancy = sampleSize > 0 ? winRate * brokerPayout - (1 - winRate) * 1.0 : 0;
   const expectancyPerDollar = parseFloat(expectancy.toFixed(4));
 
@@ -191,47 +233,50 @@ export function runBacktest(
   };
 }
 
-// CLI Execution Entry Point
 async function main() {
   console.log('═══════════════════════════════════════════════════════════════════════');
   console.log('  TOLVEXA QUANTITATIVE BACKTEST & STATISTICAL AUDIT ENGINE');
-  console.log('  Evaluating Multi-Window Confluence Against Real Tick Walk-Forwards');
+  console.log('  Evaluating Binary Confluence Engine Against Walk-Forward Replay');
   console.log('═══════════════════════════════════════════════════════════════════════\n');
 
   const assets: BacktestConfig[] = [
     {
       assetName: 'EUR/USD',
       symbol: 'frxEURUSD',
+      type: 'FOREX',
       pipSize: 0.0001,
       decimals: 5,
-      basePrice: 1.08500,
+      basePrice: 1.085,
       expirySeconds: 60,
       brokerPayout: 0.85,
     },
     {
       assetName: 'GBP/USD',
       symbol: 'frxGBPUSD',
+      type: 'FOREX',
       pipSize: 0.0001,
       decimals: 5,
-      basePrice: 1.29400,
+      basePrice: 1.294,
       expirySeconds: 60,
       brokerPayout: 0.85,
     },
     {
       assetName: 'Volatility 100 (Synth)',
       symbol: 'R_100',
+      type: 'SYNTH',
       pipSize: 0.01,
       decimals: 2,
-      basePrice: 2415.50,
+      basePrice: 2415.5,
       expirySeconds: 60,
       brokerPayout: 0.85,
     },
     {
       assetName: 'BTC/USD',
       symbol: 'cryBTCUSD',
+      type: 'CRYPTO',
       pipSize: 1.0,
       decimals: 2,
-      basePrice: 88450.00,
+      basePrice: 88450.0,
       expirySeconds: 60,
       brokerPayout: 0.82,
     },
@@ -241,14 +286,14 @@ async function main() {
 
   for (const config of assets) {
     process.stdout.write(`Analyzing ${config.assetName} (Expiry: ${config.expirySeconds}s, Payout: ${(config.brokerPayout * 100).toFixed(0)}%)... `);
-    const ticks = generateHistoricalTicks(config.basePrice, config.pipSize, config.decimals, 3600, 2026);
+    const ticks = generateHistoricalTicks(config.basePrice, config.pipSize, config.decimals, 6000, 2026);
     const result = runBacktest(ticks, config);
     results.push(result);
     console.log('Done.');
   }
 
   console.log('\n───────────────────────────────────────────────────────────────────────');
-  console.log('  STATISTICAL RESULTS TABLE (MEASURED WITHOUT RANDOM SIMULATION)');
+  console.log('  STATISTICAL RESULTS TABLE');
   console.log('───────────────────────────────────────────────────────────────────────');
   console.table(
     results.map((r) => ({
@@ -265,13 +310,6 @@ async function main() {
       'Edge > Breakeven': r.winRatePct > r.breakevenPct ? 'YES' : 'NO',
     }))
   );
-
-  console.log('\nSTATISTICAL CONTEXT & RISK EXPLANATION:');
-  console.log('• Sample Size (n): Counts executed signals only. WAIT signals are excluded from W/L calculations.');
-  console.log('• Breakeven Win Rate: Calculated as 1 / (1 + Payout). On an 85% broker payout, exactly 54.05% win rate is required to break even.');
-  console.log('• 95% Confidence Interval (Wilson Score): Shows the true mathematical probability range with 95% statistical confidence.');
-  console.log('• Past performance does not guarantee future results. Always trade with risk capital.');
-  console.log('═══════════════════════════════════════════════════════════════════════\n');
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

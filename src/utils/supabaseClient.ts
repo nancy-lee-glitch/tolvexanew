@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { UserProfile } from '../types.ts';
+import type { InstrumentSpec, UserProfile, UserTradingProfile } from '../types.ts';
+import { DEFAULT_INSTRUMENT_SPECS, normalizeSpecKey } from './engines/mt5Engine.ts';
 
 let supabaseInstance: SupabaseClient | null = null;
 let currentConfigKey = '';
@@ -154,6 +155,47 @@ export async function testSupabaseConnection(
   }
 }
 
+export const DEFAULT_USER_TRADING_PROFILE: UserTradingProfile = {
+  accountCurrency: 'USD',
+  accountBalance: 1000,
+  riskPct: 1.0,
+  leverage: 100,
+  brokerSpreadPips: 1.2,
+  contractSizeOverrides: {},
+};
+
+function parseTradingProfileFromRow(dbUser?: any): UserTradingProfile {
+  const allowedCcy = new Set(['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF']);
+  const rawCcy = typeof dbUser?.account_currency === 'string' ? dbUser.account_currency.toUpperCase() : 'USD';
+  const accountCurrency = (allowedCcy.has(rawCcy) ? rawCcy : 'USD') as UserTradingProfile['accountCurrency'];
+  const rawBalance = Number(dbUser?.account_balance);
+  const rawRisk = Number(dbUser?.risk_pct);
+  const rawLeverage = Number(dbUser?.leverage);
+  const rawSpread = Number(dbUser?.broker_spread_pips);
+  const rawOverrides =
+    dbUser?.contract_size_overrides && typeof dbUser.contract_size_overrides === 'object'
+      ? dbUser.contract_size_overrides
+      : {};
+
+  return {
+    accountCurrency,
+    accountBalance: Number.isFinite(rawBalance) && rawBalance >= 0 ? rawBalance : DEFAULT_USER_TRADING_PROFILE.accountBalance,
+    riskPct:
+      Number.isFinite(rawRisk) && rawRisk >= 0.1 && rawRisk <= 3.0
+        ? rawRisk
+        : DEFAULT_USER_TRADING_PROFILE.riskPct,
+    leverage:
+      Number.isFinite(rawLeverage) && rawLeverage >= 1 && rawLeverage <= 2000
+        ? Math.round(rawLeverage)
+        : DEFAULT_USER_TRADING_PROFILE.leverage,
+    brokerSpreadPips:
+      Number.isFinite(rawSpread) && rawSpread >= 0
+        ? rawSpread
+        : DEFAULT_USER_TRADING_PROFILE.brokerSpreadPips,
+    contractSizeOverrides: rawOverrides,
+  };
+}
+
 /**
  * Format a Supabase user into standard UserProfile.
  * Role, VIP status, and credits are strictly derived from the database row.
@@ -200,6 +242,7 @@ export function mapToUserProfile(userObj: any, dbUser?: any): UserProfile {
     vip_days_left: vipDaysLeft,
     vip_hours_left: vipHoursLeft,
     vip_seconds_left: vipSecondsLeft,
+    trading_profile: parseTradingProfileFromRow(dbUser),
   };
 }
 
@@ -627,6 +670,185 @@ export async function fetchBrokerAssetMeta(brokerId: string, symbol: string): Pr
     return resolved;
   } catch {
     return fallback;
+  }
+}
+
+const instrumentSpecCache = new Map<string, { data: Partial<InstrumentSpec>; fetchedAt: number }>();
+
+/**
+ * Fetch admin-editable MT5 contract specifications from public.instrument_specs.
+ * Falls back cleanly to DEFAULT_INSTRUMENT_SPECS when unavailable.
+ */
+export async function fetchInstrumentSpec(symbolOrName: string): Promise<Partial<InstrumentSpec> | undefined> {
+  const normKey = normalizeSpecKey(symbolOrName);
+  const cacheKey = normKey || symbolOrName;
+  const cached = instrumentSpecCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < META_TTL_MS) {
+    return cached.data;
+  }
+
+  const client = getSupabaseClient();
+  const candidates = Array.from(new Set([normKey, symbolOrName].filter(Boolean)));
+  if (!client || candidates.length === 0) {
+    return DEFAULT_INSTRUMENT_SPECS[normKey];
+  }
+
+  try {
+    const { data, error } = await client
+      .from('instrument_specs')
+      .select('symbol, contract_size, min_lot, lot_step, quote_ccy, pip_size, decimals')
+      .in('symbol', candidates)
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      const def = DEFAULT_INSTRUMENT_SPECS[normKey];
+      if (def) {
+        instrumentSpecCache.set(cacheKey, { data: def, fetchedAt: Date.now() });
+      }
+      return def;
+    }
+
+    const resolved: Partial<InstrumentSpec> = {
+      symbol: String(data.symbol || normKey),
+      contractSize: Number(data.contract_size),
+      minLot: Number(data.min_lot),
+      lotStep: Number(data.lot_step),
+      quoteCcy: String(data.quote_ccy || 'USD').toUpperCase(),
+      pipSize: Number(data.pip_size),
+      decimals: Number(data.decimals),
+    };
+    instrumentSpecCache.set(cacheKey, { data: resolved, fetchedAt: Date.now() });
+    return resolved;
+  } catch {
+    return DEFAULT_INSTRUMENT_SPECS[normKey];
+  }
+}
+
+/**
+ * Load authenticated user's saved MT5 risk profile from public.users.
+ */
+export async function fetchUserTradingProfile(): Promise<UserTradingProfile> {
+  const client = getSupabaseClient();
+  if (!client) return { ...DEFAULT_USER_TRADING_PROFILE };
+
+  try {
+    const { data: sessionData } = await client.auth.getSession();
+    const uid = sessionData?.session?.user?.id;
+    if (!uid) return { ...DEFAULT_USER_TRADING_PROFILE };
+
+    const { data, error } = await client
+      .from('users')
+      .select('account_currency, account_balance, risk_pct, leverage, broker_spread_pips, contract_size_overrides')
+      .eq('auth_user_id', uid)
+      .limit(1)
+      .maybeSingle();
+
+    if (error || !data) {
+      return { ...DEFAULT_USER_TRADING_PROFILE };
+    }
+    return parseTradingProfileFromRow(data);
+  } catch {
+    return { ...DEFAULT_USER_TRADING_PROFILE };
+  }
+}
+
+/**
+ * Validate contract_size_overrides JSON structure, bounds, and serialized size (<= 2 KB).
+ */
+export function validateContractSizeOverrides(
+  overrides: unknown
+): { ok: boolean; value?: Record<string, number>; error?: string } {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    return { ok: false, error: 'contract_size_overrides must be a JSON object.' };
+  }
+
+  const serializedBytes = new TextEncoder().encode(JSON.stringify(overrides)).length;
+  if (serializedBytes > 2048) {
+    return { ok: false, error: 'contract_size_overrides exceeds maximum serialized size of 2 KB.' };
+  }
+
+  const entries = Object.entries(overrides as Record<string, unknown>);
+  if (entries.length > 20) {
+    return { ok: false, error: 'contract_size_overrides can have at most 20 entries.' };
+  }
+
+  const normalized: Record<string, number> = {};
+  for (const [key, rawVal] of entries) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 20) {
+      return { ok: false, error: 'Each contract_size_overrides key must be 1 to 20 characters.' };
+    }
+    if (typeof rawVal !== 'number' || !Number.isFinite(rawVal)) {
+      return { ok: false, error: 'Each contract_size_overrides value must be a number.' };
+    }
+    if (rawVal <= 0 || rawVal > 10000000) {
+      return { ok: false, error: 'Each contract_size_overrides value must be > 0 and <= 10000000.' };
+    }
+    normalized[key] = rawVal;
+  }
+
+  return { ok: true, value: normalized };
+}
+
+/**
+ * Persist MT5 trading risk settings via SECURITY DEFINER RPC `update_trading_profile`.
+ */
+export async function saveUserTradingProfile(
+  updates: Partial<UserTradingProfile>
+): Promise<{ success: boolean; profile?: UserTradingProfile; warning?: string; message: string }> {
+  const client = getSupabaseClient();
+  if (!client) {
+    return { success: false, message: 'Database client not connected.' };
+  }
+
+  let validatedOverrides: Record<string, number> | null = null;
+  if (updates.contractSizeOverrides !== undefined) {
+    const check = validateContractSizeOverrides(updates.contractSizeOverrides);
+    if (!check.ok || !check.value) {
+      return { success: false, message: check.error || 'Invalid contract_size_overrides.' };
+    }
+    validatedOverrides = check.value;
+  }
+
+  let riskWarning: string | undefined;
+  let safeRisk = updates.riskPct;
+  if (typeof safeRisk === 'number') {
+    if (safeRisk > 3.0) {
+      safeRisk = 3.0;
+      riskWarning = 'Risk % per trade capped at 3.0% maximum.';
+    } else if (safeRisk > 2.0) {
+      riskWarning = `High risk warning: ${safeRisk.toFixed(1)}% exceeds conservative 1%–2% sizing.`;
+    } else if (safeRisk < 0.1) {
+      safeRisk = 0.1;
+    }
+  }
+
+  try {
+    const { data, error } = await client.rpc('update_trading_profile', {
+      p_account_currency: updates.accountCurrency ?? null,
+      p_account_balance: typeof updates.accountBalance === 'number' ? updates.accountBalance : null,
+      p_risk_pct: typeof safeRisk === 'number' ? safeRisk : null,
+      p_leverage: typeof updates.leverage === 'number' ? Math.round(updates.leverage) : null,
+      p_broker_spread_pips:
+        typeof updates.brokerSpreadPips === 'number' ? updates.brokerSpreadPips : null,
+      p_contract_size_overrides: validatedOverrides,
+    });
+
+    if (error) {
+      return { success: false, message: error.message };
+    }
+    if (!data?.ok) {
+      return { success: false, message: data?.error || 'Failed to update trading profile.' };
+    }
+
+    return {
+      success: true,
+      profile: parseTradingProfileFromRow(data),
+      warning: riskWarning,
+      message: riskWarning || 'Trading risk profile saved.',
+    };
+  } catch (err: any) {
+    return { success: false, message: err?.message || 'Unable to save trading profile.' };
   }
 }
 

@@ -3,12 +3,22 @@
  * Run with: npx tsx scripts/test-engines.ts
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   analyzeBinarySignal,
   calculateBreakEvenWinRate,
   formatBreakEvenStatement,
   mapStrength,
 } from '../src/utils/engines/binaryEngine.ts';
+import {
+  analyzeMT5Signal,
+  calculateMT5PositionSize,
+  computeMT5KeyLevels,
+  resolveInstrumentSpec,
+  resolveQuoteToAccountRate,
+} from '../src/utils/engines/mt5Engine.ts';
+import { validateContractSizeOverrides } from '../src/utils/supabaseClient.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
 import type { Candle, MarketEventItem } from '../src/utils/engines/types.ts';
@@ -553,16 +563,601 @@ async function runSignalLogValidationTests() {
   });
   assert(
     validWaitNoAuth.statusCode === 401,
-    `Valid payload (ignoring client created_at) passes schema checks and hits 401 auth gate (got ${validWaitNoAuth.statusCode})`
+    `Valid Binary payload (ignoring client created_at) passes schema checks and hits 401 auth gate (got ${validWaitNoAuth.statusCode})`
+  );
+
+  // Valid MT5 BUY payload passes shared contract Zod validation and reaches 401 auth check
+  const validMt5BuyNoAuth = await invoke({
+    asset: 'frxEURUSD',
+    timeframe: 'H1',
+    direction: 'BUY',
+    entry_price: 1.0835,
+    stop_loss: 1.0815,
+    take_profit_1: 1.0865,
+    take_profit_2: 1.0885,
+    engine: 'mt5_v1',
+    profile: 'MT5',
+    platform: 'mt5',
+    expiry: 'H1',
+    strength: 'High',
+    feed_source: 'wss://api.derivws.com/trading/v1/options/ws/public',
+    valid_until: new Date(PRIME_FX_NOW_MS + 15 * 60_000).toISOString(),
+    inputs_snapshot: { atrH1: 0.0018, lotSize: 0.5 },
+  });
+  assert(
+    validMt5BuyNoAuth.statusCode === 401,
+    `Valid MT5 BUY shared contract passes schema validation and hits 401 auth gate (got ${validMt5BuyNoAuth.statusCode})`
   );
 }
 
-runSignalLogValidationTests().then(() => {
-  console.log('\n------------------------------------------------------------');
-  console.log(`Binary Engine Results: ${passed}/${total} tests passed`);
-  console.log('------------------------------------------------------------\n');
+// ============================================================
+// STAGE 3 PART 2: MT5 ENGINE, SIZING & KEY LEVEL TESTS
+// ============================================================
 
-  if (passed !== total) {
-    process.exit(1);
+const USDJPY: AssetConfig = {
+  symbol: 'frxUSDJPY',
+  name: 'USD/JPY',
+  type: 'FOREX',
+  decimals: 3,
+  pipSize: 0.01,
+};
+
+const EURGBP: AssetConfig = {
+  symbol: 'frxEURGBP',
+  name: 'EUR/GBP',
+  type: 'FOREX',
+  decimals: 5,
+  pipSize: 0.0001,
+};
+
+const XAUUSD: AssetConfig = {
+  symbol: 'frxXAUUSD',
+  name: 'XAU/USD',
+  type: 'COMMODITY',
+  decimals: 2,
+  pipSize: 0.01,
+};
+
+function makeBullishFxBundle(params?: {
+  nowSec?: number;
+  endPrice?: number;
+  swingDropDip?: number;
+  swingDipIndexFromEnd?: number;
+  pdhLevel?: number;
+  includeSwingHighBlocker?: number;
+}) {
+  const nowSec = params?.nowSec ?? PRIME_FX_NOW_SEC;
+  const endPrice = params?.endPrice ?? 1.0835;
+
+  // D1: clean uptrend ending around endPrice - 0.0005, prev day high clear above
+  const d1 = makeCandles({
+    count: 25,
+    startPrice: endPrice - 0.024,
+    step: 0.001,
+    stepSec: 86400,
+    endEpochSec: nowSec,
+    spreadPips: 12,
+    pipSize: 0.0001,
+  });
+  if (params?.pdhLevel !== undefined && d1.length >= 2) {
+    d1[d1.length - 2] = {
+      ...d1[d1.length - 2],
+      high: params.pdhLevel,
+      close: Math.min(d1[d1.length - 2].close, params.pdhLevel - 0.0005),
+    };
+  } else if (d1.length >= 2) {
+    // Keep prior day high & Pivot R1 comfortably clear (> 45 pips above entry), Pivot PP below entry
+    d1[d1.length - 2] = {
+      time: d1[d1.length - 2].time,
+      open: endPrice - 0.0040,
+      low: endPrice - 0.0110,
+      high: endPrice + 0.0048,
+      close: endPrice - 0.0045,
+    };
   }
-});
+
+  // H4: bullish alignment
+  const h4 = makeCandles({
+    count: 30,
+    startPrice: endPrice - 0.012,
+    step: 0.0004,
+    stepSec: 14400,
+    endEpochSec: nowSec,
+    spreadPips: 6,
+    pipSize: 0.0001,
+  });
+
+  // H1: steady uptrend with ATR ~ 10 pips and fractal swing low cleanly ~17 pips below entry
+  const h1Count = 40;
+  const h1: Candle[] = [];
+  let px = endPrice - 0.0050;
+  const stepPerH1 = (endPrice - px) / h1Count;
+  const firstH1 = nowSec - (h1Count - 1) * 3600;
+  for (let i = 0; i < h1Count; i++) {
+    const open = px;
+    const close = i === h1Count - 1 ? endPrice : px + stepPerH1;
+    let high = Math.max(open, close) + 0.0004;
+    let low = Math.min(open, close) - 0.0004;
+
+    if (params?.swingDropDip && i === h1Count - (params.swingDipIndexFromEnd ?? 6)) {
+      low = endPrice - params.swingDropDip;
+    } else if (!params?.swingDropDip && i === h1Count - 5) {
+      // Fractal swing low ~17 pips below current entry (strictly lower than i-2, i-1, i+1, i+2)
+      low = endPrice - 0.0017;
+    }
+
+    if (params?.includeSwingHighBlocker && i === h1Count - 4) {
+      high = params.includeSwingHighBlocker;
+    }
+
+    h1.push({
+      time: firstH1 + i * 3600,
+      open: parseFloat(open.toFixed(5)),
+      high: parseFloat(high.toFixed(5)),
+      low: parseFloat(low.toFixed(5)),
+      close: parseFloat(close.toFixed(5)),
+    });
+    px = close;
+  }
+
+  const m15 = makeCandles({
+    count: 40,
+    startPrice: endPrice - 0.0032,
+    step: 0.00008,
+    stepSec: 900,
+    endEpochSec: nowSec,
+    spreadPips: 2.5,
+    pipSize: 0.0001,
+  });
+  m15[m15.length - 1] = {
+    ...m15[m15.length - 1],
+    close: endPrice,
+    high: endPrice + 0.0002,
+    low: endPrice - 0.0002,
+  };
+
+  const m5 = makeCandles({
+    count: 40,
+    startPrice: endPrice - 0.0020,
+    step: 0.00005,
+    stepSec: 300,
+    endEpochSec: nowSec,
+    spreadPips: 1.5,
+    pipSize: 0.0001,
+  });
+  m5[m5.length - 1] = {
+    ...m5[m5.length - 1],
+    close: endPrice,
+    high: endPrice + 0.00015,
+    low: endPrice - 0.00015,
+  };
+
+  return { d1, h4, h1, m15, m5 };
+}
+
+function runMt5Tests() {
+  console.log('\n============================================================');
+  console.log('  TICKVERE STAGE 3 PART 2: MT5 ENGINE & SIZING TEST SUITE');
+  console.log('============================================================\n');
+
+  // 8. Position Sizing & Conversion Math + Small Account Guard
+  console.log('8. MT5 Position Sizing, Quote Conversion & Contract Overrides:');
+  {
+    const eurSpec = resolveInstrumentSpec(EURUSD);
+    const eurSizing = calculateMT5PositionSize({
+      accountBalance: 10000,
+      riskPct: 1.0, // $100 risk
+      slDistancePrice: 0.0020, // 20 pips
+      spec: eurSpec,
+      quoteToAccountRate: 1.0,
+      accountCurrency: 'USD',
+    });
+    assert(eurSizing.lotSize === 0.5, `EUR/USD $10k @1% / 20pips = 0.50 lots (got ${eurSizing.lotSize})`);
+
+    const jpySpec = resolveInstrumentSpec(USDJPY);
+    const jpyRate = resolveQuoteToAccountRate({
+      quoteCcy: jpySpec.quoteCcy,
+      accountCurrency: 'USD',
+      asset: USDJPY,
+      entryPrice: 150.0,
+    });
+    const jpySizing = calculateMT5PositionSize({
+      accountBalance: 10000,
+      riskPct: 1.0, // $100 risk
+      slDistancePrice: 0.30, // 30 pips at USDJPY=150 -> $200/lot risk
+      spec: jpySpec,
+      quoteToAccountRate: jpyRate || 0,
+      accountCurrency: 'USD',
+    });
+    assert(
+      jpyRate !== null && Math.abs(jpyRate - 1 / 150) < 1e-6,
+      `USD/JPY quote-to-USD conversion divides by USDJPY=150 (got ${jpyRate})`
+    );
+    assert(jpySizing.lotSize === 0.5, `USD/JPY $10k @1% / 30pips @150 = 0.50 lots (got ${jpySizing.lotSize})`);
+
+    const xauSpec = resolveInstrumentSpec(XAUUSD);
+    const xauSizing = calculateMT5PositionSize({
+      accountBalance: 10000,
+      riskPct: 1.0,
+      slDistancePrice: 5.0,
+      spec: xauSpec,
+      quoteToAccountRate: 1.0,
+      accountCurrency: 'USD',
+    });
+    assert(xauSizing.lotSize === 0.2, `XAU/USD (contractSize=100) $10k @1% / $5 SL = 0.20 lots (got ${xauSizing.lotSize})`);
+
+    const xauOverrideSpec = resolveInstrumentSpec(XAUUSD, undefined, 10);
+    const xauOverrideSizing = calculateMT5PositionSize({
+      accountBalance: 10000,
+      riskPct: 1.0,
+      slDistancePrice: 5.0,
+      spec: xauOverrideSpec,
+      quoteToAccountRate: 1.0,
+      accountCurrency: 'USD',
+    });
+    assert(
+      xauOverrideSizing.lotSize === 2.0,
+      `User contractSizeOverride (100 -> 10) scales XAU/USD lot 10x to 2.00 lots (got ${xauOverrideSizing.lotSize})`
+    );
+
+    const gbpSpec = resolveInstrumentSpec(EURGBP);
+    const gbpRate = resolveQuoteToAccountRate({
+      quoteCcy: 'GBP',
+      accountCurrency: 'USD',
+      asset: EURGBP,
+      entryPrice: 0.85,
+      conversionRates: { GBPUSD: 1.28 },
+    });
+    const gbpSizing = calculateMT5PositionSize({
+      accountBalance: 10000,
+      riskPct: 1.0,
+      slDistancePrice: 0.0020,
+      spec: gbpSpec,
+      quoteToAccountRate: gbpRate || 0,
+      accountCurrency: 'USD',
+    });
+    // 100 / (0.0020 * 100000 * 1.28) = 100 / 256 = 0.390625 -> floored down to 0.39
+    assert(
+      gbpSizing.lotSize === 0.39,
+      `EUR/GBP w/ GBPUSD=1.28 floors down to 0.39 lots (got ${gbpSizing.lotSize})`
+    );
+
+    // Small account < min_lot must return 0 lots (NEVER forced to 0.01)
+    const smallAcct = calculateMT5PositionSize({
+      accountBalance: 10,
+      riskPct: 1.0, // $0.10 risk
+      slDistancePrice: 0.0020,
+      spec: eurSpec,
+      quoteToAccountRate: 1.0,
+      accountCurrency: 'USD',
+    });
+    assert(smallAcct.lotSize === 0 && smallAcct.tooSmallForMinLot, `Small $10 account returns 0 lots (got ${smallAcct.lotSize})`);
+    assert(
+      Boolean(smallAcct.warning?.includes('Your account is too small to take this trade at your chosen risk')),
+      `Small account emits explicit warning: "${smallAcct.warning}"`
+    );
+  }
+
+  // 9. Actionable MT5 BUY + Key Levels + Shared Contract + Trade Management
+  console.log('\n9. Actionable MT5 BUY Setup & Complete Shared Contract:');
+  {
+    const bundle = makeBullishFxBundle();
+    const kl = computeMT5KeyLevels(bundle.d1, bundle.h1, bundle.m15, 'H1', EURUSD, 1.0835);
+    assert(kl.pdh !== null && kl.pdl !== null && kl.dailyPivot !== null, 'Computes PDH, PDL & Daily Pivot from D1');
+    assert(kl.pwh !== null && kl.pwl !== null, 'Computes PWH & PWL from prior week D1 bars');
+    assert(kl.roundNumbers.length > 0, 'Computes psychological round numbers');
+
+    const res = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      platformName: 'MetaTrader 5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      structureTimeframe: 'H1',
+      feedStatus: 'LIVE',
+      feedSource: 'wss://api.derivws.com/trading/v1/options/ws/public',
+      isOtc: false,
+      marketEvents: [],
+      accountCurrency: 'USD',
+      accountBalance: 10000,
+      riskPct: 1.0,
+      leverage: 100,
+      spreadPips: 1.2,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+
+    assert(res.direction === 'BUY', `Bullish D1/H4/H1/M5 produces BUY (got ${res.direction}, why=${res.whyNotTrade || 'ok'})`);
+    assert(res.engine === 'mt5_v1' && res.profile === 'MT5', 'Shared contract sets engine="mt5_v1", profile="MT5"');
+    assert(res.stopLoss !== null && res.stopLoss < res.entryPrice, 'Places structural stop-loss below BUY entry');
+    assert(res.takeProfit1 !== null && res.takeProfit2 !== null && res.takeProfit2 >= res.takeProfit1, 'Computes TP1 and TP2 >= TP1');
+    assert((res.rewardRiskTp1 || 0) >= 1.5, `Enforces TP1 R:R >= 1.5 (got 1:${res.rewardRiskTp1})`);
+    assert(res.lotSize > 0 && res.riskMoney === 100, `Computes position size & $100 risk (lot=${res.lotSize})`);
+    assert(res.validityCandles === 3 && res.validityMinutes === 15, 'Sets 3 × M5 (15 min) validity window');
+    assert(
+      res.tradeManagementNote.includes('break-even') && res.tradeManagementNote.includes('partial profit'),
+      'Includes 1R break-even & TP1 partial profit management note'
+    );
+    assert(res.copyOrderText.includes('BUY') && res.copyOrderText.includes('SL:') && res.copyOrderText.includes('TP1:'), 'Generates one-tap copyOrderText');
+    assert(!JSON.stringify(res).toLowerCase().includes('winprobability'), 'No win probability field or percentage emitted');
+  }
+
+  // 10. DELAYED tick status allowed for MT5 (Rule 3) vs MARKET_CLOSED blocked
+  console.log('\n10. Rule 3: DELAYED Feed Status Does Not Block MT5 Candle Scan:');
+  {
+    const bundle = makeBullishFxBundle();
+    const delayedMt5 = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'DELAYED',
+      accountCurrency: 'USD',
+      accountBalance: 10000,
+      riskPct: 1.0,
+      spreadPips: 1.2,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      delayedMt5.direction === 'BUY',
+      `DELAYED ticks still allow MT5 candle setup (got ${delayedMt5.direction})`
+    );
+
+    const closedMt5 = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'MARKET_CLOSED',
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(closedMt5.direction === 'WAIT', 'MARKET_CLOSED blocks MT5 execution');
+  }
+
+  // 11. Wide Stop (> 3×ATR) & Poor R:R (< 1.5) & Spread & News Filters -> WAIT
+  console.log('\n11. Structural Stop > 3×ATR, R:R < 1.5, Spread >= 15% SL & ±30m News:');
+  {
+    // Wide structural swing (> 3x ATR) -> WAIT "Stop would be too wide"
+    const wideBundle = makeBullishFxBundle({ swingDropDip: 0.0080 });
+    const wideRes = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: wideBundle.d1,
+      h4Candles: wideBundle.h4,
+      h1Candles: wideBundle.h1,
+      m15Candles: wideBundle.m15,
+      m5Candles: wideBundle.m5,
+      feedStatus: 'LIVE',
+      accountBalance: 10000,
+      riskPct: 1.0,
+      spreadPips: 1.2,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      wideRes.direction === 'WAIT' && Boolean(wideRes.whyNotTrade?.includes('Stop would be too wide')),
+      `Wide structural stop (> 3×ATR) emits WAIT "Stop would be too wide" (got "${wideRes.whyNotTrade}")`
+    );
+
+    // Nearby opposing swing high -> R:R < 1.5 -> WAIT
+    const tightTargetBundle = makeBullishFxBundle({ includeSwingHighBlocker: 1.0853 });
+    const rrRes = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: tightTargetBundle.d1,
+      h4Candles: tightTargetBundle.h4,
+      h1Candles: tightTargetBundle.h1,
+      m15Candles: tightTargetBundle.m15,
+      m5Candles: tightTargetBundle.m5,
+      feedStatus: 'LIVE',
+      accountBalance: 10000,
+      riskPct: 1.0,
+      spreadPips: 1.2,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      rrRes.direction === 'WAIT' && Boolean(rrRes.whyNotTrade?.includes('below 1.5')),
+      `Opposing key level yielding R:R < 1.5 forces WAIT (got ${rrRes.direction}: "${rrRes.whyNotTrade}")`
+    );
+
+    // Excessive spread >= 15% of SL distance -> WAIT
+    const normalBundle = makeBullishFxBundle();
+    const wideSpreadRes = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: normalBundle.d1,
+      h4Candles: normalBundle.h4,
+      h1Candles: normalBundle.h1,
+      m15Candles: normalBundle.m15,
+      m5Candles: normalBundle.m5,
+      feedStatus: 'LIVE',
+      accountBalance: 10000,
+      riskPct: 1.0,
+      spreadPips: 6.0, // > 15% of ~24 pip SL
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      wideSpreadRes.direction === 'WAIT' && Boolean(wideSpreadRes.whyNotTrade?.includes('15%')),
+      `Spread >= 15% of SL distance forces WAIT (got "${wideSpreadRes.whyNotTrade}")`
+    );
+
+    // ±30m High-impact news blocks FX
+    const news30Res = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: normalBundle.d1,
+      h4Candles: normalBundle.h4,
+      h1Candles: normalBundle.h1,
+      m15Candles: normalBundle.m15,
+      m5Candles: normalBundle.m5,
+      feedStatus: 'LIVE',
+      marketEvents: [
+        {
+          starts_at: new Date(PRIME_FX_NOW_MS + 25 * 60_000).toISOString(),
+          currency: 'EUR',
+          title: 'ECB Rate Decision',
+          impact: 'HIGH',
+        },
+      ],
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      news30Res.direction === 'WAIT' && Boolean(news30Res.whyNotTrade?.includes('ECB Rate Decision')),
+      'HIGH impact EUR news +25 min away blocks MT5 EUR/USD'
+    );
+  }
+
+  // 12. Insufficient Real Candles, Risk > 3% Cap, Small Account Integrated, Synthetics Cap
+  console.log('\n12. Insufficient Candles, Risk > 3% Ceiling & Synthetic Medium Cap:');
+  {
+    const bundle = makeBullishFxBundle();
+
+    const emptyCandlesRes = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: [],
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'LIVE',
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      emptyCandlesRes.direction === 'WAIT' && Boolean(emptyCandlesRes.whyNotTrade?.includes('Insufficient')),
+      'Missing real candles returns WAIT without fabricating OHLC bars'
+    );
+
+    const tinyBalRes = analyzeMT5Signal({
+      asset: EURUSD,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'LIVE',
+      accountBalance: 10,
+      riskPct: 5.0, // exceeds 3% cap
+      spreadPips: 1.2,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(tinyBalRes.lotSize === 0, `End-to-end $10 account outputs 0 lots (got ${tinyBalRes.lotSize})`);
+    assert(
+      Boolean(tinyBalRes.accountSizingWarning?.includes('Your account is too small')),
+      'End-to-end $10 account emits explicit account-too-small message'
+    );
+    assert(
+      Boolean(tinyBalRes.riskWarning?.includes('3%') || tinyBalRes.riskWarning?.includes('3.0%')),
+      'Risk > 3% is capped and emits explicit riskWarning'
+    );
+
+    // Synthetics cap High -> Medium even under full bullish alignment
+    const synthD1 = makeCandles({ count: 25, startPrice: 2100, step: 15, stepSec: 86400, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 150, pipSize: 0.01 });
+    const synthH4 = makeCandles({ count: 30, startPrice: 2300, step: 6, stepSec: 14400, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 80, pipSize: 0.01 });
+    const synthH1 = makeCandles({ count: 40, startPrice: 2420, step: 1.5, stepSec: 3600, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 50, pipSize: 0.01 });
+    const sLast = synthH1[synthH1.length - 1].close;
+    const synthM15 = makeCandles({ count: 40, startPrice: sLast - 16, step: 0.4, stepSec: 900, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 30, pipSize: 0.01 });
+    const synthM5 = makeCandles({ count: 40, startPrice: sLast - 8, step: 0.2, stepSec: 300, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 20, pipSize: 0.01 });
+    if (synthD1.length >= 2) {
+      synthD1[synthD1.length - 2] = { ...synthD1[synthD1.length - 2], high: sLast + 120, low: sLast - 120, close: sLast - 40 };
+    }
+    const synthMt5Res = analyzeMT5Signal({
+      asset: R100,
+      platform: 'mt5',
+      d1Candles: synthD1,
+      h4Candles: synthH4,
+      h1Candles: synthH1,
+      m15Candles: synthM15,
+      m5Candles: synthM5,
+      feedStatus: 'LIVE',
+      accountBalance: 5000,
+      riskPct: 1.0,
+      spreadPips: 0.5,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      synthMt5Res.strength !== 'High',
+      `MT5 synthetic setup never emits High strength (got ${synthMt5Res.strength})`
+    );
+  }
+
+  // 13. Stage 3.3 contract_size_overrides Validation & Migration 009 Checks
+  console.log('\n13. Stage 3.3 contract_size_overrides Validation:');
+  {
+    // Valid payloads (empty, typical, and boundary 20 keys with 20-char keys & max value 10000000)
+    const emptyOk = validateContractSizeOverrides({});
+    assert(emptyOk.ok, 'Accepts empty {} contract_size_overrides object');
+
+    const boundaryValid: Record<string, number> = {};
+    for (let i = 1; i <= 20; i++) {
+      boundaryValid[`SYMBOL_${String(i).padStart(12, '0')}X`.slice(0, 20)] = i === 20 ? 10000000 : i * 10;
+    }
+    const maxBoundaryOk = validateContractSizeOverrides(boundaryValid);
+    assert(maxBoundaryOk.ok, 'Accepts 20 keys of <= 20 chars with values in (0, 10000000]');
+
+    // Non-object rejections
+    assert(!validateContractSizeOverrides([]).ok, 'Rejects array for contract_size_overrides');
+    assert(!validateContractSizeOverrides('{"XAU/USD":100}').ok, 'Rejects string for contract_size_overrides');
+    assert(!validateContractSizeOverrides(null).ok, 'Rejects null for contract_size_overrides');
+
+    // > 20 keys
+    const tooManyKeys: Record<string, number> = { ...boundaryValid, EXTRA_21: 100 };
+    const tooManyRes = validateContractSizeOverrides(tooManyKeys);
+    assert(!tooManyRes.ok && Boolean(tooManyRes.error?.includes('20')), `Rejects > 20 keys (${tooManyRes.error || ''})`);
+
+    // Key > 20 chars or empty
+    const longKeyRes = validateContractSizeOverrides({ ['A'.repeat(21)]: 100 });
+    assert(!longKeyRes.ok && Boolean(longKeyRes.error?.includes('20')), 'Rejects key longer than 20 characters');
+    const emptyKeyRes = validateContractSizeOverrides({ '': 100 });
+    assert(!emptyKeyRes.ok, 'Rejects empty key');
+
+    // Value <= 0, > 10000000, or non-number
+    const zeroValRes = validateContractSizeOverrides({ 'XAU/USD': 0 });
+    assert(!zeroValRes.ok, 'Rejects value <= 0 (0)');
+    const negValRes = validateContractSizeOverrides({ 'XAU/USD': -10 });
+    assert(!negValRes.ok, 'Rejects negative value (-10)');
+    const hugeValRes = validateContractSizeOverrides({ 'XAU/USD': 10000001 });
+    assert(!hugeValRes.ok, 'Rejects value > 10000000');
+    const strValRes = validateContractSizeOverrides({ 'XAU/USD': '100' });
+    assert(!strValRes.ok, 'Rejects non-numeric value ("100")');
+
+    // Serialized JSON > 2 KB
+    const over2KbRes = validateContractSizeOverrides({ ['K'.repeat(2060)]: 100 });
+    assert(!over2KbRes.ok && Boolean(over2KbRes.error?.includes('2 KB')), 'Rejects serialized JSON exceeding 2 KB');
+
+    // Verify SQL migration 009 file enforces matching bounds in update_trading_profile
+    const migrationSql = readFileSync(
+      resolve(process.cwd(), 'supabase/migrations/009_profile_validation.sql'),
+      'utf8'
+    );
+    assert(
+      migrationSql.includes('CREATE OR REPLACE FUNCTION public.update_trading_profile') &&
+        migrationSql.includes('octet_length(v_overrides::TEXT) > 2048') &&
+        migrationSql.includes('jsonb_object_keys(v_overrides)) > 20') &&
+        migrationSql.includes('char_length(v_key) > 20') &&
+        migrationSql.includes("jsonb_typeof(v_val) <> 'number'") &&
+        migrationSql.includes('v_val_num <= 0 OR v_val_num > 10000000'),
+      'supabase/migrations/009_profile_validation.sql enforces object, 2KB, 20-key, 20-char key, and (0, 10000000] number checks'
+    );
+  }
+}
+
+runSignalLogValidationTests()
+  .then(() => {
+    runMt5Tests();
+    console.log('\n------------------------------------------------------------');
+    console.log(`Combined Binary + MT5 Results: ${passed}/${total} tests passed`);
+    console.log('------------------------------------------------------------\n');
+
+    if (passed !== total) {
+      process.exit(1);
+    }
+  });

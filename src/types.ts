@@ -146,19 +146,55 @@ export interface EntryZone {
   max: number;
 }
 
+export interface InstrumentSpec {
+  symbol: string;
+  contractSize: number;
+  minLot: number;
+  lotStep: number;
+  quoteCcy: string;
+  pipSize: number;
+  decimals: number;
+}
+
+export interface UserTradingProfile {
+  accountCurrency: 'USD' | 'EUR' | 'GBP' | 'JPY' | 'AUD' | 'CAD' | 'CHF';
+  accountBalance: number;
+  riskPct: number;
+  leverage: number;
+  brokerSpreadPips: number;
+  contractSizeOverrides: Record<string, number>;
+}
+
 export interface MT5TradeParameters {
   symbol: string;
   orderType: 'BUY' | 'SELL';
+  orderKind: 'MARKET' | 'LIMIT';
   entryPrice: number;
+  entryZone?: EntryZone;
   stopLossPrice: number;
   stopLossPips: number;
   takeProfit1Price: number;
   takeProfit1Pips: number;
   takeProfit2Price: number;
   takeProfit2Pips: number;
+  rewardRiskTp1: number;
+  rewardRiskTp2: number;
   riskRewardRatio: string;
   recommendedLot: number;
   accountRiskAmount: number;
+  accountCurrency?: string;
+  contractSizeUsed?: number;
+  quoteCcy?: string;
+  quoteToAccountRate?: number;
+  spreadUsedPips?: number;
+  leverageUsed?: number;
+  validityCandles?: number;
+  validityWindowDesc?: string;
+  validUntil?: string;
+  invalidationLevel?: number;
+  invalidationRule?: string;
+  sessionNote?: string;
+  tradeManagementNote?: string;
   formattedText: string;
   accountSizingWarning?: string;
 }
@@ -171,6 +207,7 @@ export interface SignalData {
   symbol?: string;
   timeframe: string;
   direction: 'CALL' | 'PUT' | 'BUY' | 'SELL' | 'WAIT';
+  orderKind?: 'MARKET' | 'LIMIT';
   strength?: SignalStrength;
   rawScore?: number;
   confidence?: number;
@@ -179,6 +216,7 @@ export interface SignalData {
   generatedAt: number;
   createdAt?: string;
   validUntil?: string;
+  validityWindowDesc?: string;
   enterWithinSeconds?: number;
   expiry?: BinaryExpiryWindow | string;
   reasons?: string[];
@@ -209,6 +247,7 @@ export interface SignalData {
   invalidationReason?: string;
   plainLanguageReason?: string;
   riskNote?: string;
+  tradeManagementNote?: string;
   shortHoldGuidance?: string;
   peakMomentumWindow?: string;
   priceDistribution?: PriceDistributionProxy;
@@ -391,6 +430,7 @@ export interface UserProfile {
   vip_days_left: number;
   vip_hours_left: number;
   vip_seconds_left: number;
+  trading_profile?: UserTradingProfile;
 }
 
 export interface BlogArticle {

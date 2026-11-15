@@ -1,6 +1,10 @@
 import React, { useState } from 'react';
-import type { UserProfile, AuthModalMode } from '../types.ts';
+import type { UserProfile, AuthModalMode, UserTradingProfile } from '../types.ts';
 import {
+  DEFAULT_USER_TRADING_PROFILE,
+  fetchUserTradingProfile,
+  saveUserTradingProfile,
+  validateContractSizeOverrides,
   signUpWithSupabase,
   signInWithSupabase,
   signOutSupabase,
@@ -86,6 +90,52 @@ export function AuthModal({
   const [turnstileToken, setTurnstileToken] = useState('');
   const [emailConfirmationRequired, setEmailConfirmationRequired] = useState(false);
   const turnstileContainerRef = React.useRef<HTMLDivElement>(null);
+
+  // MT5 Risk & Account Profile state
+  const [acctCurrency, setAcctCurrency] = useState<UserTradingProfile['accountCurrency']>(
+    user?.trading_profile?.accountCurrency || DEFAULT_USER_TRADING_PROFILE.accountCurrency
+  );
+  const [acctBalance, setAcctBalance] = useState<string>(
+    String(user?.trading_profile?.accountBalance ?? DEFAULT_USER_TRADING_PROFILE.accountBalance)
+  );
+  const [riskPctInput, setRiskPctInput] = useState<string>(
+    String(user?.trading_profile?.riskPct ?? DEFAULT_USER_TRADING_PROFILE.riskPct)
+  );
+  const [leverageInput, setLeverageInput] = useState<string>(
+    String(user?.trading_profile?.leverage ?? DEFAULT_USER_TRADING_PROFILE.leverage)
+  );
+  const [spreadInput, setSpreadInput] = useState<string>(
+    String(user?.trading_profile?.brokerSpreadPips ?? DEFAULT_USER_TRADING_PROFILE.brokerSpreadPips)
+  );
+  const [contractOverrides, setContractOverrides] = useState<Record<string, number>>(
+    user?.trading_profile?.contractSizeOverrides || {}
+  );
+  const [overrideSymInput, setOverrideSymInput] = useState<string>('XAU/USD');
+  const [overrideSizeInput, setOverrideSizeInput] = useState<string>('');
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  React.useEffect(() => {
+    if (!user || currentMode !== 'profile') return;
+    if (user.trading_profile) {
+      setAcctCurrency(user.trading_profile.accountCurrency);
+      setAcctBalance(String(user.trading_profile.accountBalance));
+      setRiskPctInput(String(user.trading_profile.riskPct));
+      setLeverageInput(String(user.trading_profile.leverage));
+      setSpreadInput(String(user.trading_profile.brokerSpreadPips));
+      setContractOverrides(user.trading_profile.contractSizeOverrides || {});
+      return;
+    }
+    fetchUserTradingProfile()
+      .then((tp) => {
+        setAcctCurrency(tp.accountCurrency);
+        setAcctBalance(String(tp.accountBalance));
+        setRiskPctInput(String(tp.riskPct));
+        setLeverageInput(String(tp.leverage));
+        setSpreadInput(String(tp.brokerSpreadPips));
+        setContractOverrides(tp.contractSizeOverrides || {});
+      })
+      .catch(() => {});
+  }, [user?.id, currentMode]);
 
   const brokersSettings = getBrokersSettings();
 
@@ -346,9 +396,91 @@ export function AuthModal({
     }
   };
 
+  const handleSaveTradingProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) return;
+
+    const parsedBal = Number(acctBalance);
+    const parsedRisk = Number(riskPctInput);
+    const parsedLev = Number(leverageInput);
+    const parsedSpread = Number(spreadInput);
+
+    if (!Number.isFinite(parsedBal) || parsedBal < 0) {
+      setErrorMessage('Account balance must be 0 or greater.');
+      return;
+    }
+    if (!Number.isFinite(parsedRisk) || parsedRisk < 0.1) {
+      setErrorMessage('Risk % per trade must be at least 0.1%.');
+      return;
+    }
+    if (parsedRisk > 3.0) {
+      setErrorMessage('Maximum allowed risk per trade is 3.0%. Reduce Risk % to 3.0% or lower.');
+      return;
+    }
+
+    const nextOverrides = { ...contractOverrides };
+    const trimmedSym = overrideSymInput.trim().toUpperCase();
+    const parsedOverrideVal = Number(overrideSizeInput);
+    if (trimmedSym && overrideSizeInput.trim() !== '') {
+      if (!Number.isFinite(parsedOverrideVal)) {
+        setErrorMessage('Each contract_size_overrides value must be a number.');
+        return;
+      }
+      nextOverrides[trimmedSym] = parsedOverrideVal;
+    }
+
+    const overrideValidation = validateContractSizeOverrides(nextOverrides);
+    if (!overrideValidation.ok || !overrideValidation.value) {
+      setErrorMessage(overrideValidation.error || 'Invalid contract size override.');
+      return;
+    }
+    if (trimmedSym && overrideSizeInput.trim() !== '' && overrideValidation.value[trimmedSym] !== undefined) {
+      setContractOverrides(overrideValidation.value);
+      setOverrideSizeInput('');
+    }
+
+    const validatedOverridesMap = overrideValidation.value;
+
+    setSavingProfile(true);
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    try {
+      const payload: Partial<UserTradingProfile> = {
+        accountCurrency: acctCurrency,
+        accountBalance: parsedBal,
+        riskPct: parseFloat(parsedRisk.toFixed(2)),
+        leverage: Number.isFinite(parsedLev) && parsedLev >= 1 ? Math.round(parsedLev) : 100,
+        brokerSpreadPips: Number.isFinite(parsedSpread) && parsedSpread >= 0 ? parsedSpread : 1.2,
+        contractSizeOverrides: validatedOverridesMap,
+      };
+      const res = await saveUserTradingProfile(payload);
+      if (res.success && res.profile) {
+        onUserUpdated({ ...user, trading_profile: res.profile });
+        setSuccessMessage(res.message);
+      } else {
+        // Fallback local update in case DB migration has not been applied yet
+        const localProfile: UserTradingProfile = {
+          accountCurrency: payload.accountCurrency!,
+          accountBalance: payload.accountBalance!,
+          riskPct: payload.riskPct!,
+          leverage: payload.leverage!,
+          brokerSpreadPips: payload.brokerSpreadPips!,
+          contractSizeOverrides: validatedOverridesMap,
+        };
+        onUserUpdated({ ...user, trading_profile: localProfile });
+        setErrorMessage(res.message || 'Could not save to database.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Error saving MT5 risk settings.');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-slate-950/80 backdrop-blur-md overflow-y-auto">
-      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 my-auto relative">
+      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-6 shadow-2xl space-y-5 my-auto relative max-h-[92vh] overflow-y-auto">
         {/* Close Button */}
         <button
           type="button"
@@ -908,6 +1040,159 @@ export function AuthModal({
                 </div>
               )}
             </div>
+
+            {/* MT5 Account & Risk Profile Settings */}
+            <form
+              onSubmit={handleSaveTradingProfile}
+              className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-3"
+            >
+              <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                <span className="text-xs font-black text-blue-300 uppercase tracking-wider">
+                  MT5 Risk &amp; Lot Settings
+                </span>
+                <span className="text-[10px] text-slate-400">Saved to Account</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1">
+                    Account Currency
+                  </label>
+                  <select
+                    value={acctCurrency}
+                    onChange={(e) => setAcctCurrency(e.target.value as UserTradingProfile['accountCurrency'])}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
+                  >
+                    {(['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF'] as const).map((ccy) => (
+                      <option key={ccy} value={ccy}>{ccy}</option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-400 mt-1.5 leading-snug font-sans">
+                    Account in another currency (for example NGN)? Choose USD and enter your balance converted to US dollars.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1">
+                    Account Balance ({acctCurrency})
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={acctBalance}
+                    onChange={(e) => setAcctBalance(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1">
+                    Risk % / Trade (Max 3%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0.1"
+                    max="3.0"
+                    step="0.1"
+                    value={riskPctInput}
+                    onChange={(e) => setRiskPctInput(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1">
+                    Leverage (1:N)
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="2000"
+                    step="1"
+                    value={leverageInput}
+                    onChange={(e) => setLeverageInput(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1">
+                    Broker Spread Assumption (pips)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={spreadInput}
+                    onChange={(e) => setSpreadInput(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-2 text-xs text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {Number(riskPctInput) > 2.0 && (
+                <div className="p-2 rounded-lg bg-amber-950/50 border border-amber-500/40 text-[10px] text-amber-300 leading-snug">
+                  ⚠️ High Risk Warning: Risking {Number(riskPctInput).toFixed(1)}% per trade elevates drawdown severity. Standard institutional sizing is 0.5%–1.0% (max 3.0%).
+                </div>
+              )}
+
+              {/* Optional Contract Size Override */}
+              <div className="pt-1 border-t border-slate-800/70 space-y-2">
+                <span className="text-[10px] text-slate-400 uppercase block">
+                  Optional Contract Size Override (Broker Specific)
+                </span>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={overrideSymInput}
+                    onChange={(e) => setOverrideSymInput(e.target.value)}
+                    placeholder="Symbol (e.g. XAU/USD)"
+                    className="w-1/2 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:border-blue-500 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    value={overrideSizeInput}
+                    onChange={(e) => setOverrideSizeInput(e.target.value)}
+                    placeholder="Size (e.g. 100)"
+                    className="w-1/2 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-[11px] text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </div>
+                {Object.keys(contractOverrides).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {Object.entries(contractOverrides).map(([sym, size]) => (
+                      <span
+                        key={sym}
+                        className="inline-flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-md px-2 py-0.5 text-[10px] text-blue-300"
+                      >
+                        {sym}: {size}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = { ...contractOverrides };
+                            delete updated[sym];
+                            setContractOverrides(updated);
+                          }}
+                          className="text-slate-400 hover:text-rose-400 ml-0.5 cursor-pointer"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={savingProfile}
+                className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition disabled:opacity-50 cursor-pointer"
+              >
+                {savingProfile ? 'Saving Risk Profile...' : 'Save MT5 Risk Settings'}
+              </button>
+            </form>
 
             {/* Modal Actions */}
             <div className="flex items-center justify-between pt-2 border-t border-slate-800">
