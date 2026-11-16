@@ -40,6 +40,40 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
     return subscribeAssetRegistry((updated) => setAssets(updated));
   }, []);
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<AssetCategory, number> = {
+      Forex: 0,
+      Synthetics: 0,
+      Crypto: 0,
+      Commodities: 0,
+      Indices: 0,
+      Stocks: 0,
+    };
+    for (const a of assets) {
+      if (a.categoryName in counts) {
+        counts[a.categoryName] += 1;
+      }
+    }
+    return counts;
+  }, [assets]);
+
+  const visibleCategories = useMemo(() => {
+    return CATEGORIES.filter((cat) => {
+      if (cat.id === 'ALL' || cat.id === 'FAVORITES') return true;
+      return categoryCounts[cat.id] > 0;
+    });
+  }, [categoryCounts]);
+
+  useEffect(() => {
+    if (
+      selectedCategory !== 'ALL' &&
+      selectedCategory !== 'FAVORITES' &&
+      categoryCounts[selectedCategory] === 0
+    ) {
+      setSelectedCategory('ALL');
+    }
+  }, [selectedCategory, categoryCounts]);
+
   const filteredAssets = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
 
@@ -130,9 +164,9 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
         )}
       </div>
 
-      {/* Category Tabs */}
+      {/* Category Tabs (hide categories with 0 assets) */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-slate-800">
-        {CATEGORIES.map((cat) => {
+        {visibleCategories.map((cat) => {
           const isActive = selectedCategory === cat.id;
           return (
             <button
@@ -150,6 +184,13 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
           );
         })}
       </div>
+
+      {/* Stocks Feed Availability Notice */}
+      {categoryCounts.Stocks === 0 && (
+        <div className="text-[11px] font-mono text-slate-400 px-1">
+          Individual stocks are not available from our market feed.
+        </div>
+      )}
 
       {/* Permanent Synthetic Indices Notice */}
       <div

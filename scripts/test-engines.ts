@@ -14,14 +14,31 @@ import {
 import {
   analyzeMT5Signal,
   calculateMT5PositionSize,
+  computeDailyPivotLevels,
   computeMT5KeyLevels,
   resolveInstrumentSpec,
   resolveQuoteToAccountRate,
 } from '../src/utils/engines/mt5Engine.ts';
+import {
+  computeMarketContext,
+  computeUtcSessionProfile,
+  computeVolatilityRegime,
+  formatLevelDistance,
+  resolveAssetPipSize,
+} from '../src/utils/engines/marketContext.ts';
 import { validateContractSizeOverrides } from '../src/utils/supabaseClient.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
-import type { Candle, MarketEventItem } from '../src/utils/engines/types.ts';
+import historyRefreshHandler from '../api/history/refresh.ts';
+import {
+  buildHistoryMarkerOverlays,
+  buildKeyLevelOverlays,
+  buildSignalChartOverlays,
+  isChartSignalExpiredOrInvalidated,
+  snapTimestampToSeries,
+  type ChartHistorySignalItem,
+} from '../src/utils/chartOverlays.ts';
+import type { BinarySignalOutput, Candle, MarketEventItem, MT5SignalOutput } from '../src/utils/engines/types.ts';
 import type { AssetConfig, TimestampedTick } from '../src/types.ts';
 
 let passed = 0;
@@ -171,7 +188,7 @@ console.log('\n2. Actionable CALL Signal & Shared SignalData Contract:');
   assert(res.engine === 'binary_v1', 'Shared contract sets engine="binary_v1"');
   assert(res.profile === 'BINARY_QUICK', 'Shared contract sets profile="BINARY_QUICK"');
   assert(res.enterWithinSeconds === 6, 'Enforces 6-second freshness window');
-  assert(['30s', '1m', '2m', '3m', '5m'].includes(res.expiry), `Valid binary expiry window selected: ${res.expiry}`);
+  assert(['1m', '2m', '3m', '5m'].includes(res.expiry), `Valid binary expiry window selected (no legacy sub-1m): ${res.expiry}`);
   assert(['Low', 'Medium', 'High'].includes(res.strength), `Strength uses qualitative words: ${res.strength}`);
   assert(Array.isArray(res.reasons) && res.reasons.length === 3, 'Includes exactly 3 plain-English reasons');
   assert(!('stopLoss' in res) && !('takeProfit1' in res) && !('lotSize' in res), 'No SL/TP/lot fields emitted for binary');
@@ -1148,13 +1165,631 @@ function runMt5Tests() {
       'supabase/migrations/009_profile_validation.sql enforces object, 2KB, 20-key, 20-char key, and (0, 10000000] number checks'
     );
   }
+
+  // 14. Stage 4A Market Context Calculations & History Refresh Guards
+  console.log('\n14. Stage 4A Market Context & History Store Calculations:');
+  {
+    // 14a. Daily pivots from fixed D1 candle
+    const prevDayFixed: Candle = {
+      time: PRIME_FX_NOW_SEC - 86400,
+      open: 1.081,
+      high: 1.09,
+      low: 1.08,
+      close: 1.087,
+    };
+    const pivots = computeDailyPivotLevels(prevDayFixed);
+    assert(pivots !== null, 'Computes daily pivot levels from fixed D1 candle');
+    if (pivots) {
+      const expectedPP = (1.09 + 1.08 + 1.087) / 3;
+      const expectedR1 = 2 * expectedPP - 1.08;
+      const expectedS1 = 2 * expectedPP - 1.09;
+      const expectedR2 = expectedPP + 0.01;
+      const expectedS2 = expectedPP - 0.01;
+      assert(Math.abs(pivots.pivot - expectedPP) < 1e-8, `PP=${pivots.pivot.toFixed(6)}`);
+      assert(Math.abs(pivots.r1 - expectedR1) < 1e-8, `R1=${pivots.r1.toFixed(6)}`);
+      assert(Math.abs(pivots.s1 - expectedS1) < 1e-8, `S1=${pivots.s1.toFixed(6)}`);
+      assert(Math.abs(pivots.r2 - expectedR2) < 1e-8, `R2=${pivots.r2.toFixed(6)}`);
+      assert(Math.abs(pivots.s2 - expectedS2) < 1e-8, `S2=${pivots.s2.toFixed(6)}`);
+    }
+
+    // 14b. 30-day ATR percentile classification (quiet vs unusually active)
+    const d1Quiet: Candle[] = [];
+    const d1Active: Candle[] = [];
+    for (let i = 0; i < 60; i++) {
+      const t = PRIME_FX_NOW_SEC - (60 - i) * 86400;
+      const base = 1.08 + i * 0.0001;
+      // Quiet dataset starts volatile then contracts at the end
+      const halfQuiet = i < 42 ? 0.004 : 0.0004;
+      d1Quiet.push({ time: t, open: base, high: base + halfQuiet, low: base - halfQuiet, close: base + 0.00005 });
+
+      // Active dataset starts narrow then expands at the end
+      const halfActive = i < 42 ? 0.0004 : 0.005;
+      d1Active.push({ time: t, open: base, high: base + halfActive, low: base - halfActive, close: base + 0.0001 });
+    }
+    const quietRegime = computeVolatilityRegime(d1Quiet, 0.0001, 30);
+    const activeRegime = computeVolatilityRegime(d1Active, 0.0001, 30);
+    assert(
+      quietRegime.sampleCount === 30 && quietRegime.percentile30d !== null && quietRegime.percentile30d < 30 && quietRegime.regime === 'quiet',
+      `30-day quiet volatility regime detected (pct=${quietRegime.percentile30d}, n=${quietRegime.sampleCount}, regime=${quietRegime.regime})`
+    );
+    assert(
+      activeRegime.sampleCount === 30 && activeRegime.percentile30d !== null && activeRegime.percentile30d > 75 && activeRegime.regime === 'unusually active',
+      `30-day unusually active volatility regime detected (pct=${activeRegime.percentile30d}, n=${activeRegime.sampleCount}, regime=${activeRegime.regime})`
+    );
+
+    // 14c. 8-week UTC session profile from fixed H1 candles (excluding bars > 8 weeks old)
+    const endHourEpoch = Date.UTC(2025, 4, 15, 23, 0, 0) / 1000;
+    const h1SessionBars: Candle[] = [];
+    // Include one bar older than 56 days (60 days prior) with extreme range to verify exclusion
+    h1SessionBars.push({
+      time: endHourEpoch - 60 * 86400,
+      open: 1.08,
+      high: 1.15,
+      low: 1.01,
+      close: 1.08,
+    });
+    // Populate exact 56 days * 24 hours (note < 56d inclusive: startSec = end - 56*86400)
+    // Using 56 * 24 = 1344 bars strictly inside trailing 56-day window:
+    const totalSessionHours = 56 * 24;
+    for (let k = totalSessionHours - 1; k >= 0; k--) {
+      const ts = endHourEpoch - k * 3600;
+      const utcH = new Date(ts * 1000).getUTCHours();
+      // UTC 13 -> 25 pips (0.0025), UTC 02 -> 5 pips (0.0005), others -> 12 pips (0.0012)
+      const range = utcH === 13 ? 0.0025 : utcH === 2 ? 0.0005 : 0.0012;
+      h1SessionBars.push({
+        time: ts,
+        open: 1.085,
+        high: 1.085 + range / 2,
+        low: 1.085 - range / 2,
+        close: 1.085,
+      });
+    }
+    const sessionProf = computeUtcSessionProfile(h1SessionBars, 0.0001, endHourEpoch, 8);
+    const hour13 = sessionProf.hours.find((h) => h.hourUtc === 13);
+    const hour02 = sessionProf.hours.find((h) => h.hourUtc === 2);
+    assert(
+      sessionProf.totalBars === 1344,
+      `8-week UTC session profile counts trailing 1344 H1 bars and excludes >8wk bar (got n=${sessionProf.totalBars})`
+    );
+    assert(
+      hour13?.avgRangePips === 25 && hour13?.sampleCount === 56 && sessionProf.mostActiveHour?.hourUtc === 13,
+      `UTC 13:00 hour range is 25.0 pips avg with n=56 (got ${hour13?.avgRangePips}p, n=${hour13?.sampleCount})`
+    );
+    assert(
+      hour02?.avgRangePips === 5 && hour02?.sampleCount === 56 && sessionProf.quietestHour?.hourUtc === 2,
+      `UTC 02:00 hour range is 5.0 pips avg with n=56 (got ${hour02?.avgRangePips}p, n=${hour02?.sampleCount})`
+    );
+
+    // 14d. Distance in pips & plain-English level phrases for EUR/USD, USD/JPY, and XAU/USD
+    const eurMeta = resolveAssetPipSize(EURUSD);
+    const eurDist = formatLevelDistance(1.08642, 1.085, 'Previous Day High (PDH)', eurMeta.pipSize);
+    assert(
+      eurMeta.pipSize === 0.0001 && eurDist.absPips === 14.2 && eurDist.plainText === 'price is 14.2 pips above Previous Day High (PDH)',
+      `EUR/USD distance=${eurDist.absPips} pips (${eurDist.plainText})`
+    );
+
+    const jpyMeta = resolveAssetPipSize(USDJPY);
+    const jpyDist = formatLevelDistance(154.25, 154.5, 'Daily Resistance (R1)', jpyMeta.pipSize);
+    assert(
+      jpyMeta.pipSize === 0.01 && jpyDist.absPips === 25 && jpyDist.plainText === 'price is 25.0 pips below Daily Resistance (R1)',
+      `USD/JPY distance=${jpyDist.absPips} pips (${jpyDist.plainText})`
+    );
+
+    const xauMeta = resolveAssetPipSize(XAUUSD);
+    const xauDist = formatLevelDistance(2651.5, 2650.0, 'Daily Pivot (PP)', xauMeta.pipSize);
+    assert(
+      xauMeta.pipSize === 0.01 && xauDist.absPips === 150 && xauDist.plainText === 'price is 150.0 pips above Daily Pivot (PP)',
+      `XAU/USD distance=${xauDist.absPips} pips (${xauDist.plainText})`
+    );
+
+    // End-to-end computeMarketContext attaches sample sizes & no win-rate percentages
+    const m15Fixed = makeCandles({
+      count: 40,
+      startPrice: 1.082,
+      step: 0.0001,
+      stepSec: 900,
+      endEpochSec: PRIME_FX_NOW_SEC,
+      spreadPips: 5,
+      pipSize: 0.0001,
+    });
+    const ctx = computeMarketContext({
+      asset: EURUSD,
+      currentPrice: 1.08642,
+      m15Candles: m15Fixed,
+      h1Candles: h1SessionBars,
+      h4Candles: d1Quiet,
+      d1Candles: d1Quiet,
+      nowSec: endHourEpoch,
+    });
+    assert(
+      ctx.trendTable.length === 4 &&
+        ctx.trendTable.every((r) => typeof r.sampleCount === 'number' && r.sampleCount > 0) &&
+        ctx.levelsMap.length > 0 &&
+        ctx.volatilityRegime.sampleCount === 30 &&
+        ctx.sessionProfile.totalBars === 1344,
+      'computeMarketContext produces full MTF trend, levels map, 30d volatility, and 8wk UTC session profile with sample sizes'
+    );
+
+    // 14e. Verify vercel.json has valid JSON and 20 non-synthetic daily crons + migration 010 SQL structure
+    const vercelCfg = JSON.parse(readFileSync(resolve(process.cwd(), 'vercel.json'), 'utf8'));
+    assert(
+      Array.isArray(vercelCfg.crons) &&
+        vercelCfg.crons.length === 20 &&
+        vercelCfg.crons.every((c: any) => typeof c.path === 'string' && !/R_|1HZ|BOOM|CRASH|JD|STPRNG/i.test(c.path)),
+      `vercel.json defines 20 non-synthetic daily cron routes (got ${vercelCfg.crons?.length ?? 0})`
+    );
+
+    const mig010 = readFileSync(resolve(process.cwd(), 'supabase/migrations/010_candles_cache.sql'), 'utf8');
+    assert(
+      mig010.includes('CREATE TABLE IF NOT EXISTS public.candles_cache') &&
+        mig010.includes('CREATE TABLE IF NOT EXISTS public.candles_refresh_log') &&
+        mig010.includes('ENABLE ROW LEVEL SECURITY'),
+      'supabase/migrations/010_candles_cache.sql defines idempotent tables with RLS enabled'
+    );
+  }
+
+  // 15. Stage 4D Chart Overlays, Key Levels, VIP History Markers & Expiry/Invalidation
+  console.log('\n15. Stage 4D Chart Overlays (BUY, SELL, LIMIT, CALL, PUT, WAIT & Levels/VIP):');
+  {
+    const baseMt5: MT5SignalOutput = {
+      engine: 'mt5_v1',
+      profile: 'MT5',
+      platform: 'mt5',
+      asset: 'EUR/USD',
+      symbol: 'frxEURUSD',
+      direction: 'BUY',
+      orderKind: 'MARKET',
+      entryPrice: 1.085,
+      entryZone: null,
+      stopLoss: 1.083,
+      stopLossPips: 20,
+      takeProfit1: 1.0885,
+      takeProfit1Pips: 35,
+      takeProfit2: 1.091,
+      takeProfit2Pips: 60,
+      lotSize: 0.5,
+      riskMoney: 100,
+      accountCurrency: 'USD',
+      rewardRiskTp1: 1.75,
+      rewardRiskTp2: 3.0,
+      rewardRiskRatio: '1:1.75',
+      validityCandles: 3,
+      validityMinutes: 15,
+      validityWindowDesc: '15m',
+      validUntil: new Date(PRIME_FX_NOW_MS + 15 * 60_000).toISOString(),
+      invalidationLevel: 1.083,
+      invalidationDriftPrice: 0.002,
+      invalidationRule: 'Invalidates below 1.08300',
+      sessionNote: 'London-NY overlap',
+      sessionQuality: 'PRIME',
+      tradeManagementNote: 'Move to break-even at 1R',
+      copyOrderText: 'BUY EURUSD',
+      strength: 'Medium',
+      rawScore: 84,
+      reasons: ['H4 bullish bias', 'H1 higher low', 'M5 momentum entry'],
+      structureTimeframe: 'H1',
+      timeframe: 'H1',
+      createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+      generatedAt: PRIME_FX_NOW_MS,
+      feedSource: 'wss://api.derivws.com/trading/v1/options/ws/public',
+      inputsSnapshot: {},
+    };
+
+    // 15a. MT5 MARKET BUY overlays
+    const buyOverlays = buildSignalChartOverlays(baseMt5);
+    assert(
+      buyOverlays.length === 4 &&
+        buyOverlays.filter((o) => o.type === 'priceLine').length === 4 &&
+        buyOverlays.some((o) => o.role === 'entry' && o.label === 'Entry' && o.price === 1.085) &&
+        buyOverlays.some((o) => o.role === 'sl' && o.style === 'dashed' && o.label.includes('-20p')) &&
+        buyOverlays.some((o) => o.role === 'tp1' && o.style === 'dashed' && o.label.includes('+35p')) &&
+        buyOverlays.some((o) => o.role === 'tp2' && o.style === 'dashed' && o.label.includes('+60p')),
+      'MT5 BUY builds Entry, dashed SL (-20p), dashed TP1 (+35p), and dashed TP2 (+60p) lines'
+    );
+
+    // 15b. MT5 MARKET SELL overlays
+    const sellSignal: MT5SignalOutput = {
+      ...baseMt5,
+      direction: 'SELL',
+      stopLoss: 1.0875,
+      stopLossPips: 25,
+      takeProfit1: 1.081,
+      takeProfit1Pips: 40,
+      takeProfit2: 1.078,
+      takeProfit2Pips: 70,
+      invalidationLevel: 1.0875,
+    };
+    const sellOverlays = buildSignalChartOverlays(sellSignal, { compact: true });
+    assert(
+      sellOverlays.length === 4 &&
+        sellOverlays.some((o) => o.role === 'sl' && o.label === 'SL -25p') &&
+        sellOverlays.some((o) => o.role === 'tp1' && o.label === 'TP1 +40p'),
+      'MT5 SELL compact mobile labels fit cleanly (SL -25p, TP1 +40p)'
+    );
+
+    // 15c. MT5 LIMIT overlays render two thin entry zone lines
+    const limitSignal: MT5SignalOutput = {
+      ...baseMt5,
+      orderKind: 'LIMIT',
+      entryZone: { min: 1.0842, max: 1.0848 },
+    };
+    const limitOverlays = buildSignalChartOverlays(limitSignal);
+    assert(
+      limitOverlays.length === 5 &&
+        limitOverlays.some((o) => o.role === 'entry_zone_min' && o.lineWidth === 1 && o.price === 1.0842) &&
+        limitOverlays.some((o) => o.role === 'entry_zone_max' && o.lineWidth === 1 && o.price === 1.0848),
+      'MT5 LIMIT draws two thin Entry Zone boundary lines plus SL, TP1, TP2 (5 lines total)'
+    );
+
+    // 15d. Binary CALL & PUT overlays (marker + Entry line)
+    const callSignal: BinarySignalOutput = {
+      engine: 'binary_v1',
+      profile: 'BINARY_QUICK',
+      platform: 'expert_option',
+      asset: 'EUR/USD',
+      symbol: 'frxEURUSD',
+      direction: 'CALL',
+      expiry: '1m',
+      expirySeconds: 60,
+      strength: 'Medium',
+      rawScore: 82,
+      reasons: ['EMA bullish', 'M5 aligned', 'Momentum expanding'],
+      payoutPct: 85,
+      breakEvenWinRatePct: 54.05,
+      breakEvenMessage: 'Needs > 54.1% win rate to break even at 85% payout.',
+      enterWithinSeconds: 6,
+      createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+      validUntil: new Date(PRIME_FX_NOW_MS + 6000).toISOString(),
+      generatedAt: PRIME_FX_NOW_MS,
+      entryPrice: 1.08512,
+      feedSource: 'wss://api.derivws.com/trading/v1/options/ws/public',
+      inputsSnapshot: {},
+    };
+    const callOverlays = buildSignalChartOverlays(callSignal);
+    assert(
+      callOverlays.length === 2 &&
+        callOverlays.some((o) => o.type === 'marker' && o.shape === 'arrowUp' && o.position === 'belowBar') &&
+        callOverlays.some((o) => o.type === 'priceLine' && o.label === 'Entry' && o.price === 1.08512),
+      'Binary CALL builds arrowUp marker belowBar + horizontal Entry price line'
+    );
+
+    const putSignal: BinarySignalOutput = {
+      ...callSignal,
+      direction: 'PUT',
+      entryPrice: 1.0849,
+    };
+    const putOverlays = buildSignalChartOverlays(putSignal);
+    assert(
+      putOverlays.length === 2 &&
+        putOverlays.some((o) => o.type === 'marker' && o.shape === 'arrowDown' && o.position === 'aboveBar') &&
+        putOverlays.some((o) => o.type === 'priceLine' && o.label === 'Entry' && o.price === 1.0849),
+      'Binary PUT builds arrowDown marker aboveBar + horizontal Entry price line'
+    );
+
+    // 15e. WAIT state draws zero lines/markers on chart
+    const waitMt5: MT5SignalOutput = { ...baseMt5, direction: 'WAIT', stopLoss: null, takeProfit1: null, takeProfit2: null };
+    const waitBin: BinarySignalOutput = { ...callSignal, direction: 'WAIT' };
+    assert(
+      buildSignalChartOverlays(waitMt5).length === 0 && buildSignalChartOverlays(waitBin).length === 0 && buildSignalChartOverlays(null).length === 0,
+      'WAIT signals (MT5 & Binary) and null draw 0 chart overlays'
+    );
+
+    // 15f. Key levels overlays capped at 8, dotted, sorted nearest to current price
+    const sampleCtx = computeMarketContext({
+      asset: EURUSD,
+      currentPrice: 1.085,
+      m15Candles: makeCandles({ count: 30, startPrice: 1.082, step: 0.0001, stepSec: 900, endEpochSec: PRIME_FX_NOW_SEC }),
+      h1Candles: makeCandles({ count: 40, startPrice: 1.08, step: 0.0001, stepSec: 3600, endEpochSec: PRIME_FX_NOW_SEC }),
+      h4Candles: makeCandles({ count: 30, startPrice: 1.078, step: 0.0002, stepSec: 14400, endEpochSec: PRIME_FX_NOW_SEC }),
+      d1Candles: makeCandles({ count: 35, startPrice: 1.075, step: 0.0003, stepSec: 86400, endEpochSec: PRIME_FX_NOW_SEC }),
+      nowSec: PRIME_FX_NOW_SEC,
+    });
+    const lvlOverlays = buildKeyLevelOverlays(sampleCtx, 1.085, 8);
+    const distances = lvlOverlays.map((l) => Math.abs(l.price - 1.085));
+    const sortedAsc = distances.every((d, i) => i === 0 || d >= distances[i - 1]);
+    assert(
+      lvlOverlays.length > 0 &&
+        lvlOverlays.length <= 8 &&
+        sortedAsc &&
+        lvlOverlays.every((l) => l.style === 'dotted' && l.axisLabelVisible === false),
+      `Key levels capped at <= 8 (${lvlOverlays.length}), sorted closest-first, faint dotted with hidden y-axis label`
+    );
+
+    // 15g. VIP history markers strictly hidden for free users, rendered & sorted with outcomes for VIP
+    const vipHistItems: ChartHistorySignalItem[] = [
+      { id: '2', asset: 'frxEURUSD', direction: 'PUT', entryPrice: 1.086, timeframe: '1m', createdAt: new Date(PRIME_FX_NOW_MS - 300_000).toISOString(), outcome: 'LOSS' },
+      { id: '1', asset: 'frxEURUSD', direction: 'CALL', entryPrice: 1.084, timeframe: '1m', createdAt: new Date(PRIME_FX_NOW_MS - 600_000).toISOString(), outcome: 'WIN' },
+    ];
+    assert(
+      buildHistoryMarkerOverlays(vipHistItems, false).length === 0,
+      'Non-VIP user receives 0 signal history chart markers'
+    );
+    const vipMarkers = buildHistoryMarkerOverlays(vipHistItems, true);
+    assert(
+      vipMarkers.length === 2 &&
+        (vipMarkers[0].time || 0) <= (vipMarkers[1].time || 0) &&
+        Boolean(vipMarkers[0].tooltip?.includes('WIN')) &&
+        Boolean(vipMarkers[1].tooltip?.includes('LOSS')),
+      'VIP user receives chronologically sorted signal history markers with settled WIN/LOSS hover tooltips'
+    );
+
+    // 15h. Signal expiry & MT5 invalidation lifecycle + series timestamp snapping
+    assert(
+      !isChartSignalExpiredOrInvalidated(baseMt5, 1.085, PRIME_FX_NOW_MS + 60_000) &&
+        isChartSignalExpiredOrInvalidated(baseMt5, 1.0829, PRIME_FX_NOW_MS + 60_000) &&
+        isChartSignalExpiredOrInvalidated(baseMt5, 1.085, PRIME_FX_NOW_MS + 16 * 60_000),
+      'MT5 signal clears on invalidation level breach or validity window expiry'
+    );
+    assert(
+      !isChartSignalExpiredOrInvalidated(callSignal, 1.0851, PRIME_FX_NOW_MS + 30_000) &&
+        isChartSignalExpiredOrInvalidated(callSignal, 1.0851, PRIME_FX_NOW_MS + 60_000),
+      'Binary signal clears on contract expiry (60s)'
+    );
+    assert(
+      !isChartSignalExpiredOrInvalidated(waitMt5, 1.0, PRIME_FX_NOW_MS + 999_999),
+      'WAIT note stays visible until user navigates/scans again'
+    );
+    assert(
+      snapTimestampToSeries(105, [100, 110, 120]) === 100 && snapTimestampToSeries(500, [100, 110, 120]) === 120,
+      'snapTimestampToSeries aligns markers to exact series bar timestamps'
+    );
+  }
+}
+
+async function runHistoryRefreshGuards() {
+  const callRefresh = async (query: Record<string, string>) => {
+    let statusCode = 200;
+    let body: any = null;
+    const req = { method: 'GET', headers: {}, query };
+    const res = {
+      setHeader() {},
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        body = payload;
+        return this;
+      },
+    };
+    await historyRefreshHandler(req, res);
+    return { statusCode, body };
+  };
+
+  const synthRejected = await callRefresh({ symbol: 'R_100', tf: 'H1' });
+  assert(
+    synthRejected.statusCode === 400,
+    `api/history/refresh rejects synthetic index symbols with 400 (got ${synthRejected.statusCode})`
+  );
+
+  const unauthRejected = await callRefresh({ symbol: 'frxEURUSD', tf: 'H1' });
+  assert(
+    unauthRejected.statusCode === 401,
+    `api/history/refresh rejects unauthenticated calls without cron secret with 401 (got ${unauthRejected.statusCode})`
+  );
+}
+
+// ============================================================================
+// 16. STAGE 4E: ANALYSIS HORIZON FIDELITY & THRESHOLDS
+// ============================================================================
+function runStage4EHorizonTests() {
+  console.log('\n16. Stage 4E Analysis Horizon Fidelity & Thresholds:');
+
+  const m15Bull = makeCandles({ count: 35, startPrice: 1.08, step: 0.0004, stepSec: 900, endEpochSec: PRIME_FX_NOW_SEC });
+  const m5Bull = makeCandles({ count: 35, startPrice: 1.088, step: 0.00025, stepSec: 300, endEpochSec: PRIME_FX_NOW_SEC });
+  const m1Bull = makeCandles({ count: 60, startPrice: 1.085, step: 0.00018, stepSec: 60, endEpochSec: PRIME_FX_NOW_SEC });
+  const lastClose = m1Bull[m1Bull.length - 1].close;
+  const bullTicks = makeTicks({ count: 20, startPrice: lastClose - 0.0004, step: 0.00003, endMs: PRIME_FX_NOW_MS });
+
+  // 16a. Fixed user expiry choice is NEVER silently changed
+  const fixedChoices: Array<{ exp: '1m' | '2m' | '3m' | '5m'; sec: number }> = [
+    { exp: '1m', sec: 60 },
+    { exp: '2m', sec: 120 },
+    { exp: '3m', sec: 180 },
+    { exp: '5m', sec: 300 },
+  ];
+  for (const { exp, sec } of fixedChoices) {
+    const out = analyzeBinarySignal({
+      asset: EURUSD,
+      platform: 'expert_option',
+      m1Candles: m1Bull,
+      m5Candles: m5Bull,
+      m15Candles: m15Bull,
+      ticks: bullTicks,
+      feedStatus: 'LIVE',
+      payoutPct: 85,
+      preferredExpiry: exp,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    assert(
+      out.expiry === exp && out.expirySeconds === sec,
+      `Fixed binary choice '${exp}' is honoured without silent override (got ${out.expiry} / ${out.expirySeconds}s)`
+    );
+  }
+
+  // 16b. Auto mode picks strictly from 1m-5m and never returns legacy 30-second window
+  const autoOut = analyzeBinarySignal({
+    asset: EURUSD,
+    platform: 'deriv_binary',
+    m1Candles: m1Bull,
+    m5Candles: m5Bull,
+    m15Candles: m15Bull,
+    ticks: bullTicks,
+    feedStatus: 'LIVE',
+    payoutPct: 85,
+    preferredExpiry: 'auto',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  const legacyWindow = '30' + 's';
+  assert(
+    autoOut.expiry !== legacyWindow && ['1m', '2m', '3m', '5m'].includes(autoOut.expiry),
+    `Auto binary horizon picks only from 1m–5m (got ${autoOut.expiry})`
+  );
+
+  // 16c. Quiet market on 1m returns WAIT with "Try 3 or 5 minutes" suggestion, while 5m accepts aligned HTF calm drift
+  const m1Quiet: Candle[] = [];
+  let qPrice = 1.09;
+  const qStart = PRIME_FX_NOW_SEC - 59 * 60;
+  for (let i = 0; i < 60; i++) {
+    // Tiny bars 0..21 produce ~8 low ATR(14) points; active bars 22..44 produce ~23 high points;
+    // trailing bars 45..59 decay cleanly into ~22nd ATR percentile (blocked by 1m < 40, accepted by 5m).
+    let barMove = 0.00011;
+    let wick = 0.00008;
+    if (i <= 21) {
+      barMove = 0.00004;
+      wick = 0.00003;
+    } else if (i <= 44) {
+      barMove = 0.00035;
+      wick = 0.00025;
+    }
+    const open = qPrice;
+    const close = open + barMove;
+    m1Quiet.push({
+      time: qStart + i * 60,
+      open: parseFloat(open.toFixed(5)),
+      high: parseFloat((Math.max(open, close) + wick).toFixed(5)),
+      low: parseFloat((Math.min(open, close) - wick).toFixed(5)),
+      close: parseFloat(close.toFixed(5)),
+    });
+    qPrice = close;
+  }
+  const quietTicks = makeTicks({
+    count: 20,
+    startPrice: m1Quiet[m1Quiet.length - 1].close - 0.0002,
+    step: 0.000015,
+    endMs: PRIME_FX_NOW_MS,
+  });
+
+  const quiet1m = analyzeBinarySignal({
+    asset: EURUSD,
+    platform: 'expert_option',
+    m1Candles: m1Quiet,
+    m5Candles: m5Bull,
+    m15Candles: m15Bull,
+    ticks: quietTicks,
+    feedStatus: 'LIVE',
+    payoutPct: 85,
+    preferredExpiry: '1m',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  assert(
+    quiet1m.direction === 'WAIT' &&
+      quiet1m.expiry === '1m' &&
+      Boolean(quiet1m.whyNotTrade?.includes('Try 3 or 5 minutes')),
+    `Quiet market blocks 1m with WAIT + "Try 3 or 5 minutes" suggestion (got ${quiet1m.direction}: ${quiet1m.whyNotTrade})`
+  );
+
+  const calm5m = analyzeBinarySignal({
+    asset: EURUSD,
+    platform: 'expert_option',
+    m1Candles: m1Quiet,
+    m5Candles: m5Bull,
+    m15Candles: m15Bull,
+    ticks: quietTicks,
+    feedStatus: 'LIVE',
+    payoutPct: 85,
+    preferredExpiry: '5m',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  assert(
+    calm5m.expiry === '5m' && calm5m.direction === 'CALL',
+    `Aligned M5+M15 calm market passes 5m where 1m blocked (got ${calm5m.direction} / ${calm5m.expiry})`
+  );
+
+  // 16d. Conflicting M5 blocks 5m with clear HTF explanation
+  const m5Bear = makeCandles({ count: 35, startPrice: 1.095, step: -0.00025, stepSec: 300, endEpochSec: PRIME_FX_NOW_SEC });
+  const conflict5m = analyzeBinarySignal({
+    asset: EURUSD,
+    platform: 'expert_option',
+    m1Candles: m1Bull,
+    m5Candles: m5Bear,
+    m15Candles: m15Bull,
+    ticks: bullTicks,
+    feedStatus: 'LIVE',
+    payoutPct: 85,
+    preferredExpiry: '5m',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  assert(
+    conflict5m.direction === 'WAIT' &&
+      conflict5m.expiry === '5m' &&
+      Boolean(conflict5m.whyNotTrade?.includes('M5')),
+    `5m blocks trade when M5 disagrees with M15 (got ${conflict5m.direction}: ${conflict5m.whyNotTrade})`
+  );
+
+  // 16e. MT5 structureTimeframe mapping (M15 vs H1) without any seconds horizon
+  const d1Bull = makeCandles({ count: 40, startPrice: 1.06, step: 0.001, stepSec: 86400, endEpochSec: PRIME_FX_NOW_SEC });
+  const h4Bull = makeCandles({ count: 50, startPrice: 1.072, step: 0.0006, stepSec: 14400, endEpochSec: PRIME_FX_NOW_SEC });
+  const h1Bull = makeCandles({ count: 60, startPrice: 1.08, step: 0.0004, stepSec: 3600, endEpochSec: PRIME_FX_NOW_SEC });
+  const mt5M15 = analyzeMT5Signal({
+    asset: EURUSD,
+    platform: 'mt5',
+    d1Candles: d1Bull,
+    h4Candles: h4Bull,
+    h1Candles: h1Bull,
+    m15Candles: m15Bull,
+    m5Candles: m5Bull,
+    structureTimeframe: 'M15',
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  const mt5H1 = analyzeMT5Signal({
+    asset: EURUSD,
+    platform: 'mt5',
+    d1Candles: d1Bull,
+    h4Candles: h4Bull,
+    h1Candles: h1Bull,
+    m15Candles: m15Bull,
+    m5Candles: m5Bull,
+    structureTimeframe: 'H1',
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  assert(
+    mt5M15.structureTimeframe === 'M15' &&
+      mt5M15.timeframe === 'M15' &&
+      mt5H1.structureTimeframe === 'H1' &&
+      mt5H1.timeframe === 'H1' &&
+      !mt5H1.validityWindowDesc.toLowerCase().includes('sec'),
+    'MT5 cleanly selects M15 vs H1 structure timeframe with minute-based validity window'
+  );
+
+  // 16f. Verify legacy 30-second token is isolated strictly to SignalHistory.tsx
+  const rootDir = resolve(process.cwd());
+  const nonHistoryFilesToCheck = [
+    'src/types.ts',
+    'src/utils/engines/types.ts',
+    'src/utils/engines/binaryEngine.ts',
+    'src/utils/quantEngine.ts',
+    'src/components/SignalEngine.tsx',
+    'src/components/VipSafeRadarModal.tsx',
+    'src/components/GuidedTourCoachMark.tsx',
+    'src/components/WelcomeTutorial.tsx',
+    'src/data/blogArticles.ts',
+    'index.html',
+  ];
+  const badHits = nonHistoryFilesToCheck.filter((rel) => {
+    const content = readFileSync(resolve(rootDir, rel), 'utf8');
+    return content.includes(legacyWindow);
+  });
+  assert(
+    badHits.length === 0,
+    `No "${legacyWindow}" horizon string remains outside legacy SignalHistory display (found in: ${badHits.join(', ') || 'none'})`
+  );
+  const histSrc = readFileSync(resolve(rootDir, 'src/components/SignalHistory.tsx'), 'utf8');
+  assert(
+    histSrc.includes('formatHistoryHorizonLabel') && histSrc.includes(legacyWindow),
+    'SignalHistory.tsx preserves legacy history row formatting cleanly'
+  );
 }
 
 runSignalLogValidationTests()
+  .then(() => runHistoryRefreshGuards())
   .then(() => {
     runMt5Tests();
+    runStage4EHorizonTests();
     console.log('\n------------------------------------------------------------');
-    console.log(`Combined Binary + MT5 Results: ${passed}/${total} tests passed`);
+    console.log(`Combined Binary + MT5 + Stage 4A + Stage 4D + Stage 4E Results: ${passed}/${total} tests passed`);
     console.log('------------------------------------------------------------\n');
 
     if (passed !== total) {

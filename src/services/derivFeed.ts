@@ -4,7 +4,7 @@
  * Requirements:
  * - Use LiveFeed AS-IS as the only WebSocket market data client.
  * - Zero fake prices, zero Math.random, zero hardcoded gold prices, zero sine-wave seeding.
- * - Map FeedStatus to existing UI status types ('LIVE' | 'CONNECTING' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED').
+ * - Map FeedStatus to existing UI status types ('LIVE' | 'IDLE' | 'CONNECTING' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED').
  * - Store optional user account token in sessionStorage (never localStorage) and clear on logout.
  */
 

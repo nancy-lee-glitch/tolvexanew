@@ -14,6 +14,7 @@
 import type {
   BinaryEngineInput,
   BinaryExpiry,
+  BinaryExpiryChoice,
   BinarySignalOutput,
   Candle,
   MarketEventItem,
@@ -33,7 +34,6 @@ import {
 import { isSyntheticAsset } from '../../services/symbolMap.ts';
 
 const EXPIRY_SECONDS: Record<BinaryExpiry, number> = {
-  '30s': 30,
   '1m': 60,
   '2m': 120,
   '3m': 180,
@@ -237,42 +237,49 @@ function determineTimeframeBias(candles: Candle[]): {
   return { bias: 'NEUTRAL', ema9, ema21, rsi14 };
 }
 
+function isFixedExpiry(choice?: BinaryExpiryChoice): choice is BinaryExpiry {
+  return choice === '1m' || choice === '2m' || choice === '3m' || choice === '5m';
+}
+
 function chooseDynamicExpiry(params: {
   atrPercentile: number;
   bbBandwidth: number;
   microSlopeNorm: number;
   alignedWindows: number;
+  m1EfficiencyRatio: number;
+  dominantMomentumPct: number;
 }): { expiry: BinaryExpiry; rationale: string } {
-  const { atrPercentile, bbBandwidth, microSlopeNorm, alignedWindows } = params;
+  const { atrPercentile, bbBandwidth, microSlopeNorm, alignedWindows, m1EfficiencyRatio, dominantMomentumPct } = params;
   const absMicro = Math.abs(microSlopeNorm);
 
-  if (atrPercentile >= 72 && absMicro >= 0.45 && alignedWindows >= 3) {
-    return {
-      expiry: '30s',
-      rationale: 'High short-term ATR expansion paired with crisp 60s tick acceleration favors a 30s burst expiry.',
-    };
-  }
-  if (atrPercentile >= 50 || (absMicro >= 0.25 && bbBandwidth > 0.0005)) {
+  if (
+    atrPercentile >= 52 &&
+    absMicro >= 0.25 &&
+    bbBandwidth > 0.0005 &&
+    alignedWindows >= 2 &&
+    m1EfficiencyRatio >= 0.35 &&
+    dominantMomentumPct >= 58
+  ) {
     return {
       expiry: '1m',
-      rationale: 'Active volatility and synchronized micro-momentum support a 1m expiry.',
+      rationale: 'Auto selected 1m: active volatility and aligned 60s tick momentum support a fast 1-minute expiry.',
     };
   }
-  if (atrPercentile >= 32) {
+  if (atrPercentile >= 34 && bbBandwidth > 0.00035) {
     return {
       expiry: '2m',
-      rationale: 'Moderate candle expansion favors a 2m expiry to let M1 structure follow through.',
+      rationale: 'Auto selected 2m: moderate candle expansion supports a 2-minute continuation window.',
     };
   }
   if (atrPercentile >= 18) {
     return {
       expiry: '3m',
-      rationale: 'Steadier volatility pace calls for a 3m expiry buffer against intrabar noise.',
+      rationale: 'Auto selected 3m: steadier volatility pace favors a 3-minute buffer against intrabar noise.',
     };
   }
   return {
     expiry: '5m',
-    rationale: 'Calmer volatility regime calls for a 5m expiry so directional pressure can play out.',
+    rationale: 'Auto selected 5m: calmer volatility favors a 5-minute window aligned with M5/M15 structure.',
   };
 }
 
@@ -319,7 +326,10 @@ function buildWaitResult(params: {
 export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutput {
   const nowMs = input.nowMs ?? Date.now();
   const payoutPct = typeof input.payoutPct === 'number' && input.payoutPct > 0 ? input.payoutPct : 85;
-  const fallbackExpiry: BinaryExpiry = input.preferredExpiry || '1m';
+  const fixedExpiry: BinaryExpiry | null = isFixedExpiry(input.preferredExpiry)
+    ? input.preferredExpiry
+    : null;
+  const fallbackExpiry: BinaryExpiry = fixedExpiry || '2m';
 
   const m1Candles = input.m1Candles || [];
   const m5Candles = input.m5Candles || [];
@@ -340,6 +350,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   const baseSnapshot: Record<string, unknown> = {
     symbol: input.asset.symbol,
     feedStatus: input.feedStatus,
+    preferredExpiry: input.preferredExpiry || 'auto',
     m1Count: m1Candles.length,
     m5Count: m5Candles.length,
     m15Count: m15Candles.length,
@@ -382,7 +393,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       whyNotTrade: reason,
       reasons: [
         reason,
-        'Quiet or delayed feeds expose 30s–5m options entries to quote slippage.',
+        'Quiet or delayed feeds expose 1m–5m options entries to quote slippage.',
         'Wait for LIVE feed status or switch to MT5 candle-based analysis for slow FX sessions.',
       ],
       inputsSnapshot: { ...baseSnapshot, blocker: 'FEED_NOT_LIVE' },
@@ -511,21 +522,43 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   if (ema9M1 > ema21M1 && (latestPrice >= ema9M1 || bullM1Candles >= 2)) m1Bias = 'BULLISH';
   else if (ema9M1 < ema21M1 && (latestPrice <= ema9M1 || bearM1Candles >= 2)) m1Bias = 'BEARISH';
 
-  // Directional scoring: evaluate Bullish vs Bearish symmetrically
+  // Compute 10-bar M1 directional efficiency ratio (net move / gross path) to detect choppy random noise
+  const effSlice = m1Candles.slice(-11);
+  let m1EfficiencyRatio = 1;
+  if (effSlice.length >= 4) {
+    const netMove = Math.abs(effSlice[effSlice.length - 1].close - effSlice[0].close);
+    let grossMove = 0;
+    for (let i = 1; i < effSlice.length; i++) {
+      grossMove += Math.abs(effSlice[i].close - effSlice[i - 1].close);
+    }
+    m1EfficiencyRatio = grossMove > 0 ? netMove / grossMove : 0;
+  }
+
+  // Horizon-sensitive directional weighting:
+  // - 1m weights M1 EMA/RSI & 60s micro-momentum tighter
+  // - 3m & 5m weight M5/M15 higher-timeframe alignment more heavily
+  const isLongHorizon = fixedExpiry === '3m' || fixedExpiry === '5m';
+  const m15Weight = fixedExpiry === '5m' ? 28 : fixedExpiry === '3m' ? 26 : fixedExpiry === '1m' ? 18 : 22;
+  const m5Weight = fixedExpiry === '5m' ? 22 : fixedExpiry === '3m' ? 18 : fixedExpiry === '1m' ? 12 : 14;
+  const m1EmaWeight = fixedExpiry === '1m' ? 20 : isLongHorizon ? 14 : 18;
+  const m1EmaWeakWeight = fixedExpiry === '1m' ? 11 : isLongHorizon ? 9 : 11;
+  const tickWeight = fixedExpiry === '1m' ? 22 : isLongHorizon ? 12 : 18;
+  const tickWeakWeight = fixedExpiry === '1m' ? 10 : isLongHorizon ? 6 : 10;
+
   let bullScore = 0;
   let bearScore = 0;
 
-  // M15 higher-timeframe bias (22 pts)
-  if (m15Context.bias === 'BULLISH') bullScore += 22;
-  else if (m15Context.bias === 'BEARISH') bearScore += 22;
+  // M15 higher-timeframe bias
+  if (m15Context.bias === 'BULLISH') bullScore += m15Weight;
+  else if (m15Context.bias === 'BEARISH') bearScore += m15Weight;
 
-  // M5 medium bias (14 pts)
-  if (m5Context.bias === 'BULLISH') bullScore += 14;
-  else if (m5Context.bias === 'BEARISH') bearScore += 14;
+  // M5 medium bias
+  if (m5Context.bias === 'BULLISH') bullScore += m5Weight;
+  else if (m5Context.bias === 'BEARISH') bearScore += m5Weight;
 
-  // M1 EMA(9/21) trend (18 pts)
-  if (ema9M1 > ema21M1) bullScore += latestPrice >= ema9M1 ? 18 : 11;
-  else if (ema9M1 < ema21M1) bearScore += latestPrice <= ema9M1 ? 18 : 11;
+  // M1 EMA(9/21) trend
+  if (ema9M1 > ema21M1) bullScore += latestPrice >= ema9M1 ? m1EmaWeight : m1EmaWeakWeight;
+  else if (ema9M1 < ema21M1) bearScore += latestPrice <= ema9M1 ? m1EmaWeight : m1EmaWeakWeight;
 
   // M1 RSI(14) healthy directional zone (14 pts), strong extended zone (8 pts)
   if (rsi14M1 >= 52 && rsi14M1 <= 72) bullScore += 14;
@@ -533,11 +566,11 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   if (rsi14M1 <= 48 && rsi14M1 >= 28) bearScore += 14;
   else if ((rsi14M1 < 28 && rsi14M1 >= 14) || (rsi14M1 <= 65 && rsi14M1 > 48 && m1Bias === 'BEARISH')) bearScore += 8;
 
-  // 60s tick micro-trend + price momentum proxy (18 pts)
-  if (microSlopeNorm > 0.08 && momentumProxy.buyPct >= 54) bullScore += 18;
-  else if (netMicroPips > 0 && momentumProxy.buyPct >= 50) bullScore += 10;
-  if (microSlopeNorm < -0.08 && momentumProxy.sellPct >= 54) bearScore += 18;
-  else if (netMicroPips < 0 && momentumProxy.sellPct >= 50) bearScore += 10;
+  // 60s tick micro-trend + price momentum proxy
+  if (microSlopeNorm > 0.08 && momentumProxy.buyPct >= 54) bullScore += tickWeight;
+  else if (netMicroPips > 0 && momentumProxy.buyPct >= 50) bullScore += tickWeakWeight;
+  if (microSlopeNorm < -0.08 && momentumProxy.sellPct >= 54) bearScore += tickWeight;
+  else if (netMicroPips < 0 && momentumProxy.sellPct >= 50) bearScore += tickWeakWeight;
 
   // Bollinger expansion vs squeeze (8 pts)
   const isBbExpanded = bbM1.bandwidth > 0.00025;
@@ -561,6 +594,9 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   const m15Agreed =
     (candidateDirection === 'CALL' && m15Context.bias === 'BULLISH') ||
     (candidateDirection === 'PUT' && m15Context.bias === 'BEARISH');
+  const m1Agreed =
+    (candidateDirection === 'CALL' && m1Bias === 'BULLISH') ||
+    (candidateDirection === 'PUT' && m1Bias === 'BEARISH');
   const roomToTargetAtr =
     candidateDirection === 'CALL'
       ? roomToResistanceAtr
@@ -568,18 +604,6 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       ? roomToSupportAtr
       : 0;
   const hasProximityWarning = roomToTargetAtr < 0.9;
-
-  // Compute 10-bar M1 directional efficiency ratio (net move / gross path) to detect choppy random noise
-  const effSlice = m1Candles.slice(-11);
-  let m1EfficiencyRatio = 1;
-  if (effSlice.length >= 4) {
-    const netMove = Math.abs(effSlice[effSlice.length - 1].close - effSlice[0].close);
-    let grossMove = 0;
-    for (let i = 1; i < effSlice.length; i++) {
-      grossMove += Math.abs(effSlice[i].close - effSlice[i - 1].close);
-    }
-    m1EfficiencyRatio = grossMove > 0 ? netMove / grossMove : 0;
-  }
 
   const dominantMomentumPct =
     candidateDirection === 'CALL'
@@ -616,12 +640,20 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       ? [m15Context.bias, m5Context.bias, m1Bias].filter((b) => b === 'BEARISH').length
       : 0;
 
-  const { expiry, rationale: expiryRationale } = chooseDynamicExpiry({
+  const dynamicSelection = chooseDynamicExpiry({
     atrPercentile: atrPct,
     bbBandwidth: bbM1.bandwidth,
     microSlopeNorm,
     alignedWindows,
+    m1EfficiencyRatio,
+    dominantMomentumPct,
   });
+
+  // Always honour user's fixed expiry choice; never silently swap it.
+  const expiry: BinaryExpiry = fixedExpiry ?? dynamicSelection.expiry;
+  const expiryRationale = fixedExpiry
+    ? `Analysed specifically for your ${fixedExpiry} horizon (M15 ${m15Context.bias}, M5 ${m5Context.bias}, M1 ATR ${atrPct}th pct).`
+    : dynamicSelection.rationale;
 
   const snapshot: Record<string, unknown> = {
     ...baseSnapshot,
@@ -634,6 +666,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       bbBandwidth: parseFloat(bbM1.bandwidth.toFixed(6)),
       atr14: atr14M1,
       atrPercentile: atrPct,
+      efficiencyRatio: parseFloat(m1EfficiencyRatio.toFixed(3)),
       bias: m1Bias,
     },
     m5: { bias: m5Context.bias, ema9: m5Context.ema9, ema21: m5Context.ema21, rsi14: m5Context.rsi14 },
@@ -658,13 +691,21 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       isSynthetic,
     },
     expiryChosen: expiry,
+    expiryMode: fixedExpiry ? 'FIXED' : 'AUTO',
   };
 
   // =========================================================================
-  // 8. CONFLUENCE & CHOP / COUNTER-TREND GUARDS -> HONEST WAIT
+  // 8. CONFLUENCE, EXPIRY-SPECIFIC THRESHOLDS & CHOP GUARDS -> HONEST WAIT
   // =========================================================================
   if (atrPct < 8) {
-    const reason = `Dead volatility regime (M1 ATR at ${atrPct}th percentile) — prices lack movement to clear expiry cleanly.`;
+    const suggestion =
+      fixedExpiry === '1m' || fixedExpiry === '2m'
+        ? 'The market is too quiet for a 1-minute trade. Try 3 or 5 minutes.'
+        : 'Stand aside until ATR expands above compression lows.';
+    const reason =
+      fixedExpiry === '1m'
+        ? `The market is too quiet for a 1-minute trade (M1 ATR at ${atrPct}th percentile). Try 3 or 5 minutes.`
+        : `Dead volatility regime (M1 ATR at ${atrPct}th percentile) — prices lack movement to clear expiry cleanly.`;
     return buildWaitResult({
       input,
       nowMs,
@@ -676,9 +717,67 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       reasons: [
         reason,
         `M1 Bollinger bandwidth compressed (${bbM1.bandwidth.toFixed(5)}).`,
-        'Stand aside until ATR breaks back above compression lows.',
+        suggestion,
       ],
       inputsSnapshot: { ...snapshot, blocker: 'DEAD_VOLATILITY' },
+    });
+  }
+
+  // Expiry-specific minimum volatility requirements when user selects a fixed horizon
+  if (fixedExpiry === '1m' && (atrPct < 40 || bbM1.bandwidth < 0.0004)) {
+    const reason = `The market is too quiet for a 1-minute trade (M1 ATR at ${atrPct}th percentile; 1m requires >= 40th percentile). Try 3 or 5 minutes.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 54),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        `M1 Bollinger bandwidth (${bbM1.bandwidth.toFixed(5)}) shows limited short-term expansion for a 60s contract.`,
+        'Try 3 or 5 minutes, or switch horizon to Auto.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_1M_TOO_QUIET' },
+    });
+  }
+
+  if (fixedExpiry === '2m' && atrPct < 26) {
+    const reason = `The market is too quiet for a 2-minute trade (M1 ATR at ${atrPct}th percentile). Try 3 or 5 minutes.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 55),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        '2-minute trades require moderate M1 candle expansion to clear entry spreads cleanly.',
+        'Try 3 or 5 minutes, or switch horizon to Auto.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_2M_TOO_QUIET' },
+    });
+  }
+
+  if (fixedExpiry === '3m' && atrPct < 14) {
+    const reason = `Volatility is too quiet for a 3-minute trade (M1 ATR at ${atrPct}th percentile). Try 5 minutes or wait for expansion.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 55),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        'Compressed volatility leaves 3-minute expiries vulnerable to flat pin risk around strike.',
+        'Try 5 minutes or wait for M1/M5 range expansion.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_3M_TOO_QUIET' },
     });
   }
 
@@ -694,7 +793,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
       whyNotTrade: reason,
       reasons: [
         reason,
-        'Spikes distort fixed-expiry entry risk within 30s–5m windows.',
+        'Spikes distort fixed-expiry entry risk within 1m–5m windows.',
         'Wait for volatility to cool back into normal range.',
       ],
       inputsSnapshot: { ...snapshot, blocker: 'EXTREME_VOLATILITY' },
@@ -717,6 +816,86 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
         'Capital preserved with WAIT until structure, M1/M15 EMAs, and live ticks align.',
       ],
       inputsSnapshot: { ...snapshot, blocker: 'LOW_CONFLUENCE' },
+    });
+  }
+
+  // Expiry-specific momentum & higher-timeframe alignment thresholds
+  if (
+    fixedExpiry === '1m' &&
+    (!m1Agreed || Math.abs(microSlopeNorm) < 0.2 || dominantMomentumPct < 56 || m1EfficiencyRatio < 0.35)
+  ) {
+    const reason = `Short-term tick movement is too noisy or weak for a 1-minute trade (${dominantMomentumPct}% aligned tick flow). Try 3 or 5 minutes or switch to Auto.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 60),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        `1m entries require tight M1 candle (${m1Bias}) and 60s tick slope agreement.`,
+        'Try 3 or 5 minutes so temporary intrabar fluctuations have room to settle.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_1M_MICRO_MOMENTUM' },
+    });
+  }
+
+  if (fixedExpiry === '2m' && !m5Agreed && (!m1Agreed || dominantMomentumPct < 56)) {
+    const reason = `M5 (${m5Context.bias}) and M1 micro-momentum do not align cleanly for a 2-minute trade. Try 3 or 5 minutes or switch to Auto.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 60),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        `M15 is ${m15Context.bias}, M5 is ${m5Context.bias}, and M1 is ${m1Bias}.`,
+        'Wait for M5 or tighter M1 tick follow-through before entering.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_2M_ALIGNMENT' },
+    });
+  }
+
+  if (fixedExpiry === '3m' && !m5Agreed) {
+    const reason = `M5 timeframe (${m5Context.bias}) does not confirm ${candidateDirection} for a 3-minute trade. Wait for M5 alignment or switch to Auto.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 60),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        `3-minute expiries weight M5/M15 candle structure over short 1-minute bursts.`,
+        'Wait for M5 EMA alignment or switch horizon to Auto.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_3M_M5_ALIGNMENT' },
+    });
+  }
+
+  if (fixedExpiry === '5m' && (!m5Agreed || !m15Agreed)) {
+    const reason = `A 5-minute trade requires both M5 (${m5Context.bias}) and M15 (${m15Context.bias}) to agree with ${candidateDirection}. Wait for higher-timeframe alignment or try Auto.`;
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: Math.min(rawScore, 60),
+      expiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        '5-minute horizons rely on sustained M5 and M15 directional agreement.',
+        'Stand by until both M5 and M15 line up, or switch to Auto.',
+      ],
+      inputsSnapshot: { ...snapshot, blocker: 'EXPIRY_5M_HTF_ALIGNMENT' },
     });
   }
 

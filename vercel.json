@@ -35,5 +35,27 @@
         }
       ]
     }
+  ],
+  "crons": [
+    { "path": "/api/history/refresh?symbol=frxEURUSD&tf=ALL", "schedule": "0 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxGBPUSD&tf=ALL", "schedule": "3 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxUSDJPY&tf=ALL", "schedule": "6 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxAUDUSD&tf=ALL", "schedule": "9 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxUSDCAD&tf=ALL", "schedule": "12 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxUSDCHF&tf=ALL", "schedule": "15 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxNZDUSD&tf=ALL", "schedule": "18 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxEURGBP&tf=ALL", "schedule": "21 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxEURJPY&tf=ALL", "schedule": "24 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxGBPJPY&tf=ALL", "schedule": "27 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxAUDJPY&tf=ALL", "schedule": "30 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxEURAUD&tf=ALL", "schedule": "33 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxEURCAD&tf=ALL", "schedule": "36 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxGBPAUD&tf=ALL", "schedule": "39 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxGBPCHF&tf=ALL", "schedule": "42 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxXAUUSD&tf=ALL", "schedule": "45 2 * * *" },
+    { "path": "/api/history/refresh?symbol=frxXAGUSD&tf=ALL", "schedule": "48 2 * * *" },
+    { "path": "/api/history/refresh?symbol=cryBTCUSD&tf=ALL", "schedule": "51 2 * * *" },
+    { "path": "/api/history/refresh?symbol=cryETHUSD&tf=ALL", "schedule": "54 2 * * *" },
+    { "path": "/api/history/refresh?symbol=cryLTCUSD&tf=ALL", "schedule": "57 2 * * *" }
   ]
 }

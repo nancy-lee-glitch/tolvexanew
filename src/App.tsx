@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import type {
+  AnalysisProfile,
   AssetConfig,
   SignalData,
   SessionStats,
@@ -11,6 +12,11 @@ import type {
   ExternalBrokerConfig,
   BrokersSettings,
 } from './types.ts';
+import type { MarketContextSummary } from './utils/engines/marketContext.ts';
+import {
+  isChartSignalExpiredOrInvalidated,
+  type EngineChartSignal,
+} from './utils/chartOverlays.ts';
 import { MarketRadar } from './components/MarketRadar.tsx';
 import { LiveTicker, ASSETS } from './components/LiveTicker.tsx';
 import { getDefaultActiveAsset } from './services/symbolMap.ts';
@@ -117,6 +123,34 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState<number>(1);
   const [isFeedActive, setIsFeedActive] = useState<boolean>(true);
   const [feedHealthStatus, setFeedHealthStatus] = useState<string>('CONNECTING');
+  const [activeChartSignal, setActiveChartSignal] = useState<EngineChartSignal | null>(null);
+  const [activeMarketContext, setActiveMarketContext] = useState<MarketContextSummary | null>(null);
+  const [activeAnalysisProfile, setActiveAnalysisProfile] = useState<AnalysisProfile>('BINARY_QUICK');
+  const handleClearChartSignal = useCallback(() => {
+    setActiveChartSignal(null);
+  }, []);
+
+  // Clear chart signal & context when active asset changes
+  useEffect(() => {
+    setActiveChartSignal(null);
+    setActiveMarketContext(null);
+  }, [activeAsset.symbol]);
+
+  // Auto-clear chart signal when validity window expires or MT5 invalidation level triggers
+  useEffect(() => {
+    if (!activeChartSignal || activeChartSignal.direction === 'WAIT') return;
+    if (isChartSignalExpiredOrInvalidated(activeChartSignal, currentPrice, Date.now())) {
+      setActiveChartSignal(null);
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (isChartSignalExpiredOrInvalidated(activeChartSignal, currentPrice, Date.now())) {
+        setActiveChartSignal(null);
+      }
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [activeChartSignal, currentPrice]);
+
   const isDebugMode =
     typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('debug') === '1';
 
@@ -612,16 +646,18 @@ export default function App() {
               {/* Quick Context Bar */}
               <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
-                  <span className={`w-2 h-2 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : feedHealthStatus === 'MARKET_CLOSED' ? 'bg-amber-400' : 'bg-rose-500 animate-ping'}`} />
+                  <span className={`w-2 h-2 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : feedHealthStatus === 'MARKET_CLOSED' ? 'bg-amber-400' : feedHealthStatus === 'IDLE' ? 'bg-slate-400' : 'bg-rose-500 animate-ping'}`} />
                   <span className="font-bold text-white">Execution Cockpit</span>
                   <span className={`text-[10px] px-2 py-0.5 rounded-md font-mono font-bold ${
                     isFeedActive
                       ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                       : feedHealthStatus === 'MARKET_CLOSED'
                       ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      : feedHealthStatus === 'IDLE'
+                      ? 'bg-slate-800 text-slate-300 border border-slate-700'
                       : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                   }`}>
-                    {isFeedActive ? 'LIVE' : feedHealthStatus === 'MARKET_CLOSED' ? 'WEEKEND CLOSED' : feedHealthStatus}
+                    {isFeedActive ? 'LIVE' : feedHealthStatus === 'MARKET_CLOSED' ? 'WEEKEND CLOSED' : feedHealthStatus === 'IDLE' ? 'Idle — pick an asset' : feedHealthStatus}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -654,6 +690,10 @@ export default function App() {
                   setFeedHealthStatus(status);
                 }}
                 user={user}
+                signal={activeChartSignal}
+                marketContext={activeMarketContext}
+                analysisProfile={activeAnalysisProfile}
+                onClearSignal={handleClearChartSignal}
               />
 
               {/* Multi-Timeframe Algorithmic Signal Engine & Lockout Loop */}
@@ -671,6 +711,9 @@ export default function App() {
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
                 isFeedActive={isFeedActive}
                 feedHealthStatus={feedHealthStatus}
+                onSignalOutput={setActiveChartSignal}
+                onMarketContextUpdate={setActiveMarketContext}
+                onProfileChange={setActiveAnalysisProfile}
               />
 
               {/* Risk Advisor & 2% Stake Protection */}

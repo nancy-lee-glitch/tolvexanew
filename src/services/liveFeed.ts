@@ -11,7 +11,7 @@
  * Framework-free (no React, no deps). Clock and WebSocket are injectable so it can be unit-tested.
  */
 
-export type FeedStatus = 'CONNECTING' | 'LIVE' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED';
+export type FeedStatus = 'CONNECTING' | 'IDLE' | 'LIVE' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED';
 
 export interface Tick { symbol: string; price: number; epoch: number }
 export interface Candle { time: number; open: number; high: number; low: number; close: number }
@@ -203,6 +203,7 @@ export class LiveFeed {
       this.lastMessageAt = this.openedAt; // fresh socket: no instant keep-alive ping
       // NOTE: we do NOT reset backoff here. Only a real message proves the link works.
       for (const [symbol, s] of this.subs) if (s.wanted) this.sendSubscribe(symbol);
+      this.evaluate('open');
     };
     ws.onmessage = (ev) => { if (this.ws === ws && !this.destroyed) this.onMessage(ev.data); };
     ws.onerror = () => { /* never count here; onclose always follows */ };
@@ -349,7 +350,15 @@ export class LiveFeed {
     const stale = (this.o.staleAfterMs ?? defaultStaleAfterMs)(this.active || '');
 
     if (!this.online) return this.setStatus('OFFLINE', reason);
-    if (this.active && this.marketClosed(this.active)) return this.setStatus('MARKET_CLOSED', reason);
+    if (!this.active) {
+      if (this.isOpen()) return this.setStatus('IDLE', reason);
+      const downForNoActive = now - this.downSince;
+      if (downForNoActive < this.o.reconnectHoldMs && this.status === 'CONNECTING') return;
+      if (this.failures >= 6 && downForNoActive > 60000) return this.setStatus('OFFLINE', reason);
+      if (this.failures > 0) return this.setStatus('RECONNECTING', reason);
+      return this.setStatus('IDLE', reason);
+    }
+    if (this.marketClosed(this.active)) return this.setStatus('MARKET_CLOSED', reason);
 
     if (this.isOpen()) {
       const last = this.lastTickAt.get(this.active) ?? 0;

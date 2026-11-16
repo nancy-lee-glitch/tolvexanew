@@ -42,7 +42,7 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="mode-switcher"]', '#mode-toggle-quick'],
     title: '3. Dual Quantitative Analysis Modes',
     description:
-      'Select your execution profile: Binary Options (30s to 5m CALL/PUT contracts with payout break-even math) or MT5 Style (BUY/SELL setups with structural Stop Loss & TP1/TP2 targets).',
+      'Select your execution profile: Binary Options (1m to 5m CALL/PUT contracts with payout break-even math) or MT5 Style (BUY/SELL setups with structural Stop Loss & TP1/TP2 targets).',
     tip: 'Binary mode requires fresh live ticks; MT5 mode uses candle structure and works even during quiet FX sessions.',
     badge: 'Step 3 of 9 • Dual Engines',
     shape: 'box',
@@ -54,8 +54,8 @@ export const TOUR_STEPS: TourStep[] = [
     fallbackSelectors: ['[data-tour="timeframe-selector"]', '#timeframe-grid'],
     title: '4. Select Operational Horizon',
     description:
-      'Choose your analysis horizon from 30 seconds up to 15 minutes (or higher in MT5). The engine dynamically adjusts indicator smoothing, sampling rates, and noise filters to match.',
-    tip: 'For ExpertOption and Deriv, 30s and 1m horizons evaluate sub-minute micro-structure momentum.',
+      'In Binary mode, choose Auto or a fixed 1m, 2m, 3m, or 5m expiry. In MT5 mode, switch between Intraday (M15 chart) and Swing (H1 chart) structure.',
+    tip: '1m expiries demand tighter micro-momentum; 3m and 5m weight M5 and M15 higher-timeframe confirmation.',
     badge: 'Step 4 of 9 • Horizons',
     shape: 'box',
     preferredPosition: 'bottom',

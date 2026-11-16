@@ -55,7 +55,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
       },
       {
         title: 'Dynamic Expiries',
-        text: 'Select from 30s, 1m, 2m, 3m, or 5m expiry windows matched to current candle momentum and volatility.',
+        text: 'Select Auto or fixed 1m, 2m, 3m, or 5m expiry windows matched to current candle momentum and volatility.',
       },
       {
         title: 'Multi-Asset Radar',

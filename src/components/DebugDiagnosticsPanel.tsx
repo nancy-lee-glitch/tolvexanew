@@ -33,13 +33,16 @@ export function DebugDiagnosticsPanel() {
   const registryInfo = diag.registry || getAssetRegistryInfo();
   const counts = registryInfo.categoryCounts;
 
+  const isFeedProblem = diag.status === 'OFFLINE' || diag.status === 'RECONNECTING';
+  const statusDisplay = diag.status === 'IDLE' ? 'Idle — pick an asset' : diag.status;
+
   const formatPlainReport = (): string => {
     const ageLabel = diag.tickAgeSec !== null ? `${diag.tickAgeSec}s` : 'N/A';
     return [
       'TICKVERE FEED DIAGNOSTICS',
       `Timestamp: ${new Date().toISOString()}`,
       `Endpoint: ${diag.endpoint || 'N/A'}`,
-      `Feed Status: ${diag.status} (reason: ${diag.reason || 'none'})`,
+      `Feed Status: ${statusDisplay} (reason: ${diag.reason || 'none'}, issue: ${isFeedProblem ? 'YES' : 'NO'})`,
       `Last Tick Age: ${ageLabel}`,
       `Reconnect Count (since page load): ${diag.reconnectCount}`,
       `Registry Source: ${registryInfo.source} (reason: ${registryInfo.reason})`,
@@ -104,8 +107,11 @@ export function DebugDiagnosticsPanel() {
 
         <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 space-y-1">
           <div className="text-slate-400">Feed Status &amp; Reason</div>
-          <div className="text-white font-bold">
-            {diag.status} <span className="text-slate-400 font-normal">({diag.reason || 'none'})</span>
+          <div className={`font-bold ${isFeedProblem ? 'text-rose-300' : 'text-white'}`}>
+            {statusDisplay}{' '}
+            <span className="text-slate-400 font-normal">
+              ({diag.status === 'IDLE' ? 'no feed problems' : diag.reason || 'none'})
+            </span>
           </div>
         </div>
 

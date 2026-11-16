@@ -28,7 +28,7 @@ export function VipSafeRadarModal({
 }: VipSafeRadarModalProps) {
   const handleUpgrade = onUpgradeVip || onOpenUpgrade || onClose;
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'CRYPTO' | 'STOCK' | 'FOREX' | 'INDEX' | 'SAFE_ONLY'>('ALL');
-  const [selectedTimeframe, setSelectedTimeframe] = useState<'30s' | '1m' | '5m' | '15m' | '1h'>('1m');
+  const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '2m' | '3m' | '5m' | 'M15' | 'H1'>('1m');
   const [lastScannedTime, setLastScannedTime] = useState<number>(Date.now());
   const [secondsUntilRefresh, setSecondsUntilRefresh] = useState<number>(30);
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -57,7 +57,12 @@ export function VipSafeRadarModal({
 
   // Generate multi-asset screener data using real live confirmation path
   const screenerData: VipScreenerAsset[] = useMemo(() => {
-    const tfMinutes = selectedTimeframe === '30s' ? 0.5 : selectedTimeframe === '1h' ? 60 : parseInt(selectedTimeframe) || 1;
+    const tfMinutes =
+      selectedTimeframe === 'H1'
+        ? 60
+        : selectedTimeframe === 'M15'
+        ? 15
+        : parseInt(selectedTimeframe, 10) || 1;
 
     return ASSETS.map((asset) => {
       const existing = getAssetTicks(asset.symbol);
@@ -176,7 +181,7 @@ export function VipSafeRadarModal({
                 </span>
               </div>
               <p className="text-[10px] sm:text-xs text-slate-400 truncate">
-                Confluence screener &bull; 30s auto-scan
+                Confluence screener &bull; auto-scans every 30 seconds
               </p>
             </div>
           </div>
@@ -245,14 +250,15 @@ export function VipSafeRadarModal({
 
             <select
               value={selectedTimeframe}
-              onChange={(e) => setSelectedTimeframe(e.target.value as any)}
+              onChange={(e) => setSelectedTimeframe(e.target.value as '1m' | '2m' | '3m' | '5m' | 'M15' | 'H1')}
               className="px-2.5 py-1.5 text-xs font-mono bg-slate-950 border border-slate-800 rounded-xl text-emerald-400 font-bold focus:outline-none focus:border-emerald-500"
             >
-              <option value="30s">30 SEC</option>
               <option value="1m">1 MIN</option>
+              <option value="2m">2 MIN</option>
+              <option value="3m">3 MIN</option>
               <option value="5m">5 MIN</option>
-              <option value="15m">15 MIN</option>
-              <option value="1h">1 HOUR</option>
+              <option value="M15">M15</option>
+              <option value="H1">H1</option>
             </select>
           </div>
         </div>

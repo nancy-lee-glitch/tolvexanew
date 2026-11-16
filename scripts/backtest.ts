@@ -175,6 +175,8 @@ export function runBacktest(ticks: number[], config: BacktestConfig): BacktestRe
       price: p,
     }));
 
+    const backtestExpiry =
+      expirySeconds >= 300 ? '5m' : expirySeconds >= 180 ? '3m' : expirySeconds >= 120 ? '2m' : '1m';
     const signal = analyzeBinarySignal({
       asset,
       platform: 'deriv_binary',
@@ -185,7 +187,7 @@ export function runBacktest(ticks: number[], config: BacktestConfig): BacktestRe
       feedStatus: 'LIVE',
       payoutPct: brokerPayout * 100,
       isOtc: false,
-      preferredExpiry: '1m',
+      preferredExpiry: backtestExpiry,
       nowMs,
     });
 

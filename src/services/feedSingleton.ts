@@ -221,7 +221,7 @@ export function getLiveFeed(): LiveFeed {
           reconnectCount += 1;
         }
         if (
-          (event.status === 'LIVE' || event.status === 'DELAYED' || event.status === 'MARKET_CLOSED') &&
+          (event.status === 'LIVE' || event.status === 'DELAYED' || event.status === 'MARKET_CLOSED' || event.status === 'IDLE') &&
           getAssetRegistryInfo().source !== 'live' &&
           sharedFeed
         ) {

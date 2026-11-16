@@ -30,7 +30,8 @@ export interface SafeCloseAnalysis {
 }
 
 export type SignalStrength = 'Low' | 'Medium' | 'High';
-export type BinaryExpiryWindow = '30s' | '1m' | '2m' | '3m' | '5m';
+export type BinaryExpiryWindow = '1m' | '2m' | '3m' | '5m';
+export type BinaryExpirySelection = BinaryExpiryWindow | 'auto';
 
 export interface SignalHistoryItem {
   id: string;
@@ -74,7 +75,7 @@ export interface VipScreenerAsset {
   volatility: 'LOW' | 'NORMAL' | 'HIGH';
   safetyRating: 'SAFE TO TRADE' | 'MODERATE RISK' | 'WAIT / VOLATILE';
   recommendedAction: 'CALL' | 'PUT' | 'WAIT';
-  bestTimeframe: '30s' | '1m' | '5m' | '15m' | '1h';
+  bestTimeframe: '1m' | '2m' | '3m' | '5m' | 'M15' | 'H1';
   confluenceScore: number;
   strength: SignalStrength;
   safeCloseTiming: string;
@@ -519,7 +520,7 @@ export interface NowPaymentsPayment {
   actuallyPaid?: number;
 }
 
-export type FeedHealthStatus = 'CONNECTING' | 'LIVE' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED';
+export type FeedHealthStatus = 'CONNECTING' | 'IDLE' | 'LIVE' | 'DELAYED' | 'RECONNECTING' | 'OFFLINE' | 'MARKET_CLOSED';
 
 export type PageView =
   | 'landing'

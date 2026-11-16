@@ -1,6 +1,7 @@
 import type {
   AnalysisProfile,
   AssetConfig,
+  BinaryExpirySelection,
   BinaryExpiryWindow,
   FeedHealthStatus,
   PriceDistributionProxy,
@@ -10,6 +11,7 @@ import type {
 import type { Candle, FeedStatus } from '../../services/liveFeed.ts';
 
 export type BinaryExpiry = BinaryExpiryWindow;
+export type BinaryExpiryChoice = BinaryExpirySelection;
 export type EngineFeedStatus = FeedStatus | FeedHealthStatus;
 
 export interface MarketEventItem {
@@ -41,7 +43,7 @@ export interface BinaryEngineInput {
   payoutPct?: number;
   isOtc?: boolean;
   marketEvents?: MarketEventItem[];
-  preferredExpiry?: BinaryExpiry;
+  preferredExpiry?: BinaryExpiryChoice;
   nowMs?: number;
 }
 

@@ -23,11 +23,15 @@ import {
 import {
   analyzeBinarySignal,
   analyzeMT5Signal,
+  computeMarketContext,
   formatBreakEvenStatement,
   inferAssetCurrencies,
   normalizeSpecKey,
   type BinaryExpiry,
+  type BinaryExpiryChoice,
+  type MarketContextSummary,
 } from '../utils/engines/index.ts';
+import { MarketContextPanel } from './MarketContextPanel.tsx';
 import { getOrFetchCandles } from '../services/candleStore.ts';
 import { getCurrentFeedStatus } from '../services/feedSingleton.ts';
 import type { FeedStatus } from '../services/liveFeed.ts';
@@ -46,6 +50,7 @@ import {
 import { getBrokerPlatforms } from '../utils/siteConfigManager.ts';
 import { isSyntheticAsset, SYNTHETIC_INDICES_NOTICE } from '../services/symbolMap.ts';
 import { SignalHistory } from './SignalHistory.tsx';
+import type { EngineChartSignal } from '../utils/chartOverlays.ts';
 
 interface SignalEngineProps {
   activeAsset: AssetConfig;
@@ -61,16 +66,41 @@ interface SignalEngineProps {
   onOpenVipRadar?: () => void;
   isFeedActive?: boolean;
   feedHealthStatus?: string;
+  onSignalOutput?: (sig: EngineChartSignal | null) => void;
+  onMarketContextUpdate?: (ctx: MarketContextSummary | null) => void;
+  onProfileChange?: (profile: AnalysisProfile) => void;
 }
 
-export const TIMEFRAMES = [
-  { id: '30s', label: '30 SEC', seconds: 30, desc: 'Micro-Scalp & Tick Flow' },
-  { id: '1m', label: '1 MIN', seconds: 60, desc: 'EMA 9/21 Confluence & Momentum' },
-  { id: '2m', label: '2 MIN', seconds: 120, desc: 'Dual-Candle Continuation' },
-  { id: '3m', label: '3 MIN', seconds: 180, desc: 'Structure Breakout' },
-  { id: '5m', label: '5 MIN', seconds: 300, desc: 'Macro Trend Momentum' },
-  { id: '15m', label: '15 MIN', seconds: 900, desc: 'Key Level Reversal' },
+export const BINARY_HORIZONS: Array<{
+  id: BinaryExpiryChoice;
+  label: string;
+  sub: string;
+  desc: string;
+  seconds: number;
+}> = [
+  { id: 'auto', label: 'Auto', sub: 'Best fit (1m–5m)', desc: 'Auto-picks 1m–5m from volatility & trend', seconds: 60 },
+  { id: '1m', label: '1 MIN — Fast, higher risk', sub: '1 min expiry', desc: '1m fast expiry (higher risk)', seconds: 60 },
+  { id: '2m', label: '2 MIN', sub: '2 min expiry', desc: '2m continuation expiry', seconds: 120 },
+  { id: '3m', label: '3 MIN', sub: '3 min expiry', desc: '3m M5/M15 structure expiry', seconds: 180 },
+  { id: '5m', label: '5 MIN', sub: '5 min expiry', desc: '5m M5 + M15 trend expiry', seconds: 300 },
 ];
+
+export const MT5_HORIZONS: Array<{
+  id: 'M15' | 'H1';
+  label: string;
+  sub: string;
+  desc: string;
+}> = [
+  { id: 'M15', label: 'Intraday — M15 chart', sub: 'M15 structure', desc: 'Intraday M15 chart structure' },
+  { id: 'H1', label: 'Swing — H1 chart', sub: 'H1 structure', desc: 'Swing H1 chart structure' },
+];
+
+const BINARY_EXPIRY_SEC_MAP: Record<BinaryExpiry, number> = {
+  '1m': 60,
+  '2m': 120,
+  '3m': 180,
+  '5m': 300,
+};
 
 export function SignalEngine({
   activeAsset,
@@ -86,6 +116,9 @@ export function SignalEngine({
   onOpenVipRadar,
   isFeedActive = true,
   feedHealthStatus = 'LIVE',
+  onSignalOutput,
+  onMarketContextUpdate,
+  onProfileChange,
 }: SignalEngineProps) {
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
   const [platforms] = useState<BrokerPlatformItem[]>(() => getBrokerPlatforms());
@@ -113,6 +146,15 @@ export function SignalEngine({
   // Derived Profile & quantEngine mode
   const analysisProfile: AnalysisProfile = currentPlatform.profile;
   const analysisMode: AnalysisMode = analysisProfile === 'MT5' ? 'mt5' : 'quick';
+
+  const latestSymbolRef = useRef<string>(activeAsset?.symbol || '');
+  useEffect(() => {
+    latestSymbolRef.current = activeAsset?.symbol || '';
+  }, [activeAsset?.symbol]);
+
+  useEffect(() => {
+    onProfileChange?.(analysisProfile);
+  }, [analysisProfile, onProfileChange]);
 
   // Broker availability, payout metadata & OTC check
   const [brokerMeta, setBrokerMeta] = useState<BrokerAssetMeta>({
@@ -167,10 +209,14 @@ export function SignalEngine({
       console.warn('[SignalEngine] Failed to save selected platform preference to storage:', err);
     }
     if (signal) setSignal(null);
+    onSignalOutput?.(null);
   };
 
-  // Timeframe
-  const [selectedTf, setSelectedTf] = useState<string>('1m');
+  // Separate analysis horizons for Binary ('auto' | '1m' | '2m' | '3m' | '5m') and MT5 ('M15' | 'H1')
+  const [binaryHorizon, setBinaryHorizon] = useState<BinaryExpiryChoice>('auto');
+  const [mt5Horizon, setMt5Horizon] = useState<'M15' | 'H1'>('H1');
+  const [mt5NowMs, setMt5NowMs] = useState<number>(() => Date.now());
+  const selectedHorizonTf = analysisMode === 'quick' ? (binaryHorizon === 'auto' ? '2m' : binaryHorizon) : mt5Horizon;
 
   // Auto-Scan Switch State (Cockpit only: auto re-scan after WAIT)
   const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => {
@@ -205,10 +251,24 @@ export function SignalEngine({
   
   // Signal State
   const [signal, setSignal] = useState<SignalData | null>(null);
+  const [marketContext, setMarketContext] = useState<MarketContextSummary | null>(null);
+  const [isLoadingContext, setIsLoadingContext] = useState<boolean>(false);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [freshnessSec, setFreshnessSec] = useState<number>(6.0);
   const [isExpired, setIsExpired] = useState<boolean>(false);
   const [creditNotice, setCreditNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSignal(null);
+    setMarketContext(null);
+    setIsLoadingContext(false);
+    setIsLocked(false);
+    setIsExpired(false);
+    setFreshnessSec(0);
+    if (countdownRef.current) clearInterval(countdownRef.current);
+    onSignalOutput?.(null);
+    onMarketContextUpdate?.(null);
+  }, [activeAsset?.symbol, onSignalOutput, onMarketContextUpdate]);
 
   // Binary Stake Sizing (1% - 2% suggested stake) & 3-Loss Cool-Down
   const [binaryBalance, setBinaryBalance] = useState<number>(100);
@@ -330,13 +390,15 @@ export function SignalEngine({
   const isSynthetic = useMemo(() => isSyntheticAsset(activeAsset), [activeAsset]);
 
   const liveAudit: TechnicalAudit = useMemo(() => {
-    return analyzeMarketConfluence(safeTicks, selectedTf, activeAsset?.pipSize || 0.0001, isVIP, analysisMode, activeAsset);
-  }, [safeTicks, selectedTf, activeAsset, isVIP, analysisMode]);
+    const auditTf = analysisMode === 'quick' ? (binaryHorizon === 'auto' ? '1m' : binaryHorizon) : mt5Horizon;
+    return analyzeMarketConfluence(safeTicks, auditTf, activeAsset?.pipSize || 0.0001, isVIP, analysisMode, activeAsset);
+  }, [safeTicks, binaryHorizon, mt5Horizon, activeAsset, isVIP, analysisMode]);
 
   // Safe close analysis
   const safeCloseAnalysis = useMemo(() => {
-    return calculateSafeCloseAnalysis(safeTicks, selectedTf, activeAsset?.pipSize || 0.0001);
-  }, [safeTicks, selectedTf, activeAsset?.pipSize]);
+    const closeTf = analysisMode === 'quick' ? (binaryHorizon === 'auto' ? '1m' : binaryHorizon) : mt5Horizon;
+    return calculateSafeCloseAnalysis(safeTicks, closeTf, activeAsset?.pipSize || 0.0001);
+  }, [safeTicks, binaryHorizon, mt5Horizon, activeAsset?.pipSize, analysisMode]);
 
   // Count consecutive recent Binary losses for "Take a break" cool-down
   const binaryConsecutiveLosses = useMemo(() => {
@@ -358,7 +420,7 @@ export function SignalEngine({
 
   // Rule 3: DELAYED status blocks binary profile only, never MT5 candle-based scans
   const isFeedBlockedForProfile = useMemo(() => {
-    if (feedHealthStatus === 'MARKET_CLOSED') return true;
+    if (feedHealthStatus === 'MARKET_CLOSED' || feedHealthStatus === 'IDLE') return true;
     if (analysisProfile === 'BINARY_QUICK') {
       return !isFeedActive || feedHealthStatus !== 'LIVE';
     }
@@ -369,7 +431,16 @@ export function SignalEngine({
     );
   }, [analysisProfile, isFeedActive, feedHealthStatus]);
 
-  const tfConfig = TIMEFRAMES.find((t) => t.id === selectedTf) || TIMEFRAMES[0];
+  const activeBinaryHorizonCfg = BINARY_HORIZONS.find((h) => h.id === binaryHorizon) || BINARY_HORIZONS[0];
+  const activeMt5HorizonCfg = MT5_HORIZONS.find((h) => h.id === mt5Horizon) || MT5_HORIZONS[1];
+
+  // Refresh MT5 validity countdown every 15s (minutes only, never seconds)
+  useEffect(() => {
+    if (analysisMode !== 'mt5' || !signal || signal.direction === 'WAIT') return;
+    setMt5NowMs(Date.now());
+    const id = setInterval(() => setMt5NowMs(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, [analysisMode, signal]);
 
   // PRIMARY CONFIRMATION ENGINE TRIGGER
   const handleTriggerAnalysis = async () => {
@@ -392,7 +463,7 @@ export function SignalEngine({
       const blockedSignal: SignalData = {
         asset: activeAsset?.name || 'OTC Asset',
         symbol: activeAsset?.symbol,
-        timeframe: selectedTf,
+        timeframe: selectedHorizonTf,
         direction: 'WAIT',
         strength: 'Low',
         trend: 'Neutral',
@@ -408,6 +479,7 @@ export function SignalEngine({
         confluenceFactorsList: [],
       };
       setSignal(blockedSignal);
+      onSignalOutput?.(null);
       setCreditNotice('Analysis disabled for broker-internal OTC assets.');
       return;
     }
@@ -417,7 +489,7 @@ export function SignalEngine({
       const blockedSignal: SignalData = {
         asset: activeAsset?.name || 'Forex Asset',
         symbol: activeAsset?.symbol,
-        timeframe: selectedTf,
+        timeframe: selectedHorizonTf,
         direction: 'WAIT',
         strength: 'Low',
         trend: 'Neutral',
@@ -433,6 +505,7 @@ export function SignalEngine({
         confluenceFactorsList: [],
       };
       setSignal(blockedSignal);
+      onSignalOutput?.(null);
       setCreditNotice('No credits deducted while market is closed.');
       return;
     }
@@ -442,7 +515,7 @@ export function SignalEngine({
       const blockedSignal: SignalData = {
         asset: activeAsset?.name || 'EUR/USD',
         symbol: activeAsset?.symbol,
-        timeframe: selectedTf,
+        timeframe: selectedHorizonTf,
         direction: 'WAIT',
         strength: 'Low',
         trend: 'Neutral',
@@ -452,7 +525,7 @@ export function SignalEngine({
         blockedReason: `NO LIVE DATA: Market feed status is ${feedHealthStatus || 'CONNECTING'}.`,
         plainLanguageReason:
           analysisProfile === 'BINARY_QUICK'
-            ? 'Binary expiry analysis requires an uninterrupted sub-6-second live feed. Signal generation is paused until fresh ticks resume.'
+            ? 'Binary expiry analysis requires an uninterrupted live tick feed. Signal generation is paused until fresh ticks resume.'
             : 'Signal generation is paused while reconnecting to Deriv market data. No credits deducted.',
         whyNotTrade: `Feed status ${feedHealthStatus || 'CONNECTING'} is unsafe for ${analysisProfile === 'BINARY_QUICK' ? 'short-expiry binary entry' : 'analysis'}.`,
         riskNote: 'Trading involves risk. Always wait for confirmed live market feed.',
@@ -460,6 +533,7 @@ export function SignalEngine({
         confluenceFactorsList: [],
       };
       setSignal(blockedSignal);
+      onSignalOutput?.(null);
       setCreditNotice('No credits deducted while waiting for live market data.');
       return;
     }
@@ -471,7 +545,7 @@ export function SignalEngine({
         const blockedSignal: SignalData = {
           asset: activeAsset?.name || 'Asset',
           symbol: activeAsset?.symbol,
-          timeframe: selectedTf,
+          timeframe: selectedHorizonTf,
           direction: 'WAIT',
           strength: 'Low',
           trend: 'Neutral',
@@ -482,11 +556,12 @@ export function SignalEngine({
           plainLanguageReason:
             'Binary options micro-structure signals require real-time tick telemetry under 6 seconds. Waiting for fresh tick from Deriv WebSocket before evaluating setups.',
           whyNotTrade: `Tick feed aged ${tickAgeSec.toFixed(1)}s exceeds the 6-second binary freshness limit.`,
-          riskNote: 'Trading involves risk. Sub-minute expiries require verified low-latency feeds.',
+          riskNote: 'Trading involves risk. Short-expiry entries require verified low-latency feeds.',
           gatePassed: false,
           confluenceFactorsList: [],
         };
         setSignal(blockedSignal);
+        onSignalOutput?.(null);
         setCreditNotice('No credits deducted for delayed tick stream.');
         return;
       }
@@ -496,7 +571,7 @@ export function SignalEngine({
     if (!activeAsset || !activeAsset.symbol) {
       const blockedSignal: SignalData = {
         asset: 'UNKNOWN',
-        timeframe: selectedTf,
+        timeframe: selectedHorizonTf,
         direction: 'WAIT',
         strength: 'Low',
         trend: 'Neutral',
@@ -510,6 +585,7 @@ export function SignalEngine({
         confluenceFactorsList: [],
       };
       setSignal(blockedSignal);
+      onSignalOutput?.(null);
       return;
     }
 
@@ -518,7 +594,7 @@ export function SignalEngine({
       const blockedSignal: SignalData = {
         asset: activeAsset.name,
         symbol: activeAsset.symbol,
-        timeframe: selectedTf,
+        timeframe: selectedHorizonTf,
         direction: 'WAIT',
         strength: 'Low',
         trend: 'Neutral',
@@ -533,6 +609,7 @@ export function SignalEngine({
         confluenceFactorsList: [],
       };
       setSignal(blockedSignal);
+      onSignalOutput?.(null);
       setCreditNotice('No credits deducted for warming tick buffer.');
       return;
     }
@@ -572,18 +649,26 @@ export function SignalEngine({
 
       // SECTION A: NEW DEDICATED BINARY ENGINE
       if (analysisProfile === 'BINARY_QUICK') {
+        const targetSymbol = activeAsset.symbol;
+        setIsLoadingContext(true);
+        const contextCandlesPromise = Promise.all([
+          getOrFetchCandles(targetSymbol, '1d', 90).catch(() => []),
+          getOrFetchCandles(targetSymbol, '4h', 120).catch(() => []),
+          getOrFetchCandles(targetSymbol, '1h', 1400).catch(() => []),
+        ]);
+
         const [m1Candles, m5Candles, m15Candles, latestMeta, latestEvents] = await Promise.all([
-          getOrFetchCandles(activeAsset.symbol, '1m', 120).catch(() => []),
-          getOrFetchCandles(activeAsset.symbol, '5m', 80).catch(() => []),
-          getOrFetchCandles(activeAsset.symbol, '15m', 80).catch(() => []),
-          fetchBrokerAssetMeta(currentPlatform.id, activeAsset.symbol).catch(() => brokerMeta),
+          getOrFetchCandles(targetSymbol, '1m', 120).catch(() => []),
+          getOrFetchCandles(targetSymbol, '5m', 80).catch(() => []),
+          getOrFetchCandles(targetSymbol, '15m', 160).catch(() => []),
+          fetchBrokerAssetMeta(currentPlatform.id, targetSymbol).catch(() => brokerMeta),
           fetchUpcomingMarketEvents().catch(() => marketEvents),
         ]);
 
         setBrokerMeta(latestMeta);
         setMarketEvents(latestEvents);
 
-        const tsTicks = getAssetTimestampedTicks(activeAsset.symbol);
+        const tsTicks = getAssetTimestampedTicks(targetSymbol);
         const nowEpochSec = Math.floor(Date.now() / 1000);
         const normalizedTicks =
           tsTicks.length >= 5
@@ -594,12 +679,6 @@ export function SignalEngine({
               }));
 
         const feedDiag = getCurrentFeedStatus();
-        const preferredExp: BinaryExpiry = (['30s', '1m', '2m', '3m', '5m'] as const).includes(
-          selectedTf as BinaryExpiry
-        )
-          ? (selectedTf as BinaryExpiry)
-          : '1m';
-
         const binaryRes = analyzeBinarySignal({
           asset: activeAsset,
           platform: currentPlatform.id,
@@ -613,7 +692,7 @@ export function SignalEngine({
           payoutPct: latestMeta.payoutPct,
           isOtc: isOtc || latestMeta.isOtc,
           marketEvents: latestEvents,
-          preferredExpiry: preferredExp,
+          preferredExpiry: binaryHorizon,
         });
 
         const mappedSignal: SignalData = {
@@ -651,12 +730,39 @@ export function SignalEngine({
           status: 'READY',
         };
 
+        if (latestSymbolRef.current !== targetSymbol) {
+          setIsLoadingContext(false);
+          setIsRechecking(false);
+          return;
+        }
+
         setSignal(mappedSignal);
+        onSignalOutput?.(binaryRes);
         setIsRechecking(false);
+
+        contextCandlesPromise
+          .then(([d1C, h4C, h1C]) => {
+            if (latestSymbolRef.current !== targetSymbol) return;
+            const ctx = computeMarketContext({
+              asset: activeAsset,
+              currentPrice: binaryRes.entryPrice ?? (currentPrice || 0),
+              m15Candles,
+              h1Candles: h1C,
+              h4Candles: h4C,
+              d1Candles: d1C,
+            });
+            setMarketContext(ctx);
+            onMarketContextUpdate?.(ctx);
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (latestSymbolRef.current === targetSymbol) {
+              setIsLoadingContext(false);
+            }
+          });
 
         const isActionable = binaryRes.direction === 'CALL' || binaryRes.direction === 'PUT';
         if (isActionable) {
-          setSelectedTf(binaryRes.expiry);
           if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
           setAutoScanSecondsRemaining(0);
           setAutoScanAttempt(0);
@@ -732,11 +838,12 @@ export function SignalEngine({
       }
 
       // SECTION B: DEDICATED CANDLE-BASED MT5 ENGINE (Stage 3 Part 2)
+      setIsLoadingContext(true);
       const [d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, dbSpec, latestEvents, tradingProfile] =
         await Promise.all([
           getOrFetchCandles(activeAsset.symbol, '1d', 90).catch(() => []),
           getOrFetchCandles(activeAsset.symbol, '4h', 120).catch(() => []),
-          getOrFetchCandles(activeAsset.symbol, '1h', 160).catch(() => []),
+          getOrFetchCandles(activeAsset.symbol, '1h', 1400).catch(() => []),
           getOrFetchCandles(activeAsset.symbol, '15m', 160).catch(() => []),
           getOrFetchCandles(activeAsset.symbol, '5m', 160).catch(() => []),
           fetchInstrumentSpec(activeAsset.symbol).catch(() => undefined),
@@ -787,7 +894,7 @@ export function SignalEngine({
         activeOverrides[activeAsset.symbol] ??
         activeOverrides[specKey];
 
-      const structureTf = selectedTf === '15m' ? 'M15' : 'H1';
+      const structureTf: 'M15' | 'H1' = mt5Horizon;
       const mt5Res = analyzeMT5Signal({
         asset: activeAsset,
         platform: currentPlatform.id,
@@ -892,7 +999,26 @@ export function SignalEngine({
             : undefined,
       };
 
+      if (latestSymbolRef.current !== activeAsset.symbol) {
+        setIsLoadingContext(false);
+        setIsRechecking(false);
+        return;
+      }
+
+      const mt5Ctx = computeMarketContext({
+        asset: activeAsset,
+        currentPrice: mt5Res.entryPrice || currentPrice,
+        m15Candles,
+        h1Candles,
+        h4Candles,
+        d1Candles,
+      });
+
       setSignal(generatedSignal);
+      setMarketContext(mt5Ctx);
+      onSignalOutput?.(mt5Res);
+      onMarketContextUpdate?.(mt5Ctx);
+      setIsLoadingContext(false);
       setIsRechecking(false);
 
       if (isActionable) {
@@ -924,25 +1050,15 @@ export function SignalEngine({
         logSignalToSupabase(generatedSignal);
         setIsLocked(true);
         setIsExpired(false);
-        setFreshnessSec(6.0);
+        setFreshnessSec(0);
+        setMt5NowMs(Date.now());
+        if (countdownRef.current) clearInterval(countdownRef.current);
 
         if (mt5Res.direction === 'BUY') {
           playCallAudioChime();
         } else {
           playPutAudioChime();
         }
-
-        if (countdownRef.current) clearInterval(countdownRef.current);
-        const start = Date.now();
-        countdownRef.current = setInterval(() => {
-          const elapsed = (Date.now() - start) / 1000;
-          const remaining = Math.max(0, 6.0 - elapsed);
-          setFreshnessSec(remaining);
-          if (remaining <= 0) {
-            if (countdownRef.current) clearInterval(countdownRef.current);
-            setIsExpired(true);
-          }
-        }, 100);
       } else {
         setIsLocked(false);
         setIsExpired(false);
@@ -977,15 +1093,16 @@ export function SignalEngine({
     triggerAnalysisRef.current = handleTriggerAnalysis;
   });
 
-  // Trade Execution tracking
+  // Trade Execution tracking (Binary only)
   const handleExecuteTrade = () => {
     if (!user) {
       onOpenAuth?.('login');
       return;
     }
-    if (!signal || signal.direction === 'WAIT' || isExpired) return;
+    if (!signal || signal.direction === 'WAIT' || isExpired || analysisMode !== 'quick') return;
 
-    const tfSec = tfConfig.seconds;
+    const resolvedExp = (signal.expiry || '1m') as BinaryExpiry;
+    const tfSec = BINARY_EXPIRY_SEC_MAP[resolvedExp] || 60;
     setActiveTrade({
       entryPrice: currentPrice,
       direction: signal.direction as 'CALL' | 'PUT',
@@ -1069,6 +1186,7 @@ export function SignalEngine({
     setIsLocked(false);
     setIsExpired(false);
     setSignal(null);
+    onSignalOutput?.(null);
   };
 
   // Copy MT5 Trade Setup
@@ -1288,35 +1406,65 @@ export function SignalEngine({
         )}
       </div>
 
-      {/* 3. TIMEFRAME SELECTOR */}
+      {/* 3. ANALYSIS HORIZON SELECTOR (Mode-specific: Binary Auto/1m/2m/3m/5m vs MT5 M15/H1) */}
       <div data-tour="timeframe-selector" className="space-y-1.5">
         <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
           <span className="uppercase tracking-wider">Analysis Horizon</span>
           <span className="text-emerald-400 font-bold bg-emerald-950/50 border border-emerald-500/30 px-2 py-0.5 rounded">
-            Target: {tfConfig.desc}
+            Target: {analysisMode === 'quick' ? activeBinaryHorizonCfg.desc : activeMt5HorizonCfg.desc}
           </span>
         </div>
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5" id="timeframe-grid">
-          {TIMEFRAMES.map((tf) => {
-            const isActive = tf.id === selectedTf;
-            return (
-              <button
-                key={tf.id}
-                type="button"
-                id={`tf-btn-${tf.id}`}
-                onClick={() => setSelectedTf(tf.id)}
-                className={`py-1.5 px-2 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 ${
-                  isActive
-                    ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-emerald-400 text-emerald-300 font-black shadow-md shadow-emerald-500/20'
-                    : 'bg-slate-900/80 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                }`}
-              >
-                <span className="text-xs font-black">{tf.label}</span>
-                <span className="text-[9px] opacity-75 font-normal">{tf.seconds}s window</span>
-              </button>
-            );
-          })}
-        </div>
+
+        {analysisMode === 'quick' ? (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5" id="timeframe-grid">
+              {BINARY_HORIZONS.map((opt) => {
+                const isActive = opt.id === binaryHorizon;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    id={`tf-btn-${opt.id}`}
+                    onClick={() => setBinaryHorizon(opt.id)}
+                    className={`py-2 px-2 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 text-center ${
+                      isActive
+                        ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-emerald-400 text-emerald-300 font-black shadow-md shadow-emerald-500/20'
+                        : 'bg-slate-900/80 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                    }`}
+                  >
+                    <span className="text-[11px] font-black leading-tight">{opt.label}</span>
+                    <span className="text-[9px] opacity-75 font-normal">{opt.sub}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-slate-400 font-sans leading-snug pt-0.5">
+              How long until your trade closes. Shorter is faster and noisier, and leaves less time to place the trade.
+            </p>
+          </>
+        ) : (
+          <div className="grid grid-cols-2 gap-2" id="timeframe-grid">
+            {MT5_HORIZONS.map((opt) => {
+              const isActive = opt.id === mt5Horizon;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  id={`tf-btn-${opt.id}`}
+                  onClick={() => setMt5Horizon(opt.id)}
+                  className={`py-2.5 px-3 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 text-center ${
+                    isActive
+                      ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-blue-400 text-blue-200 font-black shadow-md shadow-blue-500/20'
+                      : 'bg-slate-900/80 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  <span className="text-xs font-black leading-tight">{opt.label}</span>
+                  <span className="text-[10px] opacity-75 font-normal">{opt.sub}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* 4. RE-CHECKING MODAL / PROGRESS BAR */}
@@ -1590,22 +1738,33 @@ export function SignalEngine({
 
             {/* Freshness Banner for Actionable Binary Mode */}
             {signal.direction !== 'WAIT' && (
-              <div
-                id="freshness-banner"
-                className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between transition-all ${
-                  !isExpired
-                    ? 'bg-emerald-950/70 border border-emerald-500/40 text-emerald-300'
-                    : 'bg-rose-950/70 border border-rose-500/40 text-rose-300 animate-pulse'
-                }`}
-              >
-                <span>
-                  {isExpired
-                    ? '🔴 ENTRY WINDOW EXPIRED — RE-SCAN'
-                    : `🟢 ENTER WITHIN ${signal.enterWithinSeconds || 6} SECONDS`}
-                </span>
-                <span className="text-[10px]">
-                  {isExpired ? 'Void' : `Valid: ${freshnessSec.toFixed(1)}s`}
-                </span>
+              <div className="space-y-2">
+                <div
+                  id="freshness-banner"
+                  className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between transition-all ${
+                    !isExpired
+                      ? 'bg-emerald-950/70 border border-emerald-500/40 text-emerald-300'
+                      : 'bg-rose-950/70 border border-rose-500/40 text-rose-300 animate-pulse'
+                  }`}
+                >
+                  <span>
+                    {isExpired
+                      ? '🔴 ENTRY WINDOW EXPIRED — RE-SCAN'
+                      : `🟢 ENTER WITHIN ${signal.enterWithinSeconds || 6} SECONDS`}
+                  </span>
+                  <span className="text-[10px]">
+                    {isExpired ? 'Void' : `Valid: ${freshnessSec.toFixed(1)}s`}
+                  </span>
+                </div>
+
+                {(signal.expiry || signal.timeframe) === '1m' && (
+                  <div
+                    data-testid="binary-1m-timing-notice"
+                    className="px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 font-mono text-[11px] font-semibold"
+                  >
+                    Open your trade within 6 seconds. 1-minute trades leave little room for delay.
+                  </div>
+                )}
               </div>
             )}
 
@@ -1767,18 +1926,46 @@ export function SignalEngine({
           /* MODE B: MT5 STYLE (MetaTrader 5 Clean Ordered Card)             */
           /* ============================================================== */
           <div className="space-y-3.5 font-mono">
-            {/* 1) Symbol + Timeframe Header */}
+            {/* 1) Symbol + Timeframe Header + Validity Window (minutes only, no seconds) */}
             <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-blue-400" />
                 <span className="text-xs font-bold text-white">
-                  Symbol: <strong className="text-blue-300">{signal.asset}</strong> &bull; Timeframe: <strong className="text-emerald-400">{signal.timeframe.toUpperCase()}</strong>
+                  Symbol: <strong className="text-blue-300">{signal.asset}</strong> &bull; Chart: <strong className="text-emerald-400">{signal.timeframe.toUpperCase()}</strong>
                 </span>
               </div>
               <span className="text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
                 Setup strength (not a win probability): {signal.strength || 'Low'}
               </span>
             </div>
+
+            {signal.direction !== 'WAIT' && (() => {
+              const validMs = signal.validUntil ? Date.parse(signal.validUntil) : NaN;
+              const minsLeft = Number.isFinite(validMs)
+                ? Math.max(0, Math.ceil((validMs - mt5NowMs) / 60_000))
+                : signal.mt5?.validityCandles
+                ? signal.mt5.validityCandles * 5
+                : 15;
+              return (
+                <div
+                  data-testid="mt5-validity-banner"
+                  className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between ${
+                    minsLeft > 0
+                      ? 'bg-blue-950/60 border border-blue-500/40 text-blue-200'
+                      : 'bg-rose-950/60 border border-rose-500/40 text-rose-300'
+                  }`}
+                >
+                  <span>
+                    {minsLeft > 0
+                      ? `Validity Window: ${signal.validityWindowDesc || `${minsLeft} min`}`
+                      : 'Validity Window Ended — Re-scan for Fresh Levels'}
+                  </span>
+                  <span className="text-[10px]">
+                    {minsLeft > 0 ? `${minsLeft} min remaining` : 'Expired'}
+                  </span>
+                </div>
+              );
+            })()}
 
             {/* 2) Structure */}
             <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between text-xs">
@@ -2060,11 +2247,18 @@ export function SignalEngine({
           </div>
         )}
 
+        {/* Market Context Panel (identical for Free & VIP under every analysis) */}
+        {signal && (
+          <MarketContextPanel context={marketContext} isLoading={isLoadingContext} />
+        )}
+
         {/* Broker Disclaimer Notice (Requirement #8) */}
         <div className="mt-3 pt-2.5 border-t border-slate-800/80 px-2.5 py-1.5 rounded-xl bg-slate-950/60 text-[11px] font-mono text-slate-400 flex items-center gap-2">
           <span className="text-emerald-400 text-xs shrink-0 font-bold">ℹ</span>
           <span className="leading-tight">
-            Prices come from the Deriv market feed. Your broker&apos;s price can differ slightly, which matters most on 30 s to 1 min expiries.
+            {analysisMode === 'quick'
+              ? "Prices come from the Deriv market feed. Your broker's price can differ slightly, which matters most on 1-minute expiries."
+              : "Prices and candles come from the Deriv market feed. Your MT5 broker's spread and quotes can differ slightly."}
           </span>
         </div>
       </div>
@@ -2152,7 +2346,9 @@ export function SignalEngine({
           ) : feedHealthStatus === 'MARKET_CLOSED' ? (
             <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
           ) : isFeedBlockedForProfile ? (
-            feedHealthStatus === 'DELAYED' ? (
+            feedHealthStatus === 'IDLE' ? (
+              <span>Idle &mdash; pick an asset</span>
+            ) : feedHealthStatus === 'DELAYED' ? (
               <span>⏳ FEED QUIET — BINARY REQUIRES LIVE TICKS</span>
             ) : feedHealthStatus === 'OFFLINE' ? (
               <span>⚠️ FEED OFFLINE — RETRYING...</span>
@@ -2180,12 +2376,16 @@ export function SignalEngine({
           ) : analysisMode === 'quick' ? (
             <>
               <span>⚡ SCAN BINARY SIGNAL</span>
-              <span className="text-xs opacity-75">({activeAsset?.name || 'EUR/USD'} &bull; {selectedTf.toUpperCase()})</span>
+              <span className="text-xs opacity-75">
+                ({activeAsset?.name || 'EUR/USD'} &bull; {binaryHorizon === 'auto' ? 'Auto' : binaryHorizon.toUpperCase()})
+              </span>
             </>
           ) : (
             <>
               <span>📊 SCAN MT5 SETUP</span>
-              <span className="text-xs opacity-75">({activeAsset?.name || 'EUR/USD'} &bull; {selectedTf.toUpperCase()})</span>
+              <span className="text-xs opacity-75">
+                ({activeAsset?.name || 'EUR/USD'} &bull; {mt5Horizon === 'M15' ? 'Intraday M15' : 'Swing H1'})
+              </span>
             </>
           )}
         </button>

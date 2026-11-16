@@ -11,19 +11,21 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts",
+    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts && tsx src/services/liveFeed.test.ts",
     "stress": "tsx scripts/stress-binary.ts",
     "verify:security": "node scripts/verify-security.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.116.0",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^5.0.4",
     "lightweight-charts": "^4.2.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "ws": "^8.23.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

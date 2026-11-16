@@ -9,6 +9,12 @@ interface SignalHistoryProps {
 
 export type HistoryFilterTab = 'ALL' | 'WON' | 'LOST';
 
+function formatHistoryHorizonLabel(timeframe: string): string {
+  const tf = (timeframe || '').trim();
+  if (tf.toLowerCase() === '30s') return '30s (Legacy)';
+  return tf.toUpperCase();
+}
+
 export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalHistoryProps) {
   const [filterTab, setFilterTab] = useState<HistoryFilterTab>('ALL');
   const [visibleCount, setVisibleCount] = useState<number>(10);
@@ -260,7 +266,7 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                     <div className="flex items-center gap-1.5">
                       <span className="font-bold text-white text-xs">{sig.asset}</span>
                       <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-800 text-cyan-300 font-semibold border border-slate-700">
-                        {sig.timeframe.toUpperCase()}
+                        {formatHistoryHorizonLabel(sig.timeframe)}
                       </span>
                       <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-900 text-slate-400 border border-slate-800">
                         {profileLabel}

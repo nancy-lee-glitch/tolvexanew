@@ -352,7 +352,7 @@ export function getSessionAdvisor(symbol: string = 'EUR/USD'): SessionAdvisorInf
       utcTime: utcTimeStr,
       localTimeHint,
       quality: 'THIN',
-      note: 'Thin interbank liquidity between NY close and Tokyo open. Spreads widen; 30s–1m short expiries subject to random tick noise.',
+      note: 'Thin interbank liquidity between NY close and Tokyo open. Spreads widen; short 1m expiries are subject to random tick noise.',
       isWeakSession: true,
     };
   }
@@ -1071,7 +1071,7 @@ export function analyzeMarketConfluence(
 
   const effectiveMode: AnalysisMode =
     mode ||
-    (['30s', '1m', '2m', '3m', '5m', '15m'].includes(activeTimeframe) ? 'quick' : 'mt5');
+    (['auto', '1m', '2m', '3m', '5m'].includes(activeTimeframe) ? 'quick' : 'mt5');
 
   const gateResult = evaluateConfluenceGate({
     prices: safePrices,
@@ -1209,15 +1209,15 @@ export function calculateSafeCloseAnalysis(
   let profitTargetPips = 6.0;
   let decayFactor = 0.02;
 
-  if (activeTimeframe === '30s') {
-    recommendedSeconds = 22;
-    profitTargetPips = 3.5;
-  } else if (activeTimeframe === '1m') {
+  if (activeTimeframe === '1m') {
     recommendedSeconds = 45;
     profitTargetPips = 5.5;
   } else if (activeTimeframe === '2m') {
     recommendedSeconds = 85;
     profitTargetPips = 7.5;
+  } else if (activeTimeframe === '3m') {
+    recommendedSeconds = 130;
+    profitTargetPips = 9.5;
   } else if (activeTimeframe === '5m') {
     recommendedSeconds = 180;
     profitTargetPips = 12.0;

@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { InstrumentSpec, UserProfile, UserTradingProfile } from '../types.ts';
 import { DEFAULT_INSTRUMENT_SPECS, normalizeSpecKey } from './engines/mt5Engine.ts';
+import type { ChartHistorySignalItem } from './chartOverlays.ts';
 
 let supabaseInstance: SupabaseClient | null = null;
 let currentConfigKey = '';
@@ -948,6 +949,82 @@ export async function logOutcomeToSupabase(
 ): Promise<boolean> {
   // Outcomes are settled server-side in Stage 4
   return true;
+}
+
+/**
+ * Fetch recent non-WAIT signals and settled outcomes for a specific asset and VIP user.
+ * Used exclusively to plot historical markers on the chart for VIP accounts.
+ */
+export async function fetchUserAssetSignalMarkers(
+  symbol: string,
+  assetName: string,
+  userId?: number | null,
+  isVip?: boolean
+): Promise<ChartHistorySignalItem[]> {
+  if (!isVip || !userId || !isSupabaseConfigured()) {
+    return [];
+  }
+
+  const client = getSupabaseClient();
+  if (!client) return [];
+
+  const assetCandidates = Array.from(new Set([symbol, assetName].filter(Boolean)));
+  if (assetCandidates.length === 0) return [];
+
+  try {
+    const { data: sigRows, error: sigErr } = await client
+      .from('signals')
+      .select('id, asset, direction, entry_price, timeframe, created_at')
+      .eq('user_id', userId)
+      .in('asset', assetCandidates)
+      .neq('direction', 'WAIT')
+      .order('created_at', { ascending: false })
+      .limit(25);
+
+    if (sigErr || !Array.isArray(sigRows) || sigRows.length === 0) {
+      return [];
+    }
+
+    const sigIds = sigRows.map((r) => r.id).filter(Boolean);
+    const outcomeMap = new Map<string, 'WIN' | 'LOSS' | 'DRAW'>();
+
+    if (sigIds.length > 0) {
+      const { data: outcomeRows, error: outErr } = await client
+        .from('trade_outcomes')
+        .select('signal_id, outcome')
+        .in('signal_id', sigIds);
+
+      if (!outErr && Array.isArray(outcomeRows)) {
+        for (const o of outcomeRows) {
+          if (o?.signal_id && (o.outcome === 'WIN' || o.outcome === 'LOSS' || o.outcome === 'DRAW')) {
+            outcomeMap.set(String(o.signal_id), o.outcome);
+          }
+        }
+      }
+    }
+
+    const validDirections = new Set(['CALL', 'PUT', 'BUY', 'SELL']);
+    const items: ChartHistorySignalItem[] = [];
+    for (const row of sigRows) {
+      const dir = String(row.direction || '').toUpperCase();
+      if (!validDirections.has(dir)) continue;
+      const entry = Number(row.entry_price);
+      if (!Number.isFinite(entry) || entry <= 0) continue;
+      items.push({
+        id: String(row.id),
+        asset: String(row.asset || symbol),
+        direction: dir as 'CALL' | 'PUT' | 'BUY' | 'SELL',
+        entryPrice: entry,
+        timeframe: String(row.timeframe || ''),
+        createdAt: String(row.created_at || ''),
+        outcome: outcomeMap.get(String(row.id)) ?? null,
+      });
+    }
+
+    return items;
+  } catch {
+    return [];
+  }
 }
 
 /**

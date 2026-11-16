@@ -123,5 +123,21 @@ run('9. market closed: MARKET_CLOSED, socket left alone', () => {
   const p2 = r.feed.getCandles('R_100', 60); r.clock.advance(11000);
   await assert.rejects(p2, /timed out/);
   console.log('PASS 10. candles request resolves; times out when silent');
+
+  // 11. No active asset selected -> IDLE instead of DELAYED, socket stays connected
+  const rIdle = rig();
+  rIdle.last().open();
+  for (let i = 0; i < 60; i++) {
+    rIdle.clock.advance(1000);
+    if (rIdle.last().sent.some((m) => m.ping)) {
+      rIdle.last().sent.length = 0;
+      rIdle.last().msg({ msg_type: 'ping', ping: 'pong' });
+    }
+  }
+  assert.equal(rIdle.feed.getStatus().status, 'IDLE');
+  assert.ok(!rIdle.statuses.includes('DELAYED'), rIdle.statuses.join());
+  assert.equal(rIdle.sockets.length, 1);
+  console.log('PASS 11. no active asset => IDLE instead of DELAYED');
+
   console.log('\nALL FEED TESTS PASSED');
 })();

@@ -19,7 +19,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
       'Direct WebSocket synchronization with the Deriv feed avoids polling delays during fast ticks.',
     ],
     content: [
-      'In traditional equity trading, an entry delay of a few seconds is rarely fatal. In binary and fixed-time options (where expiry durations range between 30 seconds and 5 minutes), the first six seconds following a signal setup represent the critical freshness window.',
+      'In traditional equity trading, an entry delay of a few seconds is rarely fatal. In binary and fixed-time options (where expiry durations range between 1 minute and 5 minutes), the first six seconds following a signal setup represent the critical freshness window.',
       'When our multi-timeframe algorithm detects directional confluence, market prices continue moving in real time. Delays in manual entry mean the broker strike price can drift away from the initial signal price.',
       'Our platform embeds a strict radial 6-second countdown timer. If you cannot place your trade within this freshness window, the system locks and flags the opportunity as expired so stale setups are not chased.',
       'Illustrative example, not our results: In general latency-sensitivity comparisons on fast tick streams, prompt entries show tighter alignment to the reference price than delayed entries where quote drift pushes outcomes closer to random variance.',

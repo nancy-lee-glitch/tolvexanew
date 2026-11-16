@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import type { AssetConfig, UserProfile } from '../types.ts';
+import type { AnalysisProfile, AssetConfig, UserProfile } from '../types.ts';
+import type { MarketContextSummary } from '../utils/engines/marketContext.ts';
+import type { EngineChartSignal } from '../utils/chartOverlays.ts';
 import { pushAssetTick, getAssetTicks } from '../utils/quantEngine.ts';
 import { LiveChart } from './LiveChart.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
@@ -25,6 +27,10 @@ interface LiveTickerProps {
   isVIP?: boolean;
   onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus) => void;
   user?: UserProfile | null;
+  signal?: EngineChartSignal | null;
+  marketContext?: MarketContextSummary | null;
+  analysisProfile?: AnalysisProfile;
+  onClearSignal?: () => void;
 }
 
 export function LiveTicker({
@@ -33,9 +39,13 @@ export function LiveTicker({
   onPriceUpdate,
   onTicksUpdate,
   onOpenVipRadar,
-  isVIP: _isVIP,
+  isVIP = false,
   onFeedStatusChange,
   user,
+  signal = null,
+  marketContext = null,
+  analysisProfile = 'BINARY_QUICK',
+  onClearSignal,
 }: LiveTickerProps) {
   // Never initialize with fake basePrice — honest null state until real tick arrives
   const [currentPrice, setCurrentPrice] = useState<number | null>(null);
@@ -249,7 +259,7 @@ export function LiveTicker({
       )}
 
       {/* RECONNECTING / DELAYED / OFFLINE STATUS NOTICE */}
-      {feedStatus !== 'LIVE' && feedStatus !== 'MARKET_CLOSED' && (
+      {feedStatus !== 'LIVE' && feedStatus !== 'MARKET_CLOSED' && feedStatus !== 'IDLE' && (
         <div className="bg-slate-900 border border-amber-500/40 rounded-2xl p-2.5 sm:p-3 text-xs font-mono text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 shadow-lg">
           <div className="flex items-center gap-2.5">
             <span
@@ -359,7 +369,7 @@ export function LiveTicker({
             className={`flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-xl border transition shadow-sm ${
               feedStatus === 'LIVE' && lastTickAgeSec <= 6
                 ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-300'
-                : feedStatus === 'CONNECTING'
+                : feedStatus === 'CONNECTING' || feedStatus === 'IDLE'
                 ? 'bg-slate-900 border-slate-700 text-slate-300'
                 : feedStatus === 'DELAYED'
                 ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
@@ -377,6 +387,8 @@ export function LiveTicker({
                   ? 'bg-emerald-400 animate-pulse'
                   : feedStatus === 'CONNECTING'
                   ? 'bg-slate-400 animate-pulse'
+                  : feedStatus === 'IDLE'
+                  ? 'bg-slate-400'
                   : feedStatus === 'DELAYED'
                   ? 'bg-amber-400'
                   : feedStatus === 'MARKET_CLOSED'
@@ -389,6 +401,8 @@ export function LiveTicker({
             <span className="font-bold">
               {feedStatus === 'LIVE' && lastTickAgeSec <= 6
                 ? 'LIVE'
+                : feedStatus === 'IDLE'
+                ? 'Idle — pick an asset'
                 : feedStatus === 'CONNECTING'
                 ? 'CONNECTING'
                 : feedStatus === 'DELAYED'
@@ -580,6 +594,13 @@ export function LiveTicker({
             prevPrice={prevPrice ?? 0}
             pricePulse={pricePulse}
             wsConnected={isFeedActive}
+            feedStatus={feedStatus}
+            signal={signal}
+            marketContext={marketContext}
+            analysisProfile={analysisProfile}
+            isVIP={Boolean(isVIP || user?.is_vip)}
+            user={user}
+            onClearSignal={onClearSignal}
             onAssetChange={onAssetChange}
           />
         </ErrorBoundary>
