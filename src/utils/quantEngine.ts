@@ -1,5 +1,5 @@
 /**
- * PulseTrade Pro - Quantitative Confluence Engine
+ * Tickvere - Quantitative Confluence Engine
  *
  * Continuous 24/7 Real-Time Tick & Candle Analysis:
  * - Market Structure Classification (BULLISH / BEARISH / RANGING / NEUTRAL)
@@ -22,7 +22,9 @@ import type {
   LiveRegimeInfo,
   SignalStrength,
   AssetConfig,
+  DistanceUnit,
 } from '../types.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from './instrumentMeta.ts';
 import { isSyntheticAsset } from '../services/symbolMap.ts';
 
 export type { TimestampedTick, LiveRegimeInfo };
@@ -413,12 +415,14 @@ export function evaluateLiveMarketRegime(
   const avgStep = grossDistance / (slice.length - 1);
   const volatilityPips = parseFloat(grossDistance.toFixed(1));
 
+  const unitShort = pipsMultiplier <= 1 ? 'pts' : 'p';
+
   // 1. Spiky / high volatility regime
   if (avgStep > 1.35) {
     return {
       regime: 'HIGH_VOLATILITY',
       badgeLabel: 'Live regime: High volatility — reduce size / WAIT',
-      subText: `Rapid micro-displacement (${avgStep.toFixed(2)} p/step). Wide spreads expected.`,
+      subText: `Rapid micro-displacement (${avgStep.toFixed(2)} ${unitShort}/step). Wide spreads expected.`,
       color: 'bg-rose-950/80',
       dotColor: 'bg-rose-400 animate-pulse',
       borderColor: 'border-rose-500/40',
@@ -467,7 +471,9 @@ export function evaluateLiveMarketRegime(
  */
 export function detectMarketStructure(
   prices: number[],
-  pipSize: number
+  pipSize: number,
+  distanceUnit: DistanceUnit = 'pips',
+  decimals: number = 5
 ): {
   structure: MarketStructureType;
   cue: StructureCue;
@@ -493,13 +499,14 @@ export function detectMarketStructure(
   const maxPrice = Math.max(...safePrices);
   const minPrice = Math.min(...safePrices);
   const recentRangePips = parseFloat(((maxPrice - minPrice) / pipSize).toFixed(1));
+  const rangeUnit = formatDistanceUnitWord(recentRangePips, distanceUnit);
 
   // If price is completely flat or range is negligible
   if (recentRangePips < 1.0) {
     return {
       structure: 'RANGING',
       cue: 'COMPRESSION',
-      summary: `Extreme Compression (${recentRangePips} pips range) — Volatility too low for reliable expansion`,
+      summary: `Extreme Compression (${recentRangePips} ${rangeUnit} range) — Volatility too low for reliable expansion`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -526,7 +533,7 @@ export function detectMarketStructure(
     return {
       structure: 'BULLISH',
       cue: 'HH_HL',
-      summary: `Bullish Structure (HH/HL confirmed: Higher High @ ${sh2.toFixed(5)}, Higher Low @ ${sl2.toFixed(5)})`,
+      summary: `Bullish Structure (HH/HL confirmed: Higher High @ ${sh2.toFixed(decimals)}, Higher Low @ ${sl2.toFixed(decimals)})`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -538,7 +545,7 @@ export function detectMarketStructure(
     return {
       structure: 'BEARISH',
       cue: 'LH_LL',
-      summary: `Bearish Structure (LH/LL confirmed: Lower High @ ${sh2.toFixed(5)}, Lower Low @ ${sl2.toFixed(5)})`,
+      summary: `Bearish Structure (LH/LL confirmed: Lower High @ ${sh2.toFixed(decimals)}, Lower Low @ ${sl2.toFixed(decimals)})`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -548,12 +555,14 @@ export function detectMarketStructure(
   // Trend slope check across full buffer
   const firstPrice = safePrices[0];
   const deltaPips = (currentPrice - firstPrice) / pipSize;
+  const deltaRounded = parseFloat(deltaPips.toFixed(1));
+  const deltaUnit = formatDistanceUnitWord(deltaRounded, distanceUnit);
 
   if (deltaPips > 3.0) {
     return {
       structure: 'BULLISH',
       cue: 'EXPANSION',
-      summary: `Bullish Trend Expansion (+${deltaPips.toFixed(1)} pips upward displacement)`,
+      summary: `Bullish Trend Expansion (+${deltaPips.toFixed(1)} ${deltaUnit} upward displacement)`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -562,7 +571,7 @@ export function detectMarketStructure(
     return {
       structure: 'BEARISH',
       cue: 'EXPANSION',
-      summary: `Bearish Trend Expansion (${deltaPips.toFixed(1)} pips downward displacement)`,
+      summary: `Bearish Trend Expansion (${deltaPips.toFixed(1)} ${deltaUnit} downward displacement)`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -572,7 +581,7 @@ export function detectMarketStructure(
   return {
     structure: 'RANGING',
     cue: 'RANGE_CONSOLIDATION',
-    summary: `Equilibrium Range (${recentRangePips} pips band) — Consolidating between ${minPrice.toFixed(5)} and ${maxPrice.toFixed(5)}`,
+    summary: `Equilibrium Range (${recentRangePips} ${rangeUnit} band) — Consolidating between ${minPrice.toFixed(decimals)} and ${maxPrice.toFixed(decimals)}`,
     swingHigh: maxPrice,
     swingLow: minPrice,
     recentRangePips,
@@ -603,7 +612,8 @@ export interface LiveMovementEvaluation {
  */
 export function evaluateLiveMarketMovement(
   prices: number[],
-  pipSize: number
+  pipSize: number,
+  distanceUnit: DistanceUnit = 'pips'
 ): LiveMovementEvaluation {
   const pipsMultiplier = 1 / pipSize;
   if (!prices || prices.length < 4) {
@@ -621,6 +631,7 @@ export function evaluateLiveMarketMovement(
   const sampleWindow = Math.min(prices.length, 8);
   const startPrice = prices[prices.length - sampleWindow];
   const netPipsDelta = parseFloat(((currentPrice - startPrice) * pipsMultiplier).toFixed(2));
+  const netUnit = formatDistanceUnitWord(netPipsDelta, distanceUnit);
 
   // Immediate 3-tick micro movement
   const last3 = prices.slice(-3);
@@ -647,9 +658,9 @@ export function evaluateLiveMarketMovement(
 
   const getConflictMessage = (proposed: 'CALL' | 'PUT'): string => {
     if (proposed === 'CALL') {
-      return `Live price is actively falling (${netPipsDelta} pips across last ${sampleWindow} ticks) directly opposing bullish bias. Never buy into an active drop.`;
+      return `Live price is actively falling (${netPipsDelta} ${netUnit} across last ${sampleWindow} ticks) directly opposing bullish bias. Never buy into an active drop.`;
     }
-    return `Live price is actively climbing (+${netPipsDelta} pips across last ${sampleWindow} ticks) directly opposing bearish bias. Never sell into an active rally.`;
+    return `Live price is actively climbing (+${netPipsDelta} ${netUnit} across last ${sampleWindow} ticks) directly opposing bearish bias. Never sell into an active rally.`;
   };
 
   return {
@@ -660,10 +671,10 @@ export function evaluateLiveMarketMovement(
     conflictMessage: getConflictMessage('CALL'),
     summary:
       direction === 'BULLISH'
-        ? `Live price advancing (+${netPipsDelta} pips)`
+        ? `Live price advancing (+${netPipsDelta} ${netUnit})`
         : direction === 'BEARISH'
-        ? `Live price retreating (${netPipsDelta} pips)`
-        : `Live micro movement is flat (${netPipsDelta >= 0 ? '+' : ''}${netPipsDelta} pips)`,
+        ? `Live price retreating (${netPipsDelta} ${netUnit})`
+        : `Live micro movement is flat (${netPipsDelta >= 0 ? '+' : ''}${netPipsDelta} ${netUnit})`,
   };
 }
 
@@ -693,6 +704,8 @@ export function evaluateQuickConfluence(params: {
   momentumBuyPct: number;
   momentumSellPct: number;
   velocity: number;
+  distanceUnit?: DistanceUnit;
+  decimals?: number;
 }): ConfluenceGateResult {
   const {
     prices,
@@ -706,7 +719,12 @@ export function evaluateQuickConfluence(params: {
     momentumBuyPct,
     momentumSellPct,
     velocity,
+    distanceUnit = 'pips',
+    decimals = 5,
   } = params;
+
+  const unitLabelPlural = distanceUnit === 'points' ? 'points' : 'pips';
+  const velUnit = distanceUnit === 'points' ? 'pts/s' : 'p/s';
 
   const safePrices = prices.slice(-30);
   const currentPrice = safePrices[safePrices.length - 1];
@@ -731,33 +749,34 @@ export function evaluateQuickConfluence(params: {
   }
 
   // Factor 0: Live Price Path Confirmation (CORE)
-  const liveMovement = evaluateLiveMarketMovement(safePrices, pipSize);
+  const liveMovement = evaluateLiveMarketMovement(safePrices, pipSize, distanceUnit);
+  const netUnit = formatDistanceUnitWord(liveMovement.netPipsDelta, distanceUnit);
   let livePathStatus: 'PASS' | 'FAIL' | 'UNSURE' = 'FAIL';
   let livePathDetail = '';
 
   if (structure === 'BULLISH') {
     if (liveMovement.isConflictingWith('CALL')) {
       livePathStatus = 'FAIL';
-      livePathDetail = `Live ticks falling (${liveMovement.netPipsDelta} pips in last 8 ticks); directly opposes CALL`;
-      failReasons.push(`Live tick path conflict: price is dropping (${liveMovement.netPipsDelta} pips) against bullish indicators.`);
+      livePathDetail = `Live ticks falling (${liveMovement.netPipsDelta} ${netUnit} in last 8 ticks); directly opposes CALL`;
+      failReasons.push(`Live tick path conflict: price is dropping (${liveMovement.netPipsDelta} ${netUnit}) against bullish indicators.`);
     } else if (liveMovement.direction === 'BULLISH' || (liveMovement.netPipsDelta >= 0 && liveMovement.recentTicksDelta >= 0)) {
       livePathStatus = 'PASS';
-      livePathDetail = `Live tick path confirms upward advance (+${liveMovement.netPipsDelta} pips in 8 ticks)`;
+      livePathDetail = `Live tick path confirms upward advance (+${liveMovement.netPipsDelta} ${netUnit} in 8 ticks)`;
     } else {
       livePathStatus = 'UNSURE';
-      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} pips)`;
+      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} ${netUnit})`;
     }
   } else if (structure === 'BEARISH') {
     if (liveMovement.isConflictingWith('PUT')) {
       livePathStatus = 'FAIL';
-      livePathDetail = `Live ticks rising (+${liveMovement.netPipsDelta} pips in last 8 ticks); directly opposes PUT`;
-      failReasons.push(`Live tick path conflict: price is rallying (+${liveMovement.netPipsDelta} pips) against bearish indicators.`);
+      livePathDetail = `Live ticks rising (+${liveMovement.netPipsDelta} ${netUnit} in last 8 ticks); directly opposes PUT`;
+      failReasons.push(`Live tick path conflict: price is rallying (+${liveMovement.netPipsDelta} ${netUnit}) against bearish indicators.`);
     } else if (liveMovement.direction === 'BEARISH' || (liveMovement.netPipsDelta <= 0 && liveMovement.recentTicksDelta <= 0)) {
       livePathStatus = 'PASS';
-      livePathDetail = `Live tick path confirms downward pressure (${liveMovement.netPipsDelta} pips in 8 ticks)`;
+      livePathDetail = `Live tick path confirms downward pressure (${liveMovement.netPipsDelta} ${netUnit} in 8 ticks)`;
     } else {
       livePathStatus = 'UNSURE';
-      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} pips)`;
+      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} ${netUnit})`;
     }
   } else {
     livePathStatus = 'FAIL';
@@ -779,10 +798,10 @@ export function evaluateQuickConfluence(params: {
   if (structure === 'BULLISH') {
     if (ema9 >= ema21 || (currentPrice >= ema21 && velocity >= 0)) {
       emaStatus = 'PASS';
-      emaDetail = `EMA 9 (${ema9.toFixed(5)}) >= EMA 21 (${ema21.toFixed(5)}) supporting upward impulse`;
+      emaDetail = `EMA 9 (${ema9.toFixed(decimals)}) >= EMA 21 (${ema21.toFixed(decimals)}) supporting upward impulse`;
     } else if (Math.abs(emaSpread) < 0.1) {
       emaStatus = 'UNSURE';
-      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} pips); momentum building`;
+      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} ${unitLabelPlural}); momentum building`;
     } else {
       emaStatus = 'FAIL';
       emaDetail = `EMA 9 lagging below EMA 21 against bullish structure`;
@@ -790,10 +809,10 @@ export function evaluateQuickConfluence(params: {
   } else if (structure === 'BEARISH') {
     if (ema9 <= ema21 || (currentPrice <= ema21 && velocity <= 0)) {
       emaStatus = 'PASS';
-      emaDetail = `EMA 9 (${ema9.toFixed(5)}) <= EMA 21 (${ema21.toFixed(5)}) supporting downward pressure`;
+      emaDetail = `EMA 9 (${ema9.toFixed(decimals)}) <= EMA 21 (${ema21.toFixed(decimals)}) supporting downward pressure`;
     } else if (Math.abs(emaSpread) < 0.1) {
       emaStatus = 'UNSURE';
-      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} pips); momentum building`;
+      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} ${unitLabelPlural}); momentum building`;
     } else {
       emaStatus = 'FAIL';
       emaDetail = `EMA 9 tracking above EMA 21 against bearish structure`;
@@ -858,13 +877,13 @@ export function evaluateQuickConfluence(params: {
 
   if (absVelocity < 0.015 && momentumBuyPct === 50 && momentumSellPct === 50) {
     volRegimeStatus = 'WARN';
-    volRegimeDetail = `Market stagnant (velocity: ${velocity.toFixed(3)} p/s); low tick flow increases expiry chop`;
+    volRegimeDetail = `Market stagnant (velocity: ${velocity.toFixed(3)} ${velUnit}); low tick flow increases expiry chop`;
   } else if (absVelocity >= 0.04) {
     volRegimeStatus = 'PASS';
-    volRegimeDetail = `Dynamic tick velocity (${velocity > 0 ? '+' : ''}${velocity.toFixed(2)} p/s) active for short window`;
+    volRegimeDetail = `Dynamic tick velocity (${velocity > 0 ? '+' : ''}${velocity.toFixed(2)} ${velUnit}) active for short window`;
   } else {
     volRegimeStatus = 'PASS';
-    volRegimeDetail = `Normal tick volatility (${velocity.toFixed(2)} p/s); standard activity`;
+    volRegimeDetail = `Normal tick volatility (${velocity.toFixed(2)} ${velUnit}); standard activity`;
   }
 
   factors.push({
@@ -885,7 +904,7 @@ export function evaluateQuickConfluence(params: {
       momentumDetail = `Upward tick-delta pressure: ${momentumBuyPct}% positive delta`;
     } else {
       momentumStatus = 'UNSURE';
-      momentumDetail = `Price momentum proxy balanced (${momentumBuyPct}% Up / ${momentumSellPct}% Down)`;
+      momentumDetail = `Last ticks balanced (${momentumBuyPct}% up, ${momentumSellPct}% down)`;
     }
   } else if (structure === 'BEARISH') {
     if (momentumSellPct >= 52) {
@@ -893,16 +912,16 @@ export function evaluateQuickConfluence(params: {
       momentumDetail = `Downward tick-delta pressure: ${momentumSellPct}% negative delta`;
     } else {
       momentumStatus = 'UNSURE';
-      momentumDetail = `Price momentum proxy balanced (${momentumBuyPct}% Up / ${momentumSellPct}% Down)`;
+      momentumDetail = `Last ticks balanced (${momentumBuyPct}% up, ${momentumSellPct}% down)`;
     }
   } else {
     momentumStatus = 'UNSURE';
-    momentumDetail = `Equilibrium price momentum proxy distribution`;
+    momentumDetail = `Equilibrium tick price-change distribution`;
   }
 
   factors.push({
     id: 'price_momentum',
-    name: 'Price momentum proxy',
+    name: 'Tick price-change balance',
     status: momentumStatus,
     detail: momentumDetail,
     severity: 'CONTEXT',
@@ -918,10 +937,10 @@ export function evaluateQuickConfluence(params: {
 
   if (structure === 'BULLISH' && currentPrice > recentMin + (0.25 * pipSize)) {
     sweepStatus = 'PASS';
-    sweepDetail = `Support bounce off ${recentMin.toFixed(5)} confirmed`;
+    sweepDetail = `Support bounce off ${recentMin.toFixed(decimals)} confirmed`;
   } else if (structure === 'BEARISH' && currentPrice < recentMax - (0.25 * pipSize)) {
     sweepStatus = 'PASS';
-    sweepDetail = `Resistance rejection off ${recentMax.toFixed(5)} confirmed`;
+    sweepDetail = `Resistance rejection off ${recentMax.toFixed(decimals)} confirmed`;
   } else {
     sweepStatus = 'UNSURE';
     sweepDetail = `Continuous micro progression; no acute rejection wick`;
@@ -1017,6 +1036,8 @@ export function evaluateConfluenceGate(params: {
   momentumSellPct: number;
   velocity: number;
   mode?: AnalysisMode;
+  distanceUnit?: DistanceUnit;
+  decimals?: number;
 }): ConfluenceGateResult {
   return evaluateQuickConfluence(params);
 }
@@ -1055,8 +1076,19 @@ export function analyzeMarketConfluence(
     };
   }
 
+  const resolvedSpec =
+    typeof assetOrSymbol === 'object' && assetOrSymbol !== null
+      ? resolveAssetPipSpec(assetOrSymbol)
+      : typeof assetOrSymbol === 'string' && assetOrSymbol.trim()
+      ? resolveAssetPipSpec({ symbol: assetOrSymbol, name: assetOrSymbol })
+      : null;
+
+  const effectivePipSize = resolvedSpec ? resolvedSpec.pipSize : pipSize;
+  const effectiveUnit: DistanceUnit = resolvedSpec ? resolvedSpec.distanceUnit : 'pips';
+  const effectiveDecimals = resolvedSpec ? resolvedSpec.decimals : activeTimeframe.includes('USD') ? 5 : 2;
+
   const safePrices = prices;
-  const pipsMultiplier = 1 / pipSize;
+  const pipsMultiplier = 1 / effectivePipSize;
 
   const ema9 = calculateEMA(safePrices, 9);
   const ema21 = calculateEMA(safePrices, 21);
@@ -1067,7 +1099,7 @@ export function analyzeMarketConfluence(
   const momentum = calculatePriceMomentumProxy(safePrices, 20);
   const { velocity, acceleration } = calculateVelocityAndAcceleration(safePrices, pipsMultiplier);
 
-  const structureResult = detectMarketStructure(safePrices, pipSize);
+  const structureResult = detectMarketStructure(safePrices, effectivePipSize, effectiveUnit, effectiveDecimals);
 
   const effectiveMode: AnalysisMode =
     mode ||
@@ -1077,7 +1109,7 @@ export function analyzeMarketConfluence(
     prices: safePrices,
     structure: structureResult.structure,
     structureCue: structureResult.cue,
-    pipSize,
+    pipSize: effectivePipSize,
     rsi,
     ema9,
     ema21,
@@ -1086,6 +1118,8 @@ export function analyzeMarketConfluence(
     momentumSellPct: momentum.sellPct,
     velocity,
     mode: effectiveMode,
+    distanceUnit: effectiveUnit,
+    decimals: effectiveDecimals,
   });
 
   let rsiState: TechnicalAudit['rsiState'] = 'NEUTRAL';
@@ -1181,7 +1215,8 @@ export function analyzeMarketConfluence(
 export function calculateSafeCloseAnalysis(
   ticks: number[],
   activeTimeframe: string = '1m',
-  pipSize: number = 0.0001
+  pipSize: number = 0.0001,
+  distanceUnit: DistanceUnit = 'pips'
 ): SafeCloseAnalysis {
   if (!ticks || ticks.length < 2) {
     return {
@@ -1238,14 +1273,16 @@ export function calculateSafeCloseAnalysis(
   const minRange = Math.max(10, Math.round(recommendedSeconds * 0.8));
   const maxRange = Math.round(recommendedSeconds * 1.15);
   const peakMomentumWindow = `${minRange}s - ${maxRange}s`;
+  const targetUnit = formatDistanceUnitWord(profitTargetPips, distanceUnit);
+  const velUnit = distanceUnit === 'points' ? 'pts/s' : 'p/s';
 
   let advisoryText = '';
   if (volatilityLevel === 'HIGH') {
-    advisoryText = `High market velocity (${avgTickVelocity.toFixed(2)} p/s). Peak impulse window: ${peakMomentumWindow}. Safe close advised upon reaching +${profitTargetPips} pips.`;
+    advisoryText = `High market velocity (${avgTickVelocity.toFixed(2)} ${velUnit}). Peak impulse window: ${peakMomentumWindow}. Safe close advised upon reaching +${profitTargetPips} ${targetUnit}.`;
   } else if (volatilityLevel === 'LOW') {
-    advisoryText = `Low volatility (${avgTickVelocity.toFixed(2)} p/s). Steady hold advised. Target +${profitTargetPips} pips before expected mean-reversion.`;
+    advisoryText = `Low volatility (${avgTickVelocity.toFixed(2)} ${velUnit}). Steady hold advised. Target +${profitTargetPips} ${targetUnit} before expected mean-reversion.`;
   } else {
-    advisoryText = `Normal velocity conditions. Expected peak momentum at ${peakMomentumWindow}. Optimal safe close zone: +${profitTargetPips} pips.`;
+    advisoryText = `Normal velocity conditions. Expected peak momentum at ${peakMomentumWindow}. Optimal safe close zone: +${profitTargetPips} ${targetUnit}.`;
   }
 
   return {
@@ -1342,7 +1379,8 @@ export function evaluateActiveTradeHealth(
   direction: 'CALL' | 'PUT',
   pipSize: number,
   elapsedSeconds: number,
-  expirySeconds: number = 60
+  expirySeconds: number = 60,
+  distanceUnit: DistanceUnit = 'pips'
 ): {
   pips: number;
   isProfit: boolean;
@@ -1353,6 +1391,7 @@ export function evaluateActiveTradeHealth(
   const pipsMultiplier = 1 / pipSize;
   const rawDelta = direction === 'CALL' ? currentPrice - entryPrice : entryPrice - currentPrice;
   const pips = parseFloat((rawDelta * pipsMultiplier).toFixed(1));
+  const unitWord = formatDistanceUnitWord(pips, distanceUnit);
   const isProfit = pips > 0;
   const timeProgressPct = (elapsedSeconds / expirySeconds) * 100;
 
@@ -1363,19 +1402,19 @@ export function evaluateActiveTradeHealth(
   if (pips >= 5.0 && timeProgressPct >= 60) {
     status = 'MAX_MOMENTUM_CLOSE_NOW';
     healthScore = 95;
-    actionMessage = `Peak Momentum Reached (+${pips} pips)! Secure profit now before mean-reversion.`;
+    actionMessage = `Peak Momentum Reached (+${pips} ${unitWord})! Secure profit now before mean-reversion.`;
   } else if (pips >= 2.5) {
     status = 'SAFE_PROFIT';
     healthScore = 80;
-    actionMessage = `In Solid Profit (+${pips} pips). Buffer protected against micro-spikes.`;
+    actionMessage = `In Solid Profit (+${pips} ${unitWord}). Buffer protected against micro-spikes.`;
   } else if (pips < -2.0) {
     status = 'AT_RISK';
     healthScore = 20;
-    actionMessage = `Position under pressure (${pips} pips). Awaiting support bounce or expiry settlement.`;
+    actionMessage = `Position under pressure (${pips} ${unitWord}). Awaiting support bounce or expiry settlement.`;
   } else {
     status = 'HOLDING';
     healthScore = 55;
-    actionMessage = `Floating near entry (${pips >= 0 ? '+' : ''}${pips} pips). Momentum continuation in progress.`;
+    actionMessage = `Floating near entry (${pips >= 0 ? '+' : ''}${pips} ${unitWord}). Momentum continuation in progress.`;
   }
 
   return { pips, isProfit, status, healthScore, actionMessage };
@@ -1396,8 +1435,12 @@ export function evaluateMultiWindowLiveConfirmation(
   pricesOrTicks: number[] | TimestampedTick[],
   pipSize: number,
   timeframeMinutes: number = 1,
-  symbol?: string
+  symbol?: string,
+  distanceUnit?: DistanceUnit
 ): MultiWindowConfirmation {
+  const resolvedUnit: DistanceUnit =
+    distanceUnit ??
+    (symbol ? resolveAssetPipSpec({ symbol, name: symbol }).distanceUnit : 'pips');
   const pipsMultiplier = 1 / pipSize;
   const T = Math.max(0.5, timeframeMinutes);
 
@@ -1519,9 +1562,9 @@ export function evaluateMultiWindowLiveConfirmation(
   const midResult = measureWindowDirectionalBias(safeMid);
   const shortResult = measureWindowDirectionalBias(safeShort);
 
-  const longDesc = `${longMins}m Context (${longResult.deltaPips >= 0 ? '+' : ''}${longResult.deltaPips} pips)`;
-  const midDesc = `${midMins}m Context (${midResult.deltaPips >= 0 ? '+' : ''}${midResult.deltaPips} pips)`;
-  const shortDesc = `${shortMins}m Context (${shortResult.deltaPips >= 0 ? '+' : ''}${shortResult.deltaPips} pips)`;
+  const longDesc = `${longMins}m Context (${longResult.deltaPips >= 0 ? '+' : ''}${longResult.deltaPips} ${formatDistanceUnitWord(longResult.deltaPips, resolvedUnit)})`;
+  const midDesc = `${midMins}m Context (${midResult.deltaPips >= 0 ? '+' : ''}${midResult.deltaPips} ${formatDistanceUnitWord(midResult.deltaPips, resolvedUnit)})`;
+  const shortDesc = `${shortMins}m Context (${shortResult.deltaPips >= 0 ? '+' : ''}${shortResult.deltaPips} ${formatDistanceUnitWord(shortResult.deltaPips, resolvedUnit)})`;
 
   // All 3 windows MUST point in the same direction (BULLISH or BEARISH)
   const isAllBullish = longResult.bias === 'BULLISH' && midResult.bias === 'BULLISH' && shortResult.bias === 'BULLISH';
@@ -1539,19 +1582,20 @@ export function evaluateMultiWindowLiveConfirmation(
     totalDelta += Math.abs(safeShort[i] - safeShort[i - 1]) * pipsMultiplier;
   }
   const avgVelocity = safeShort.length > 1 ? totalDelta / (safeShort.length - 1) : 0.4;
+  const velUnit = resolvedUnit === 'points' ? 'pts/s' : 'p/s';
 
   let suggestedExpiryMinutes = Math.round(T);
   let suggestedExpiryReason = 'Standard cycle expiry for prevailing structure';
 
   if (avgVelocity > 0.8) {
     suggestedExpiryMinutes = Math.max(1, Math.min(Math.round(T), 2));
-    suggestedExpiryReason = `High tick velocity (${avgVelocity.toFixed(2)} p/s). Rapid momentum burst best captured in ${suggestedExpiryMinutes}m before pull-back.`;
+    suggestedExpiryReason = `High tick velocity (${avgVelocity.toFixed(2)} ${velUnit}). Rapid momentum burst best captured in ${suggestedExpiryMinutes}m before pull-back.`;
   } else if (avgVelocity < 0.25) {
     suggestedExpiryMinutes = Math.min(5, Math.round(T) + 1);
-    suggestedExpiryReason = `Compressed volatility (${avgVelocity.toFixed(2)} p/s). Extended ${suggestedExpiryMinutes}m expiry needed for clean breakout.`;
+    suggestedExpiryReason = `Compressed volatility (${avgVelocity.toFixed(2)} ${velUnit}). Extended ${suggestedExpiryMinutes}m expiry needed for clean breakout.`;
   } else {
     suggestedExpiryMinutes = Math.round(T);
-    suggestedExpiryReason = `Optimal volatility alignment (${avgVelocity.toFixed(2)} p/s) for standard ${Math.round(T)}m expiry.`;
+    suggestedExpiryReason = `Optimal volatility alignment (${avgVelocity.toFixed(2)} ${velUnit}) for standard ${Math.round(T)}m expiry.`;
   }
 
   return {

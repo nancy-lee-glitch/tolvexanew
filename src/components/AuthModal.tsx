@@ -230,9 +230,9 @@ export function AuthModal({
     try {
       let extraCredits = 0;
       const cleanRef = referralCode.trim().toUpperCase();
-      const targetRef = (brokersSettings.referralBonus.referralCode || 'TOLVEXA').toUpperCase();
+      const targetRef = (brokersSettings.referralBonus.referralCode || 'TICKVERE').toUpperCase();
 
-      if (brokersSettings.referralBonus.enabled && (cleanRef === targetRef || cleanRef === 'TOLVEXA' || cleanRef === 'DERIV')) {
+      if (brokersSettings.referralBonus.enabled && (cleanRef === targetRef || cleanRef === 'TICKVERE' || cleanRef === 'DERIV')) {
         extraCredits = brokersSettings.referralBonus.extraCredits || 5;
       }
 
@@ -597,7 +597,7 @@ export function AuthModal({
                   </div>
                   <p className="text-[11px] text-slate-300 leading-snug font-sans">
                     {brokersSettings.referralBonus.message ||
-                      `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
+                      `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || 'TICKVERE'} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
                   </p>
                 </div>
               )}
@@ -687,7 +687,7 @@ export function AuthModal({
                   type="text"
                   value={referralCode}
                   onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
-                  placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || 'TOLVEXA'} (or leave blank)`}
+                  placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || 'TICKVERE'} (or leave blank)`}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-amber-300 font-mono focus:border-amber-500 focus:outline-none uppercase"
                 />
               </div>
@@ -1133,7 +1133,7 @@ export function AuthModal({
 
               {Number(riskPctInput) > 2.0 && (
                 <div className="p-2 rounded-lg bg-amber-950/50 border border-amber-500/40 text-[10px] text-amber-300 leading-snug">
-                  ⚠️ High Risk Warning: Risking {Number(riskPctInput).toFixed(1)}% per trade elevates drawdown severity. Standard institutional sizing is 0.5%–1.0% (max 3.0%).
+                  ⚠️ High Risk Warning: Risking {Number(riskPctInput).toFixed(1)}% per trade elevates drawdown severity. Standard disciplined sizing is 0.5%–1.0% (max 3.0%).
                 </div>
               )}
 

@@ -24,7 +24,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     icon: '⚡',
     accent: 'emerald',
     description:
-      'Welcome to the Tolvexa Execution Cockpit. Our terminal reads live market candles and ticks directly from Deriv WebSocket streams.',
+      'Welcome to the Tickvere Execution Cockpit. Our terminal reads live market candles and ticks directly from Deriv WebSocket streams.',
     bulletPoints: [
       {
         title: '6-Second Execution Window',

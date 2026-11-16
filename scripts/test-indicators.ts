@@ -1,6 +1,6 @@
 /**
- * Tolvexa Quantitative Indicators & Security Test Suite
- * Tests mathematical purity of EMA, RSI, MACD, Bollinger Bands, Price Momentum Proxy, and NOWPayments HMAC-SHA512.
+ * Tickvere Quantitative Indicators & Security Test Suite
+ * Tests mathematical purity of EMA, RSI, MACD, Bollinger Bands, Tick Momentum, and NOWPayments HMAC-SHA512.
  * Run with: npx tsx scripts/test-indicators.ts
  */
 
@@ -33,7 +33,7 @@ function assertClose(actual: number, expected: number, tolerance: number, testNa
 }
 
 console.log('\n============================================================');
-console.log('  TOLVEXA QUANTITATIVE ENGINE & HMAC SECURITY TEST SUITE');
+console.log('  TICKVERE QUANTITATIVE ENGINE & HMAC SECURITY TEST SUITE');
 console.log('============================================================\n');
 
 // 1. EMA Calculation Tests
@@ -82,8 +82,8 @@ console.log('\n3. Moving Average Convergence Divergence (MACD 12, 26, 9):');
   assertClose(macd.histogram, macd.macdLine - macd.signalLine, 0.0001, 'Histogram equals MACD line minus signal line');
 }
 
-// 4. Bollinger Bands & Price Momentum Proxy
-console.log('\n4. Volatility Dispersion & Price Momentum Proxy:');
+// 4. Bollinger Bands & Tick Momentum
+console.log('\n4. Volatility Dispersion & Tick Momentum:');
 {
   const prices = Array.from({ length: 30 }, (_, i) => 1.0850 + Math.sin(i / 2) * 0.0020);
   const bb = calculateBollingerBands(prices, 20, 2.0);
@@ -99,7 +99,7 @@ console.log('\n4. Volatility Dispersion & Price Momentum Proxy:');
 // 5. NOWPayments HMAC-SHA512 Webhook Security Tests
 console.log('\n5. NOWPayments IPN HMAC-SHA512 Security Verification:');
 {
-  const IPN_SECRET = 'TEST_TOLVEXA_SECRET_KEY_9876543210';
+  const IPN_SECRET = 'TEST_TICKVERE_SECRET_KEY_9876543210';
   const samplePayload = {
     payment_id: 'np_test_998822',
     payment_status: 'finished',

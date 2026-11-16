@@ -19,7 +19,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   override componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[PulseTrade Pro Error Boundary Caught]', error, errorInfo);
+    console.error('[Tickvere Error Boundary Caught]', error, errorInfo);
   }
 
   handleReload = () => {

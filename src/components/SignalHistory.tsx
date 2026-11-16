@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import type { SignalHistoryItem, AssetConfig } from '../types.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 
 interface SignalHistoryProps {
   signals: SignalHistoryItem[];
@@ -280,7 +281,11 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                       <span className="text-slate-500">{formatTime(sig.generatedAt)}</span>
                       <span>&bull;</span>
                       <span className="text-emerald-400/90">
-                        {sig.strength ? `Setup strength (not a win probability): ${sig.strength}` : 'Recorded'}
+                        {sig.direction === 'WAIT'
+                          ? 'WAIT (No trade)'
+                          : sig.strength
+                          ? `Setup strength (not a win probability): ${sig.strength}`
+                          : 'Recorded'}
                       </span>
                     </div>
                   </div>
@@ -307,58 +312,71 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
 
                 {/* 4. Outcome Badge & Controls */}
                 <div className="flex items-center gap-2 shrink-0">
-                  {isWin ? (
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-black shadow-sm">
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
-                      </svg>
-                      <span>WON</span>
-                      {typeof sig.pipDiff === 'number' && (
-                        <span className="text-[10px] opacity-80">(+{sig.pipDiff} pips)</span>
-                      )}
-                    </div>
-                  ) : isLoss ? (
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs font-black shadow-sm">
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                      <span>LOST</span>
-                      {typeof sig.pipDiff === 'number' && (
-                        <span className="text-[10px] opacity-80">({sig.pipDiff} pips)</span>
-                      )}
-                    </div>
-                  ) : isInTrade ? (
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 text-xs font-bold animate-pulse">
-                      <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-                      <span>IN TRADE</span>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] px-2 py-1 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                        PENDING
-                      </span>
-                      {onUpdateOutcome && (
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            title="Log Win"
-                            onClick={() => onUpdateOutcome(sig.id, 'WIN')}
-                            className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded text-[10px] font-bold transition border border-emerald-500/30 cursor-pointer"
-                          >
-                            +W
-                          </button>
-                          <button
-                            type="button"
-                            title="Log Loss"
-                            onClick={() => onUpdateOutcome(sig.id, 'LOSS')}
-                            className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded text-[10px] font-bold transition border border-rose-500/30 cursor-pointer"
-                          >
-                            -L
-                          </button>
+                  {(() => {
+                    const rowUnit = resolveAssetPipSpec({ symbol: sig.asset, name: sig.asset }).distanceUnit;
+                    const unitWord = typeof sig.pipDiff === 'number' ? formatDistanceUnitWord(sig.pipDiff, rowUnit) : rowUnit;
+                    if (isWin) {
+                      return (
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-black shadow-sm">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                          </svg>
+                          <span>WON</span>
+                          {typeof sig.pipDiff === 'number' && (
+                            <span className="text-[10px] opacity-80">(+{sig.pipDiff} {unitWord})</span>
+                          )}
                         </div>
-                      )}
-                    </div>
-                  )}
+                      );
+                    }
+                    if (isLoss) {
+                      return (
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs font-black shadow-sm">
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                          <span>LOST</span>
+                          {typeof sig.pipDiff === 'number' && (
+                            <span className="text-[10px] opacity-80">({sig.pipDiff} {unitWord})</span>
+                          )}
+                        </div>
+                      );
+                    }
+                    if (isInTrade) {
+                      return (
+                        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 text-xs font-bold animate-pulse">
+                          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                          <span>IN TRADE</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] px-2 py-1 rounded bg-slate-800 text-slate-400 border border-slate-700">
+                          PENDING
+                        </span>
+                        {onUpdateOutcome && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              title="Log Win"
+                              onClick={() => onUpdateOutcome(sig.id, 'WIN')}
+                              className="px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded text-[10px] font-bold transition border border-emerald-500/30 cursor-pointer"
+                            >
+                              +W
+                            </button>
+                            <button
+                              type="button"
+                              title="Log Loss"
+                              onClick={() => onUpdateOutcome(sig.id, 'LOSS')}
+                              className="px-2 py-1 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded text-[10px] font-bold transition border border-rose-500/30 cursor-pointer"
+                            >
+                              +L
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             );

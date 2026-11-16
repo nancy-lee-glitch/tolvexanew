@@ -259,7 +259,7 @@ export function AssetPicker({ activeAsset, onSelectAsset, user, onClose }: Asset
                     <div className="text-[10px] font-mono text-slate-500 flex items-center gap-2 mt-0.5">
                       <span>{asset.symbol}</span>
                       <span>•</span>
-                      <span>Pip: {asset.pipSize}</span>
+                      <span>{asset.distanceUnit === 'points' ? 'Point' : 'Pip'}: {asset.pipSize}</span>
                       <span>•</span>
                       <span className="text-slate-400">Source: Deriv feed</span>
                     </div>

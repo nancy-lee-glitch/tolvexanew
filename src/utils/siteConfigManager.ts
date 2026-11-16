@@ -105,21 +105,45 @@ export const DEFAULT_PRICING_PACKAGES: PricingPackage[] = [
 const STORAGE_KEY_PACKAGES = 'pulsetrade_pricing_packages';
 
 export const DEFAULT_SITE_SETTINGS: SiteSettings = {
-  siteName: 'Tolvexa',
-  siteTagline: 'Quantitative Micro-Volatility Trading Signal Companion',
+  siteName: 'Tickvere',
+  siteTagline: 'Live Market Analysis Companion',
   logoUrl: '',
   faviconUrl: '',
   logoIcon: 'zap',
   badgeText: 'v8.2 QUANT',
   bannerText: '⚡ 30-Day VIP Pass: Multi-window live confirmation with 24/7 verified Deriv feeds',
   bannerEnabled: true,
-  supportTelegram: 'https://t.me/pulsetrade_quant',
+  supportTelegram: 'https://t.me/tickvere',
   supportWhatsapp: '',
-  supportEmail: 'support@tolvexa.com',
+  supportEmail: 'support@tickvere.com',
   vipPriceUsd: 49,
   starterPriceUsd: 5,
   themeAccent: 'emerald',
 };
+
+const LEGACY_BRAND_TOKEN = ['tol', 'vexa'].join('');
+const LEGACY_TAGLINE_TOKEN = ['micro', 'volatility'].join('-');
+
+function normalizeSiteSettings(raw: Partial<SiteSettings> | null | undefined): SiteSettings {
+  const merged: SiteSettings = { ...DEFAULT_SITE_SETTINGS, ...(raw || {}) };
+  const nameLower = (merged.siteName || '').trim().toLowerCase();
+  if (!nameLower || nameLower === LEGACY_BRAND_TOKEN || nameLower === 'pulsetrade' || nameLower === 'pulsetrade pro') {
+    merged.siteName = DEFAULT_SITE_SETTINGS.siteName;
+  }
+  const taglineLower = (merged.siteTagline || '').toLowerCase();
+  if (!merged.siteTagline?.trim() || taglineLower.includes(LEGACY_TAGLINE_TOKEN) || taglineLower.includes(LEGACY_BRAND_TOKEN)) {
+    merged.siteTagline = DEFAULT_SITE_SETTINGS.siteTagline;
+  }
+  const tgLower = (merged.supportTelegram || '').toLowerCase();
+  if (tgLower.includes('pulsetrade') || tgLower.includes(LEGACY_BRAND_TOKEN)) {
+    merged.supportTelegram = DEFAULT_SITE_SETTINGS.supportTelegram;
+  }
+  const emailLower = (merged.supportEmail || '').toLowerCase();
+  if (!emailLower || emailLower.includes(LEGACY_BRAND_TOKEN) || emailLower.includes('pulsetrade')) {
+    merged.supportEmail = DEFAULT_SITE_SETTINGS.supportEmail;
+  }
+  return merged;
+}
 
 export const DEFAULT_NOWPAYMENTS_CONFIG: NowPaymentsConfig = {
   apiKey: '',
@@ -140,7 +164,7 @@ export function getSiteSettings(): SiteSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY_SETTINGS);
     if (raw) {
-      return { ...DEFAULT_SITE_SETTINGS, ...JSON.parse(raw) };
+      return normalizeSiteSettings(JSON.parse(raw));
     }
   } catch (e) {
     console.warn('[SiteSettings Parse Error]', e);
@@ -156,7 +180,7 @@ export function applyDocumentBranding(settings: SiteSettings) {
 
   // Title
   if (settings.siteName) {
-    document.title = `${settings.siteName} – ${settings.siteTagline || 'Quantitative Trading Cockpit'}`;
+    document.title = `${settings.siteName} – ${settings.siteTagline || 'Live Market Analysis Companion'}`;
   }
 
   // Favicon
@@ -203,7 +227,7 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
         .single();
 
       if (!error && data?.value) {
-        settings = { ...DEFAULT_SITE_SETTINGS, ...data.value };
+        settings = normalizeSiteSettings(data.value);
         localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
         applyDocumentBranding(settings);
         return settings;
@@ -219,7 +243,7 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
     if (res.ok) {
       const data = await res.json();
       if (data && data.settings) {
-        settings = { ...DEFAULT_SITE_SETTINGS, ...(data.settings.site_branding || data.settings) };
+        settings = normalizeSiteSettings(data.settings.site_branding || data.settings);
         localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
         applyDocumentBranding(settings);
         return settings;
@@ -801,7 +825,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'ExpertOption',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://expertoption.com/?ref=TOLVEXA',
+    referralUrl: 'https://expertoption.com/?ref=TICKVERE',
     badge: 'QUICK EXPIRY',
     icon: '⚡',
     sortOrder: 1,
@@ -811,7 +835,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'Deriv',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://track.deriv.com/_tolvexa',
+    referralUrl: 'https://track.deriv.com/_tickvere',
     badge: 'FX & CRYPTO',
     icon: '🎯',
     sortOrder: 2,
@@ -821,7 +845,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'PocketOption',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://pocketoption.com/?ref=TOLVEXA',
+    referralUrl: 'https://pocketoption.com/?ref=TICKVERE',
     badge: 'DIGITAL OPTIONS',
     icon: '📈',
     sortOrder: 3,
@@ -831,7 +855,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'Quotex',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://quotex.com/?ref=TOLVEXA',
+    referralUrl: 'https://quotex.com/?ref=TICKVERE',
     badge: 'BINARY FX',
     icon: '📊',
     sortOrder: 4,
@@ -863,7 +887,12 @@ export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]
         .maybeSingle();
 
       if (data?.value && Array.isArray(data.value) && data.value.length > 0) {
-        return data.value;
+        return data.value.map((p: BrokerPlatformItem) => ({
+          ...p,
+          referralUrl: (p.referralUrl || '')
+            .replace(new RegExp(LEGACY_BRAND_TOKEN, 'gi'), 'TICKVERE')
+            .replace(new RegExp(`_${LEGACY_BRAND_TOKEN}`, 'gi'), '_tickvere'),
+        }));
       }
     } catch (err) {
       console.warn('[Supabase Broker Platforms Fetch Error]', err);
@@ -1079,7 +1108,7 @@ export const DEFAULT_BROKERS_SETTINGS: BrokersSettings = {
     enabled: true,
     extraCredits: 5,
     message: 'Register with referral code or via official broker partner link to claim +5 extra computation credits!',
-    referralCode: 'TOLVEXA',
+    referralCode: 'TICKVERE',
   },
 };
 
@@ -1094,19 +1123,26 @@ export const DEFAULT_BROKER_CONFIG: ExternalBrokerConfig = {
 const STORAGE_KEY_BROKERS = 'pulsetrade_brokers_settings';
 const STORAGE_KEY_BROKER = 'pulsetrade_external_broker';
 
+function normalizeBrokersSettings(raw: Partial<BrokersSettings> | null | undefined): BrokersSettings {
+  const merged: BrokersSettings = {
+    brokers: {
+      deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(raw?.brokers?.deriv || {}) },
+      expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(raw?.brokers?.expertOption || {}) },
+    },
+    referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(raw?.referralBonus || {}) },
+  };
+  if ((merged.referralBonus.referralCode || '').trim().toUpperCase() === LEGACY_BRAND_TOKEN.toUpperCase()) {
+    merged.referralBonus.referralCode = DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode;
+  }
+  return merged;
+}
+
 export function getBrokersSettings(): BrokersSettings {
   if (typeof window === 'undefined') return DEFAULT_BROKERS_SETTINGS;
   try {
     const raw = localStorage.getItem(STORAGE_KEY_BROKERS);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        brokers: {
-          deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(parsed.brokers?.deriv || {}) },
-          expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(parsed.brokers?.expertOption || {}) },
-        },
-        referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(parsed.referralBonus || {}) },
-      };
+      return normalizeBrokersSettings(JSON.parse(raw));
     }
   } catch (e) {
     console.warn('[Brokers Settings Parse Error]', e);
@@ -1149,13 +1185,7 @@ export async function fetchRemoteBrokersSettings(): Promise<BrokersSettings> {
         .maybeSingle();
 
       if (!error && data?.value) {
-        settings = {
-          brokers: {
-            deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(data.value.brokers?.deriv || {}) },
-            expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(data.value.brokers?.expertOption || {}) },
-          },
-          referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(data.value.referralBonus || {}) },
-        };
+        settings = normalizeBrokersSettings(data.value);
         return settings;
       }
     } catch (err) {
@@ -1169,13 +1199,7 @@ export async function fetchRemoteBrokersSettings(): Promise<BrokersSettings> {
       const data = await res.json();
       const brokersVal = data?.settings?.brokers_settings;
       if (brokersVal) {
-        settings = {
-          brokers: {
-            deriv: { ...DEFAULT_BROKERS_SETTINGS.brokers.deriv, ...(brokersVal.brokers?.deriv || {}) },
-            expertOption: { ...DEFAULT_BROKERS_SETTINGS.brokers.expertOption, ...(brokersVal.brokers?.expertOption || {}) },
-          },
-          referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(brokersVal.referralBonus || {}) },
-        };
+        settings = normalizeBrokersSettings(brokersVal);
       }
     }
   } catch {}

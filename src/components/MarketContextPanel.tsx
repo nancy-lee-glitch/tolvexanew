@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { MarketContextSummary } from '../utils/engines/marketContext.ts';
+import { formatDistanceUnitWord } from '../utils/instrumentMeta.ts';
 
 interface MarketContextPanelProps {
   context: MarketContextSummary | null;
@@ -29,6 +30,8 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
   }
 
   const { trendTable, levelsMap, volatilityRegime, sessionProfile, decimals, currentPrice } = context;
+  const distanceUnit = context.distanceUnit || 'pips';
+  const unitShort = distanceUnit === 'points' ? ' pts' : 'p';
   const displayedLevels = showAllLevels ? levelsMap : levelsMap.slice(0, 7);
 
   const regimeTextColor =
@@ -55,7 +58,7 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
             Market Context &bull; {context.assetName}
           </h4>
           <div className="text-[11px] font-mono text-slate-400 tabular-nums mt-0.5">
-            Spot {currentPrice > 0 ? currentPrice.toFixed(decimals) : 'N/A'} · Pip size {context.pipSize} · Identical audit data for Free &amp; VIP
+            Spot {currentPrice > 0 ? currentPrice.toFixed(decimals) : 'N/A'} · {distanceUnit === 'points' ? 'Point size' : 'Pip size'} {context.pipSize} · Identical audit data for Free &amp; VIP
           </div>
         </div>
         <div className="text-[11px] font-mono text-slate-500 tabular-nums">
@@ -96,7 +99,7 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
 
                 const distLabel =
                   row.distancePips !== null && row.distancePct !== null
-                    ? `${row.distancePips >= 0 ? '+' : ''}${row.distancePips.toFixed(1)} pips (${row.distancePct >= 0 ? '+' : ''}${row.distancePct.toFixed(2)}%)`
+                    ? `${row.distancePips >= 0 ? '+' : ''}${row.distancePips.toFixed(1)} ${formatDistanceUnitWord(row.distancePips, distanceUnit)} (${row.distancePct >= 0 ? '+' : ''}${row.distancePct.toFixed(2)}%)`
                     : 'Insufficient data';
 
                 return (
@@ -185,7 +188,7 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
             <div className="text-[10px] text-slate-500">Current Daily ATR(14)</div>
             <div className="font-semibold text-white mt-0.5">
               {volatilityRegime.currentAtrPips !== null
-                ? `${volatilityRegime.currentAtrPips.toFixed(1)} pips`
+                ? `${volatilityRegime.currentAtrPips.toFixed(1)} ${formatDistanceUnitWord(volatilityRegime.currentAtrPips, distanceUnit)}`
                 : 'N/A'}
             </div>
             <div className="text-[10px] text-slate-500 mt-0.5">
@@ -230,13 +233,13 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
               {sessionProfile.mostActiveHour && (
                 <span>
                   Widest hour: <strong className="text-emerald-300">{sessionProfile.mostActiveHour.hourLabel} UTC</strong>{' '}
-                  ({sessionProfile.mostActiveHour.avgRangePips?.toFixed(1)} pips avg, n={sessionProfile.mostActiveHour.sampleCount})
+                  ({sessionProfile.mostActiveHour.avgRangePips?.toFixed(1)} {formatDistanceUnitWord(sessionProfile.mostActiveHour.avgRangePips ?? 0, distanceUnit)} avg, n={sessionProfile.mostActiveHour.sampleCount})
                 </span>
               )}
               {sessionProfile.quietestHour && (
                 <span>
                   Quietest hour: <strong className="text-slate-200">{sessionProfile.quietestHour.hourLabel} UTC</strong>{' '}
-                  ({sessionProfile.quietestHour.avgRangePips?.toFixed(1)} pips avg, n={sessionProfile.quietestHour.sampleCount})
+                  ({sessionProfile.quietestHour.avgRangePips?.toFixed(1)} {formatDistanceUnitWord(sessionProfile.quietestHour.avgRangePips ?? 0, distanceUnit)} avg, n={sessionProfile.quietestHour.sampleCount})
                 </span>
               )}
             </div>
@@ -261,7 +264,7 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
                       <span className="text-slate-500">n={bucket.sampleCount}</span>
                     </div>
                     <div className="text-slate-200 font-semibold">
-                      {bucket.avgRangePips !== null ? `${bucket.avgRangePips.toFixed(1)}p` : '—'}
+                      {bucket.avgRangePips !== null ? `${bucket.avgRangePips.toFixed(1)}${unitShort}` : '—'}
                     </div>
                     <svg viewBox="0 0 100 4" className="w-full h-1 rounded overflow-hidden bg-slate-800 block" aria-hidden="true">
                       <rect

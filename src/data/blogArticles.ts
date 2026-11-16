@@ -14,7 +14,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
     imageUrl: 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=1200&q=80',
     tags: ['Latency', 'Microstructure', 'Execution', 'Deriv API'],
     keyTakeaways: [
-      'Binary contract pricing reflects micro-volatility shifts rapidly after a price inflection.',
+      'Binary contract pricing reflects short-term price shifts rapidly after a price inflection.',
       'Illustrative example, not our results: Entering a trade after 6 seconds can turn a hypothetical +14% expected-value scenario into negative expectation due to price re-anchoring.',
       'Direct WebSocket synchronization with the Deriv feed avoids polling delays during fast ticks.',
     ],
@@ -68,7 +68,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
     ],
     content: [
       'Most simple signal bots fail because they examine a single timeframe in isolation. A 1-minute chart might appear to present a textbook double bottom, prompting a CALL alert. But if the 1-hour chart is in a steady downtrend, that 1-minute bounce may be merely a brief pause before lower lows.',
-      'Tolvexa evaluates multi-window trend vectors, micro-candle structure, and real-time price momentum from the live Deriv WebSocket feed to check whether short-term price velocity aligns with broader direction.',
+      'Tickvere evaluates multi-window trend vectors, micro-candle structure, and real-time price momentum from the live Deriv WebSocket feed to check whether short-term price velocity aligns with broader direction.',
       'A directional signal is only issued when these analysis layers reach consensus; otherwise the engine outputs WAIT to avoid forcing trades in unclear conditions.',
       'Furthermore, traders can log WIN or LOSS outcomes in their local session ledger. When recent settled setups show unfavorable conditions on an asset, the adaptive gate raises confirmation requirements before issuing new actionable alerts.',
     ],
@@ -93,7 +93,7 @@ export const BLOG_ARTICLES: BlogArticle[] = [
     content: [
       'Market liquidity is not uniform. The time of day at which you trade has as much impact on your outcomes as your underlying chart analysis. For Forex pairs like EUR/USD and GBP/USD, trading during the London / New York overlap (12:00 to 16:00 UTC) generally offers tighter spreads and clearer directional impulses.',
       'Conversely, the twilight period between 21:00 and 01:00 UTC often presents a "liquidity vacuum". Volume dries up, spreads widen, and thin-book pricing creates micro-whipsaws that ruin short-duration binary contracts.',
-      'This is why we built the Floating Market Radar into PulseTrade Pro. At a glance, traders can view the active liquidity state—Optimal, Normal, or High Risk—alongside an active UTC reference clock. During weekend FX closures, spot crypto assets (BTC/USD, ETH/USD) continue trading around the clock; synthetic indices are random-number simulations suited for practice only.',
+      'This is why we built the Floating Market Radar into Tickvere. At a glance, traders can view the active liquidity state—Optimal, Normal, or High Risk—alongside an active UTC reference clock. During weekend FX closures, spot crypto assets (BTC/USD, ETH/USD) continue trading around the clock; synthetic indices are random-number simulations suited for practice only.',
     ],
   },
 ];

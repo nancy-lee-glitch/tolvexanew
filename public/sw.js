@@ -1,5 +1,5 @@
-// Tolvexa - Production Progressive Web App Service Worker
-const CACHE_NAME = 'tolvexa-pwa-v3';
+// Tickvere - Production Progressive Web App Service Worker
+const CACHE_NAME = 'tickvere-pwa-v3';
 const PRECACHE_ASSETS = [
   '/',
   '/index.html',

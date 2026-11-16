@@ -125,10 +125,15 @@ export function resolveAssetPipSpec(
     };
   }
 
+  const explicitNonForexType =
+    Boolean(asset.type && asset.type !== 'FOREX') ||
+    Boolean(marketLower && marketLower !== 'forex');
   const isForex =
     asset.type === 'FOREX' ||
     marketLower === 'forex' ||
-    (/^frx[A-Z]{6}$/i.test(asset.symbol || '') && !/XAU|XAG/i.test(asset.symbol || ''));
+    (!explicitNonForexType &&
+      /^frx[A-Z]{6}$/i.test(asset.symbol || '') &&
+      !/XAU|XAG|XPD|XPT/i.test(asset.symbol || ''));
 
   if (isForex) {
     const isJpy = inferred.quoteCcy === 'JPY';

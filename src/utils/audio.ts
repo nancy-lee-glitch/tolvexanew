@@ -1,5 +1,5 @@
 /**
- * PulseTrade Pro - Web Audio API Synthesizer
+ * Tickvere - Web Audio API Synthesizer
  * Zero-Asset Algorithmic Audio Chimes
  */
 

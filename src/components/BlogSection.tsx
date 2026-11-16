@@ -136,7 +136,7 @@ export function BlogSection({
         {/* In-Article CTA Banner */}
         <div className="bg-gradient-to-r from-emerald-950/90 via-slate-900 to-slate-900 border border-emerald-500/40 rounded-3xl p-6 sm:p-8 space-y-4 font-mono">
           <div className="space-y-1">
-            <h3 className="text-lg font-black text-white">Apply This Research with PulseTrade Pro</h3>
+            <h3 className="text-lg font-black text-white">Apply This Research with Tickvere</h3>
             <p className="text-xs text-slate-400">
               Test these exact latency principles in real-time with 10 free starter signal credits.
             </p>

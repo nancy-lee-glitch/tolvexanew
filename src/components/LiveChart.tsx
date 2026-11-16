@@ -27,6 +27,7 @@ import {
   type ChartOverlayLineStyle,
   type EngineChartSignal,
 } from '../utils/chartOverlays.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 
 export type ChartType = 'line' | 'area' | 'candles';
 export type AggregationInterval =
@@ -202,8 +203,11 @@ export function LiveChart({
     timespanMinutes: 0,
   });
 
-  const decimals = activeAsset?.decimals ?? 5;
-  const pipSize = activeAsset?.pipSize ?? 0.0001;
+  const pipSpec = useMemo(() => resolveAssetPipSpec(activeAsset), [activeAsset]);
+  const decimals = pipSpec.decimals;
+  const pipSize = pipSpec.pipSize;
+  const distanceUnit = signal?.distanceUnit || pipSpec.distanceUnit;
+  const shortDistanceSuffix = distanceUnit === 'points' ? ' pts' : 'p';
 
   // When an actionable MT5 signal arrives, preselect its structure timeframe + candles once
   useEffect(() => {
@@ -802,7 +806,7 @@ export function LiveChart({
     priceLinesRef.current = [];
 
     // 2) Signal Overlays (MT5 Entry/SL/TP1/TP2 or Binary Entry + Marker; empty for WAIT/null)
-    const signalOverlays = buildSignalChartOverlays(signal, { compact: isMobileViewport });
+    const signalOverlays = buildSignalChartOverlays(signal, { compact: isMobileViewport, distanceUnit });
 
     // 3) Key Levels Overlays when toggled on
     const levelOverlays = showLevels ? buildKeyLevelOverlays(marketContext, currentPrice, 8) : [];
@@ -1078,7 +1082,7 @@ export function LiveChart({
               </span>
               {metrics.totalBars > 0 && (
                 <span className={`text-xs font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {isPositive ? `+${metrics.changePips} pips` : `${metrics.changePips} pips`} ({isPositive ? '+' : ''}{metrics.changePct}%)
+                  {isPositive ? `+${metrics.changePips}` : metrics.changePips} {formatDistanceUnitWord(metrics.changePips, distanceUnit)} ({isPositive ? '+' : ''}{metrics.changePct}%)
                 </span>
               )}
             </div>
@@ -1163,13 +1167,13 @@ export function LiveChart({
 
           <div className="flex items-center gap-2 flex-wrap text-[10px]">
             {signal.stopLossPips !== null && (
-              <span className="text-rose-400 font-bold">SL -{signal.stopLossPips}p</span>
+              <span className="text-rose-400 font-bold">SL -{signal.stopLossPips}{shortDistanceSuffix}</span>
             )}
             {signal.takeProfit1Pips !== null && (
-              <span className="text-emerald-400 font-bold">TP1 +{signal.takeProfit1Pips}p</span>
+              <span className="text-emerald-400 font-bold">TP1 +{signal.takeProfit1Pips}{shortDistanceSuffix}</span>
             )}
             {signal.takeProfit2Pips !== null && (
-              <span className="text-emerald-300 font-bold">TP2 +{signal.takeProfit2Pips}p</span>
+              <span className="text-emerald-300 font-bold">TP2 +{signal.takeProfit2Pips}{shortDistanceSuffix}</span>
             )}
             <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
               Valid {formatRemainingMMSS(mt5ValidLeftSec)}

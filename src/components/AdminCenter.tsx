@@ -2451,18 +2451,18 @@ export function AdminCenter({
                   </label>
                   <input
                     type="text"
-                    value={brokersSettings.referralBonus.referralCode || 'TOLVEXA'}
+                    value={brokersSettings.referralBonus.referralCode || 'TICKVERE'}
                     onChange={(e) =>
                       setBrokersSettings({
                         ...brokersSettings,
                         referralBonus: { ...brokersSettings.referralBonus, referralCode: e.target.value.toUpperCase() },
                       })
                     }
-                    placeholder="TOLVEXA"
+                    placeholder="TICKVERE"
                     className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 px-3 text-white font-mono focus:border-amber-500 focus:outline-none"
                   />
                   <p className="text-[10px] text-slate-500 font-sans">
-                    Traders who register with this code or visit with <code className="text-amber-300">?ref={brokersSettings.referralBonus.referralCode || 'TOLVEXA'}</code> receive the bonus.
+                    Traders who register with this code or visit with <code className="text-amber-300">?ref={brokersSettings.referralBonus.referralCode || 'TICKVERE'}</code> receive the bonus.
                   </p>
                 </div>
 
@@ -2498,7 +2498,7 @@ export function AdminCenter({
                       <span>🎁 Referral Bonus Active:</span>
                       <span className="text-white">+{brokersSettings.referralBonus.extraCredits} Free Credits on signup with code</span>
                       <span className="px-1.5 py-0.2 bg-amber-500/20 rounded border border-amber-500/30 text-amber-300 font-mono">
-                        {brokersSettings.referralBonus.referralCode || 'TOLVEXA'}
+                        {brokersSettings.referralBonus.referralCode || 'TICKVERE'}
                       </span>
                     </div>
                   )}
@@ -2797,7 +2797,7 @@ export function AdminCenter({
                       )}
                     </div>
                     <span className="text-[10px] text-slate-300 font-sans max-w-[90px] truncate">
-                      {siteSettings.siteName || 'PulseTrade'}
+                      {siteSettings.siteName || 'Tickvere'}
                     </span>
                   </div>
                 </div>
@@ -2852,7 +2852,7 @@ export function AdminCenter({
                 type="email"
                 value={siteSettings.supportEmail || ''}
                 onChange={(e) => setSiteSettings({ ...siteSettings, supportEmail: e.target.value })}
-                placeholder="support@pulsetrade.pro"
+                placeholder="support@tickvere.com"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-white focus:border-amber-500 focus:outline-none"
               />
             </div>

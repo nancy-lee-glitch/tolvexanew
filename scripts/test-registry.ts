@@ -121,6 +121,12 @@ run('1. Live Deriv underlying_symbol shape & market-only categorization', () => 
   assert.equal(gold.is_trading_suspended, true);
   assert.equal(gold.exchange_is_open, false);
   assert.equal(isSymbolMarketOpen('frxXAUUSD'), false);
+  assert.equal(gold.pipSize, 0.01);
+  assert.equal(gold.distanceUnit, 'pips');
+  assert.equal(btc.pipSize, 1.0);
+  assert.equal(btc.distanceUnit, 'points');
+  assert.equal(spx.distanceUnit, 'points');
+  assert.equal(v100.distanceUnit, 'points');
 });
 
 run('2. Legacy symbol/display_name/pip shape fallback & market aliases', () => {
@@ -213,6 +219,108 @@ run('3. Empty or unusable symbols keep bootstrap list and record registrySource 
   info = getAssetRegistryInfo();
   assert.equal(info.source, 'bootstrap');
   assert.ok(info.reason.includes('0 usable'));
+});
+
+run('4. Stage 4F: Deriv pip_size sets tickSize/decimals while pipSize/distanceUnit use instrument specs', () => {
+  resetAssetRegistry();
+
+  const derivPrecisionPayload = [
+    {
+      underlying_symbol: 'frxGBPUSD',
+      underlying_symbol_name: 'GBP/USD',
+      market: 'forex',
+      pip_size: 0.00001, // 5-digit quote step on Deriv
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'frxUSDJPY',
+      underlying_symbol_name: 'USD/JPY',
+      market: 'forex',
+      pip_size: 0.001, // 3-digit JPY quote step
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'frxNZDUSD',
+      underlying_symbol_name: 'NZD/USD',
+      market: 'forex',
+      pip_size: 0.00001,
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'frxAUDJPY',
+      underlying_symbol_name: 'AUD/JPY',
+      market: 'forex',
+      pip_size: 0.001,
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'OTC_DJI',
+      underlying_symbol_name: 'Wall Street 30',
+      market: 'indices',
+      pip_size: 0.1,
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'frxXAGUSD',
+      underlying_symbol_name: 'Silver/USD',
+      market: 'commodities',
+      pip_size: 0.001,
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+    {
+      underlying_symbol: 'frxXPDUSD',
+      underlying_symbol_name: 'Palladium/USD',
+      market: 'commodities',
+      pip_size: 0.01,
+      exchange_is_open: 1,
+      is_trading_suspended: 0,
+    },
+  ];
+
+  const assets = ingestActiveSymbols(derivPrecisionPayload);
+
+  const gbpusd = assets.find((a) => a.symbol === 'frxGBPUSD')!;
+  assert.equal(gbpusd.pipSize, 0.0001);
+  assert.equal(gbpusd.tickSize, 0.00001);
+  assert.equal(gbpusd.decimals, 5);
+  assert.equal(gbpusd.distanceUnit, 'pips');
+
+  const usdjpy = assets.find((a) => a.symbol === 'frxUSDJPY')!;
+  assert.equal(usdjpy.pipSize, 0.01);
+  assert.equal(usdjpy.tickSize, 0.001);
+  assert.equal(usdjpy.decimals, 3);
+  assert.equal(usdjpy.distanceUnit, 'pips');
+
+  const nzdusd = assets.find((a) => a.symbol === 'frxNZDUSD')!;
+  assert.equal(nzdusd.pipSize, 0.0001);
+  assert.equal(nzdusd.tickSize, 0.00001);
+  assert.equal(nzdusd.decimals, 5);
+  assert.equal(nzdusd.distanceUnit, 'pips');
+
+  const audjpy = assets.find((a) => a.symbol === 'frxAUDJPY')!;
+  assert.equal(audjpy.pipSize, 0.01);
+  assert.equal(audjpy.tickSize, 0.001);
+  assert.equal(audjpy.decimals, 3);
+  assert.equal(audjpy.distanceUnit, 'pips');
+
+  const dji = assets.find((a) => a.symbol === 'OTC_DJI')!;
+  assert.equal(dji.pipSize, 0.1);
+  assert.equal(dji.tickSize, 0.1);
+  assert.equal(dji.distanceUnit, 'points');
+
+  const xagusd = assets.find((a) => a.symbol === 'frxXAGUSD')!;
+  assert.equal(xagusd.pipSize, 0.001);
+  assert.equal(xagusd.distanceUnit, 'pips');
+
+  const xpdusd = assets.find((a) => a.symbol === 'frxXPDUSD')!;
+  assert.equal(xpdusd.pipSize, 0.01);
+  assert.equal(xpdusd.distanceUnit, 'points');
 });
 
 console.log('ALL REGISTRY TESTS PASSED');

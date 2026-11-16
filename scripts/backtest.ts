@@ -1,5 +1,5 @@
 /**
- * Tolvexa - Quantitative Backtest & Accuracy Audit Engine
+ * Tickvere - Quantitative Backtest & Accuracy Audit Engine
  *
  * Replays historical walk-forward ticks & OHLC bars through analyzeBinarySignal()
  * and reports:
@@ -237,7 +237,7 @@ export function runBacktest(ticks: number[], config: BacktestConfig): BacktestRe
 
 async function main() {
   console.log('═══════════════════════════════════════════════════════════════════════');
-  console.log('  TOLVEXA QUANTITATIVE BACKTEST & STATISTICAL AUDIT ENGINE');
+  console.log('  TICKVERE QUANTITATIVE BACKTEST & STATISTICAL AUDIT ENGINE');
   console.log('  Evaluating Binary Confluence Engine Against Walk-Forward Replay');
   console.log('═══════════════════════════════════════════════════════════════════════\n');
 

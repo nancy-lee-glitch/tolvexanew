@@ -27,6 +27,7 @@ import {
   resolveAssetPipSize,
 } from '../src/utils/engines/marketContext.ts';
 import { validateContractSizeOverrides } from '../src/utils/supabaseClient.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from '../src/utils/instrumentMeta.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
 import historyRefreshHandler from '../api/history/refresh.ts';
@@ -1783,13 +1784,210 @@ function runStage4EHorizonTests() {
   );
 }
 
+// ============================================================================
+// 17. STAGE 4F: PIP SIZES, DISTANCE UNITS, BRAND & WORDING
+// ============================================================================
+function runStage4FPipBrandWordingTests() {
+  console.log('\n17. Stage 4F Pip Sizes, Distance Units, Brand & Wording:');
+
+  // 17a. 5-digit GBP/USD with stale 0.00001 pipSize resolves to 0.0001 pip / 0.00001 tick / 5 decimals
+  const gbpSpec = resolveAssetPipSpec({
+    name: 'GBP/USD',
+    symbol: 'frxGBPUSD',
+    type: 'FOREX',
+    pipSize: 0.00001,
+    decimals: 5,
+  });
+  assert(
+    gbpSpec.pipSize === 0.0001 &&
+      gbpSpec.tickSize === 0.00001 &&
+      gbpSpec.decimals === 5 &&
+      gbpSpec.distanceUnit === 'pips',
+    `GBP/USD 5-digit resolves pipSize=0.0001, tickSize=0.00001, unit=pips (got pip=${gbpSpec.pipSize}, tick=${gbpSpec.tickSize}, unit=${gbpSpec.distanceUnit})`
+  );
+
+  // Spot 1.32062 vs level 1.32052 reads "1.0 pip" (not "10.0")
+  const gbpSpotDist = formatLevelDistance(1.32062, 1.32052, 'Daily Pivot', gbpSpec.pipSize, gbpSpec.distanceUnit);
+  assert(
+    gbpSpotDist.plainText.includes('1.0 pip') &&
+      !gbpSpotDist.plainText.includes('1.0 pips') &&
+      Math.abs(gbpSpotDist.absPips - 1.0) < 1e-6,
+    `GBP/USD 1.32062 vs 1.32052 reads "1.0 pip" (got "${gbpSpotDist.plainText}")`
+  );
+
+  // Daily ATR 0.00696 reads "69.6 pips"
+  const dailyAtrPips = parseFloat((0.00696 / gbpSpec.pipSize).toFixed(1));
+  const dailyAtrLabel = `${dailyAtrPips.toFixed(1)} ${formatDistanceUnitWord(dailyAtrPips, gbpSpec.distanceUnit)}`;
+  assert(
+    dailyAtrLabel === '69.6 pips',
+    `GBP/USD daily ATR 0.00696 reads "69.6 pips" (got "${dailyAtrLabel}")`
+  );
+
+  // 17b. USD/JPY 150.05 vs 150.00 reads "5.0 pips"
+  const jpySpec = resolveAssetPipSpec({
+    name: 'USD/JPY',
+    symbol: 'frxUSDJPY',
+    type: 'FOREX',
+    pipSize: 0.001,
+    decimals: 3,
+  });
+  const jpyDist = formatLevelDistance(150.05, 150.0, 'Round 150', jpySpec.pipSize, jpySpec.distanceUnit);
+  assert(
+    jpySpec.pipSize === 0.01 &&
+      jpySpec.distanceUnit === 'pips' &&
+      jpyDist.plainText.includes('5.0 pips'),
+    `USD/JPY 150.05 vs 150.00 reads "5.0 pips" (got "${jpyDist.plainText}")`
+  );
+
+  // 17c. XAU/USD (0.01, pips) and BTC/USD (1.0, points) use their own units
+  const xauSpec = resolveAssetPipSpec({
+    name: 'Gold/USD',
+    symbol: 'frxXAUUSD',
+    type: 'COMMODITY',
+    pipSize: 0.01,
+    decimals: 2,
+  });
+  const xauDist = formatLevelDistance(2000.5, 2000.0, 'Round 2000', xauSpec.pipSize, xauSpec.distanceUnit);
+  assert(
+    xauSpec.pipSize === 0.01 &&
+      xauSpec.distanceUnit === 'pips' &&
+      xauDist.plainText.includes('50.0 pips'),
+    `XAU/USD uses 0.01 / pips ("${xauDist.plainText}")`
+  );
+
+  const btcSpec = resolveAssetPipSpec({
+    name: 'BTC/USD',
+    symbol: 'cryBTCUSD',
+    type: 'CRYPTO',
+    pipSize: 0.01,
+    decimals: 2,
+  });
+  const btcDist = formatLevelDistance(65100, 65000, 'Round 65000', btcSpec.pipSize, btcSpec.distanceUnit);
+  assert(
+    btcSpec.pipSize === 1.0 &&
+      btcSpec.distanceUnit === 'points' &&
+      btcDist.plainText.includes('100.0 points'),
+    `BTC/USD uses 1.0 / points ("${btcDist.plainText}")`
+  );
+
+  // 17d. Unmapped index uses points instead of pips
+  const us30Spec = resolveAssetPipSpec({
+    name: 'US 30 Index',
+    symbol: 'OTC_DJI',
+    type: 'INDEX',
+    pipSize: 0.1,
+    decimals: 1,
+  });
+  const us30Dist = formatLevelDistance(39100, 39000, 'Round 39000', us30Spec.pipSize, us30Spec.distanceUnit);
+  assert(
+    us30Spec.distanceUnit === 'points' && us30Dist.plainText.includes('1000.0 points'),
+    `Unmapped index uses points ("${us30Dist.plainText}")`
+  );
+
+  // Unknown FX pairs infer JPY -> 0.01 and non-JPY -> 0.0001
+  const nzdSpec = resolveAssetPipSpec({
+    name: 'NZD/USD',
+    symbol: 'frxNZDUSD',
+    type: 'FOREX',
+    pipSize: 0.00001,
+    decimals: 5,
+  });
+  const audJpySpec = resolveAssetPipSpec({
+    name: 'AUD/JPY',
+    symbol: 'frxAUDJPY',
+    type: 'FOREX',
+    pipSize: 0.001,
+    decimals: 3,
+  });
+  assert(
+    nzdSpec.pipSize === 0.0001 && nzdSpec.distanceUnit === 'pips' &&
+      audJpySpec.pipSize === 0.01 && audJpySpec.distanceUnit === 'pips',
+    'Unmapped FX non-JPY -> 0.0001 and JPY -> 0.01 with pips unit'
+  );
+
+  // 17e. MT5 engine on BTC/USD outputs distanceUnit='points' and "pts" in copyOrderText
+  const btcD1 = makeCandles({ count: 35, startPrice: 52000, step: 350, stepSec: 86400, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 900, pipSize: 1 });
+  const btcH4 = makeCandles({ count: 40, startPrice: 60000, step: 120, stepSec: 14400, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 400, pipSize: 1 });
+  const btcH1 = makeCandles({ count: 50, startPrice: 63500, step: 45, stepSec: 3600, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 250, pipSize: 1 });
+  const btcLast = btcH1[btcH1.length - 1].close;
+  const btcM15 = makeCandles({ count: 50, startPrice: btcLast - 500, step: 11, stepSec: 900, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 160, pipSize: 1 });
+  const btcM5 = makeCandles({ count: 50, startPrice: btcLast - 220, step: 5, stepSec: 300, endEpochSec: PRIME_FX_NOW_SEC, spreadPips: 110, pipSize: 1 });
+  const btcMt5 = analyzeMT5Signal({
+    asset: { name: 'BTC/USD', symbol: 'cryBTCUSD', type: 'CRYPTO', pipSize: 1.0, decimals: 2 },
+    platform: 'mt5',
+    d1Candles: btcD1,
+    h4Candles: btcH4,
+    h1Candles: btcH1,
+    m15Candles: btcM15,
+    m5Candles: btcM5,
+    feedStatus: 'LIVE',
+    accountBalance: 10000,
+    riskPct: 1.0,
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  assert(
+    btcMt5.distanceUnit === 'points' && !btcMt5.copyOrderText.includes('pips'),
+    `BTC/USD MT5 output uses distanceUnit="points" without "pips" in order text (unit=${btcMt5.distanceUnit})`
+  );
+
+  // 17f. Brand & wording checks across HTML, manifest, config, and signal UI
+  const rootDir = resolve(process.cwd());
+  const indexHtml = readFileSync(resolve(rootDir, 'index.html'), 'utf8');
+  const manifest = readFileSync(resolve(rootDir, 'public/manifest.webmanifest'), 'utf8');
+  const swJs = readFileSync(resolve(rootDir, 'public/sw.js'), 'utf8');
+  const siteCfg = readFileSync(resolve(rootDir, 'src/utils/siteConfigManager.ts'), 'utf8');
+  const signalUi = readFileSync(resolve(rootDir, 'src/components/SignalEngine.tsx'), 'utf8');
+  const radarModal = readFileSync(resolve(rootDir, 'src/components/VipSafeRadarModal.tsx'), 'utf8');
+  const landingUi = readFileSync(resolve(rootDir, 'src/components/LandingPage.tsx'), 'utf8');
+
+  assert(
+    indexHtml.includes('<title>Tickvere – Live Market Analysis Companion</title>'),
+    'index.html title is "Tickvere – Live Market Analysis Companion"'
+  );
+  assert(
+    manifest.includes('Tickvere') && swJs.includes('tickvere-pwa-v3'),
+    'manifest.webmanifest and sw.js use Tickvere branding'
+  );
+  assert(
+    siteCfg.includes("siteName: 'Tickvere'") && siteCfg.includes("siteTagline: 'Live Market Analysis Companion'"),
+    'siteConfigManager.ts defaults to Tickvere – Live Market Analysis Companion'
+  );
+
+  const filesToScan = [indexHtml, manifest, swJs, siteCfg, signalUi, radarModal, landingUi];
+  const forbidden = [
+    ['tol', 'vexa'].join(''),
+    ['institutional', 'grade'].join('-'),
+    ['quantitative', 'micro', 'volatility'].join(' ').replace('micro volatility', 'micro-volatility'),
+    ['price', 'momentum', 'proxy:'].join(' '),
+  ];
+  const forbiddenFound = forbidden.filter((term) =>
+    filesToScan.some((txt) => txt.toLowerCase().includes(term))
+  );
+  assert(
+    forbiddenFound.length === 0,
+    `No forbidden legacy brand/wording phrases remain (found: ${forbiddenFound.join(', ') || 'none'})`
+  );
+
+  assert(
+    signalUi.includes('Last 60 seconds of ticks:') && signalUi.includes('(not a forecast)'),
+    'SignalEngine.tsx displays "Last 60 seconds of ticks: X% up, Y% down (not a forecast)"'
+  );
+  assert(
+    signalUi.includes("signal.direction !== 'WAIT'") &&
+      signalUi.includes('Setup strength (not a win probability)') &&
+      radarModal.includes("recommendedAction !== 'WAIT'"),
+    'Setup strength label is strictly gated so it never appears on WAIT results'
+  );
+}
+
 runSignalLogValidationTests()
   .then(() => runHistoryRefreshGuards())
   .then(() => {
     runMt5Tests();
     runStage4EHorizonTests();
+    runStage4FPipBrandWordingTests();
     console.log('\n------------------------------------------------------------');
-    console.log(`Combined Binary + MT5 + Stage 4A + Stage 4D + Stage 4E Results: ${passed}/${total} tests passed`);
+    console.log(`Combined Binary + MT5 + Stage 4A + Stage 4D + Stage 4E + Stage 4F Results: ${passed}/${total} tests passed`);
     console.log('------------------------------------------------------------\n');
 
     if (passed !== total) {

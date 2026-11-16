@@ -16,10 +16,12 @@ import type {
 import { playCallAudioChime, playPutAudioChime } from '../utils/audio.ts';
 import {
   analyzeMarketConfluence,
+  calculatePriceMomentumProxy,
   calculateSafeCloseAnalysis,
   computeSignalHistoryLearning,
   getAssetTimestampedTicks,
 } from '../utils/quantEngine.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 import {
   analyzeBinarySignal,
   analyzeMT5Signal,
@@ -388,17 +390,34 @@ export function SignalEngine({
 
   // Live telemetry audit
   const isSynthetic = useMemo(() => isSyntheticAsset(activeAsset), [activeAsset]);
+  const assetPipSpec = useMemo(() => resolveAssetPipSpec(activeAsset), [activeAsset]);
 
   const liveAudit: TechnicalAudit = useMemo(() => {
     const auditTf = analysisMode === 'quick' ? (binaryHorizon === 'auto' ? '1m' : binaryHorizon) : mt5Horizon;
-    return analyzeMarketConfluence(safeTicks, auditTf, activeAsset?.pipSize || 0.0001, isVIP, analysisMode, activeAsset);
-  }, [safeTicks, binaryHorizon, mt5Horizon, activeAsset, isVIP, analysisMode]);
+    return analyzeMarketConfluence(safeTicks, auditTf, assetPipSpec.pipSize, isVIP, analysisMode, activeAsset);
+  }, [safeTicks, binaryHorizon, mt5Horizon, assetPipSpec.pipSize, activeAsset, isVIP, analysisMode]);
+
+  const last60sTickStats = useMemo(() => {
+    const tsTicks = getAssetTimestampedTicks(activeAsset?.symbol || '');
+    if (tsTicks.length >= 2) {
+      const newest = tsTicks[tsTicks.length - 1];
+      const cutoff = newest.time > 1e12 ? newest.time - 60_000 : newest.time - 60;
+      const recent60 = tsTicks.filter((t) => t.time >= cutoff).map((t) => t.price);
+      if (recent60.length >= 2) {
+        return calculatePriceMomentumProxy(recent60, recent60.length);
+      }
+    }
+    return {
+      buyPct: liveAudit.momentumBuyPct,
+      sellPct: liveAudit.momentumSellPct,
+    };
+  }, [activeAsset?.symbol, safeTicks, liveAudit.momentumBuyPct, liveAudit.momentumSellPct]);
 
   // Safe close analysis
   const safeCloseAnalysis = useMemo(() => {
     const closeTf = analysisMode === 'quick' ? (binaryHorizon === 'auto' ? '1m' : binaryHorizon) : mt5Horizon;
-    return calculateSafeCloseAnalysis(safeTicks, closeTf, activeAsset?.pipSize || 0.0001);
-  }, [safeTicks, binaryHorizon, mt5Horizon, activeAsset?.pipSize, analysisMode]);
+    return calculateSafeCloseAnalysis(safeTicks, closeTf, assetPipSpec.pipSize, assetPipSpec.distanceUnit);
+  }, [safeTicks, binaryHorizon, mt5Horizon, assetPipSpec.pipSize, assetPipSpec.distanceUnit, analysisMode]);
 
   // Count consecutive recent Binary losses for "Take a break" cool-down
   const binaryConsecutiveLosses = useMemo(() => {
@@ -603,7 +622,7 @@ export function SignalEngine({
         status: 'ANALYSIS_BLOCKED',
         blockedReason: `Live tick buffer warming (${safeTicks.length}/5 real ticks captured for ${activeAsset.name}).`,
         plainLanguageReason:
-          'PulseTrade strictly requires real WebSocket ticks before evaluating setups. Buffers start empty and never use fake seed data. No credits deducted.',
+          'Tickvere strictly requires real WebSocket ticks before evaluating setups. Buffers start empty and never use fake seed data. No credits deducted.',
         riskNote: 'Trading involves risk. Always wait for confirmed live market velocity.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -1151,7 +1170,7 @@ export function SignalEngine({
     tradeTimerRef.current = setInterval(() => {
       const elapsed = Math.floor((Date.now() - activeTrade.startedAt) / 1000);
       const remaining = Math.max(0, activeTrade.timeframeSeconds - elapsed);
-      const pipMultiplier = 1 / (activeAsset?.pipSize || 0.0001);
+      const pipMultiplier = 1 / assetPipSpec.pipSize;
       const diff =
         activeTrade.direction === 'CALL'
           ? (currentPrice - activeTrade.entryPrice) * pipMultiplier
@@ -1171,7 +1190,7 @@ export function SignalEngine({
     return () => {
       if (tradeTimerRef.current) clearInterval(tradeTimerRef.current);
     };
-  }, [activeTrade, currentPrice, activeAsset?.pipSize]);
+  }, [activeTrade, currentPrice, assetPipSpec.pipSize]);
 
   // Handle post-trade feedback
   const handleOutcome = (outcome: 'WIN' | 'LOSS') => {
@@ -1263,24 +1282,35 @@ export function SignalEngine({
             </span>
           </div>
 
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between">
-            <span className="text-slate-400" title="Direction of recent tick price changes (no true volume in broker feed)">Price Momentum Proxy:</span>
-            <span className="font-bold text-teal-400">
-              {liveAudit.momentumBuyPct}% Up / {liveAudit.momentumSellPct}% Down
+          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between sm:col-span-1">
+            <span className="text-slate-300 text-[10px] leading-snug">
+              Last 60 seconds of ticks:{' '}
+              <strong className="text-emerald-400">{last60sTickStats.buyPct}% up</strong>,{' '}
+              <strong className="text-rose-400">{last60sTickStats.sellPct}% down</strong>{' '}
+              <span className="text-slate-400">(not a forecast)</span>
             </span>
           </div>
 
           <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
-            <span className="text-slate-400">Setup strength (not a win probability):</span>
-            <span className={`font-bold shrink-0 ${
-              liveAudit.strength === 'High'
-                ? 'text-emerald-400'
-                : liveAudit.strength === 'Medium'
-                ? 'text-amber-400'
-                : 'text-slate-300'
-            }`}>
-              {liveAudit.strength}
-            </span>
+            {liveAudit.recommendedAction !== 'WAIT' ? (
+              <>
+                <span className="text-slate-400">Setup strength (not a win probability):</span>
+                <span className={`font-bold shrink-0 ${
+                  liveAudit.strength === 'High'
+                    ? 'text-emerald-400'
+                    : liveAudit.strength === 'Medium'
+                    ? 'text-amber-400'
+                    : 'text-slate-300'
+                }`}>
+                  {liveAudit.strength}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="text-slate-400">Live status:</span>
+                <span className="font-bold text-amber-300 shrink-0">WAIT</span>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1554,7 +1584,7 @@ export function SignalEngine({
                   activeTrade.status === 'IN_THE_MONEY' ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               >
-                {activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} pips
+                {activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} {formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)}
               </span>
             </div>
           </div>
@@ -1565,7 +1595,7 @@ export function SignalEngine({
               onClick={handleSafeCloseNow}
               className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black font-mono text-xs shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-2 animate-pulse active:scale-98"
             >
-              <span>⭐ LOCK PROFIT / SAFE CLOSE NOW ({activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} pips)</span>
+              <span>⭐ LOCK PROFIT / SAFE CLOSE NOW ({activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} {formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)})</span>
             </button>
           )}
         </div>
@@ -1696,16 +1726,21 @@ export function SignalEngine({
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-slate-400">
-                    Platform: {currentPlatform.name} &bull; Setup strength (not a win probability):{' '}
-                    <strong className={
-                      signal.strength === 'High'
-                        ? 'text-emerald-400'
-                        : signal.strength === 'Medium'
-                        ? 'text-amber-300'
-                        : 'text-slate-300'
-                    }>
-                      {signal.strength || 'Low'}
-                    </strong>
+                    Platform: {currentPlatform.name}
+                    {signal.direction !== 'WAIT' && (
+                      <>
+                        {' '}&bull; Setup strength (not a win probability):{' '}
+                        <strong className={
+                          signal.strength === 'High'
+                            ? 'text-emerald-400'
+                            : signal.strength === 'Medium'
+                            ? 'text-amber-300'
+                            : 'text-slate-300'
+                        }>
+                          {signal.strength || 'Low'}
+                        </strong>
+                      </>
+                    )}
                   </span>
                 </div>
               </div>
@@ -1776,9 +1811,6 @@ export function SignalEngine({
                     <span>⏳</span>
                     <span>NO TRADE SIGNAL RIGHT NOW</span>
                   </span>
-                  <span className="text-[10px] text-amber-300 font-bold bg-amber-950/80 px-2 py-0.5 rounded border border-amber-800">
-                    Setup strength (not a win probability): {signal.strength || 'Low'}
-                  </span>
                 </div>
                 <p className="text-slate-200 text-[11px] leading-relaxed font-semibold">
                   {signal.whyNotTrade || signal.plainLanguageReason}
@@ -1831,12 +1863,21 @@ export function SignalEngine({
                 </span>
               </div>
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[9px] text-slate-500 uppercase block leading-tight">Setup strength (not a win probability)</span>
-                <span className={`text-xs font-black block mt-0.5 ${
-                  signal.strength === 'High' ? 'text-emerald-400' : signal.strength === 'Medium' ? 'text-amber-400' : 'text-slate-300'
-                }`}>
-                  {signal.strength || 'Low'}
-                </span>
+                {signal.direction !== 'WAIT' ? (
+                  <>
+                    <span className="text-[9px] text-slate-500 uppercase block leading-tight">Setup strength (not a win probability)</span>
+                    <span className={`text-xs font-black block mt-0.5 ${
+                      signal.strength === 'High' ? 'text-emerald-400' : signal.strength === 'Medium' ? 'text-amber-400' : 'text-slate-300'
+                    }`}>
+                      {signal.strength || 'Low'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="text-[9px] text-slate-500 uppercase block leading-tight">Signal Status</span>
+                    <span className="text-xs font-black block mt-0.5 text-amber-300">WAIT / Stand Aside</span>
+                  </>
+                )}
               </div>
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
                 <span className="text-[10px] text-slate-500 uppercase block">Contract Expiry</span>
@@ -1897,7 +1938,7 @@ export function SignalEngine({
             {!activeTrade && !isExpired && signal.direction !== 'WAIT' && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono">
                 <a
-                  href={currentPlatform.referralUrl || 'https://expertoption.com/?ref=TOLVEXA'}
+                  href={currentPlatform.referralUrl || 'https://expertoption.com/?ref=TICKVERE'}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs sm:text-sm shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-1.5 active:scale-98"
@@ -1934,9 +1975,11 @@ export function SignalEngine({
                   Symbol: <strong className="text-blue-300">{signal.asset}</strong> &bull; Chart: <strong className="text-emerald-400">{signal.timeframe.toUpperCase()}</strong>
                 </span>
               </div>
-              <span className="text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                Setup strength (not a win probability): {signal.strength || 'Low'}
-              </span>
+              {signal.direction !== 'WAIT' && (
+                <span className="text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                  Setup strength (not a win probability): {signal.strength || 'Low'}
+                </span>
+              )}
             </div>
 
             {signal.direction !== 'WAIT' && (() => {
@@ -2119,20 +2162,20 @@ export function SignalEngine({
                   <div className="bg-slate-950 border border-rose-500/30 rounded-xl p-2">
                     <span className="text-[10px] text-rose-400 uppercase block">6) Stop Loss</span>
                     <span className="text-xs font-bold text-rose-300 block mt-0.5">{signal.mt5.stopLossPrice}</span>
-                    <span className="text-[9px] text-rose-400/80">-{signal.mt5.stopLossPips} pips (Structural)</span>
+                    <span className="text-[9px] text-rose-400/80">-{signal.mt5.stopLossPips} {formatDistanceUnitWord(signal.mt5.stopLossPips, assetPipSpec.distanceUnit)} (Structural)</span>
                   </div>
                   <div className="bg-slate-950 border border-emerald-500/30 rounded-xl p-2">
                     <span className="text-[10px] text-emerald-400 uppercase block">7) Take Profit 1</span>
                     <span className="text-xs font-bold text-emerald-300 block mt-0.5">{signal.mt5.takeProfit1Price}</span>
                     <span className="text-[9px] text-emerald-400/80">
-                      +{signal.mt5.takeProfit1Pips} pips (1:{(signal.mt5.rewardRiskTp1 || 1.5).toFixed(2)})
+                      +{signal.mt5.takeProfit1Pips} {formatDistanceUnitWord(signal.mt5.takeProfit1Pips, assetPipSpec.distanceUnit)} (1:{(signal.mt5.rewardRiskTp1 || 1.5).toFixed(2)})
                     </span>
                   </div>
                   <div className="bg-slate-950 border border-teal-500/30 rounded-xl p-2">
                     <span className="text-[10px] text-teal-400 uppercase block">7) Take Profit 2</span>
                     <span className="text-xs font-bold text-teal-300 block mt-0.5">{signal.mt5.takeProfit2Price}</span>
                     <span className="text-[9px] text-teal-400/80">
-                      +{signal.mt5.takeProfit2Pips} pips (1:{(signal.mt5.rewardRiskTp2 || 2.5).toFixed(2)})
+                      +{signal.mt5.takeProfit2Pips} {formatDistanceUnitWord(signal.mt5.takeProfit2Pips, assetPipSpec.distanceUnit)} (1:{(signal.mt5.rewardRiskTp2 || 2.5).toFixed(2)})
                     </span>
                   </div>
                 </div>

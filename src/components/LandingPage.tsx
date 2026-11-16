@@ -113,8 +113,8 @@ export function LandingPage({
               <div className="relative rounded-2xl overflow-hidden aspect-[21/9] max-h-72 w-full border border-slate-800">
                 <SafeImage
                   src="https://images.unsplash.com/photo-1642543492481-44e81e3914a7?auto=format&fit=crop&w=1200&q=80"
-                  alt="PulseTrade Pro Algorithmic Cockpit Display"
-                  fallbackTitle="PulseTrade Pro Algorithmic Telemetry"
+                  alt="Tickvere Algorithmic Cockpit Display"
+                  fallbackTitle="Tickvere Algorithmic Telemetry"
                   className="w-full h-full object-cover opacity-80 hover:scale-105 transition duration-700"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent flex items-end p-3 sm:p-6">
@@ -174,7 +174,7 @@ export function LandingPage({
         </div>
       </section>
 
-      {/* SECTION: WHY PULSETRADE PRO (LEGITIMACY & ARCHITECTURE) */}
+      {/* SECTION: WHY TICKVERE (LEGITIMACY & ARCHITECTURE) */}
       <section className="px-4 max-w-6xl mx-auto space-y-12">
         <div className="text-center space-y-3 max-w-2xl mx-auto">
           <span className="text-xs font-mono font-bold uppercase text-emerald-400 tracking-widest">
@@ -184,7 +184,7 @@ export function LandingPage({
             Built to Eliminate the 4 Fatal Mistakes of Retail Traders
           </h2>
           <p className="text-sm text-slate-400">
-            PulseTrade Pro is not a gimmick bot. It is a mathematical companion designed around hard latency boundaries and strict capital survival rules.
+            Tickvere is not a gimmick bot. It is a mathematical companion designed around hard latency boundaries and strict capital survival rules.
           </p>
         </div>
 
@@ -211,7 +211,7 @@ export function LandingPage({
             </div>
             <h3 className="text-lg font-bold text-white font-mono">2. Strict 2% Stake Sizing</h3>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Oversized or martingale stakes can rapidly deplete trading accounts during losing streaks. Tolvexa calculates a fixed 2% stake size from your stated broker balance to help manage per-trade exposure.
+              Oversized or martingale stakes can rapidly deplete trading accounts during losing streaks. Tickvere calculates a fixed 2% stake size from your stated broker balance to help manage per-trade exposure.
             </p>
           </div>
 
@@ -409,7 +409,7 @@ export function LandingPage({
             Supported Trading Platforms
           </h2>
           <p className="text-xs sm:text-sm text-slate-400">
-            Tolvexa provides multi-timeframe quantitative signals tailored for both Binary Expiry brokers and MetaTrader 5 accounts.
+            Tickvere provides multi-timeframe quantitative signals tailored for both Binary Expiry brokers and MetaTrader 5 accounts.
           </p>
         </div>
 
@@ -559,9 +559,9 @@ export function LandingPage({
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-2">
-            <h4 className="text-sm font-bold text-white">Which brokers can I use with PulseTrade Pro?</h4>
+            <h4 className="text-sm font-bold text-white">Which brokers can I use with Tickvere?</h4>
             <p className="text-xs text-slate-400 leading-relaxed">
-              PulseTrade Pro is a companion analytics engine. You execute your trades directly on your preferred broker: ExpertOption, Deriv, PocketOption, Quotex, or OlympTrade. Because we do not accept trading deposits, your capital remains 100% under your control at all times.
+              Tickvere is a companion analytics engine. You execute your trades directly on your preferred broker: ExpertOption, Deriv, PocketOption, Quotex, or OlympTrade. Because we do not accept trading deposits, your capital remains 100% under your control at all times.
             </p>
           </div>
 

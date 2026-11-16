@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Tolvexa Quantitative Terminal",
-  "short_name": "Tolvexa",
-  "description": "Real-time algorithmic confluence and quantitative risk management companion.",
+  "name": "Tickvere – Live Market Analysis Companion",
+  "short_name": "Tickvere",
+  "description": "Live market analysis companion with multi-timeframe confluence and capital risk management.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

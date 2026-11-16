@@ -4,10 +4,10 @@ import { ASSETS } from './LiveTicker.tsx';
 import {
   analyzeMarketConfluence,
   calculateSafeCloseAnalysis,
-  getOrInitializeAssetTicks,
   getAssetTicks,
   evaluateMultiWindowLiveConfirmation,
 } from '../utils/quantEngine.ts';
+import { resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 
 interface VipSafeRadarModalProps {
   isOpen: boolean;
@@ -67,11 +67,12 @@ export function VipSafeRadarModal({
     return ASSETS.map((asset) => {
       const existing = getAssetTicks(asset.symbol);
       const ticks = existing;
+      const spec = resolveAssetPipSpec(asset);
 
       // Perform real multi-window live confirmation
-      const multiWindow = evaluateMultiWindowLiveConfirmation(ticks, asset.pipSize, tfMinutes, asset.symbol);
-      const audit = analyzeMarketConfluence(ticks, selectedTimeframe, asset.pipSize, isVIP, undefined, asset);
-      const safeClose = calculateSafeCloseAnalysis(ticks, selectedTimeframe, asset.pipSize);
+      const multiWindow = evaluateMultiWindowLiveConfirmation(ticks, spec.pipSize, tfMinutes, asset.symbol, spec.distanceUnit);
+      const audit = analyzeMarketConfluence(ticks, selectedTimeframe, spec.pipSize, isVIP, undefined, asset);
+      const safeClose = calculateSafeCloseAnalysis(ticks, selectedTimeframe, spec.pipSize, spec.distanceUnit);
 
       const currentP = ticks[ticks.length - 1];
       const firstP = ticks[0] || currentP;
@@ -300,12 +301,15 @@ export function VipSafeRadarModal({
             <div className="grid grid-cols-1 gap-3">
               {filteredItems.map((item, index) => {
                 const isLockedForNonVip = !isVIP && index >= 2;
+                const fallbackSpec = resolveAssetPipSpec({ symbol: item.symbol, name: item.name, type: item.type, decimals: item.decimals });
                 const fullAssetConfig = ASSETS.find((a) => a.symbol === item.symbol) || {
                   symbol: item.symbol,
                   name: item.name,
                   type: item.type,
-                  decimals: item.decimals,
-                  pipSize: item.decimals === 5 ? 0.0001 : 0.01,
+                  decimals: fallbackSpec.decimals,
+                  pipSize: fallbackSpec.pipSize,
+                  tickSize: fallbackSpec.tickSize,
+                  distanceUnit: fallbackSpec.distanceUnit,
                 };
 
                 const isSafe = item.safetyRating === 'SAFE TO TRADE';
@@ -374,9 +378,11 @@ export function VipSafeRadarModal({
                         >
                           {isCall ? 'BUY' : isPut ? 'SELL' : 'WAIT'}
                         </span>
-                        <span className={`text-xs font-mono font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
-                          {item.strength}
-                        </span>
+                        {(isCall || isPut) && (
+                          <span className={`text-xs font-mono font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
+                            {item.strength}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -414,9 +420,11 @@ export function VipSafeRadarModal({
                           >
                             {isCall ? 'CALL (BUY)' : isPut ? 'PUT (SELL)' : 'WAIT'}
                           </span>
-                          <span className={`text-[11px] font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
-                            Setup strength (not a win probability): {item.strength}
-                          </span>
+                          {(isCall || isPut) && (
+                            <span className={`text-[11px] font-bold ${item.strength === 'High' ? 'text-emerald-400' : item.strength === 'Medium' ? 'text-amber-400' : 'text-slate-400'}`}>
+                              Setup strength (not a win probability): {item.strength}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>

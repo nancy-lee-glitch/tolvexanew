@@ -67,7 +67,7 @@ export const TOUR_STEPS: TourStep[] = [
     title: '5. Multi-Factor Confluence Gate',
     description:
       'Before recommending any trade, the gate tests M1/M5/M15 candle structure, EMA alignment, RSI momentum, ATR volatility, and price distribution proxy. If the market is choppy or near high-impact news, it outputs WAIT.',
-    tip: 'Preserving capital during chop is essential. Tolvexa outputs WAIT when conditions are unclear.',
+    tip: 'Preserving capital during chop is essential. Tickvere outputs WAIT when conditions are unclear.',
     badge: 'Step 5 of 9 • Risk Gate',
     shape: 'box',
     preferredPosition: 'top',
