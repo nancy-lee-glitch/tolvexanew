@@ -1,6 +1,8 @@
 /**
- * PulseTrade Pro - Shared TypeScript Definitions
+ * Tickvere - Shared TypeScript Definitions
  */
+
+export type DistanceUnit = 'pips' | 'points';
 
 export interface AssetConfig {
   symbol: string;
@@ -8,6 +10,8 @@ export interface AssetConfig {
   type: 'FOREX' | 'COMMODITY' | 'SYNTH' | 'CRYPTO' | 'STOCK' | 'INDEX';
   decimals: number;
   pipSize: number;
+  tickSize?: number;
+  distanceUnit?: DistanceUnit;
   basePrice?: number;
   marketHours?: string;
   category?: string;
@@ -155,6 +159,7 @@ export interface InstrumentSpec {
   quoteCcy: string;
   pipSize: number;
   decimals: number;
+  distanceUnit?: DistanceUnit;
 }
 
 export interface UserTradingProfile {
@@ -178,6 +183,7 @@ export interface MT5TradeParameters {
   takeProfit1Pips: number;
   takeProfit2Price: number;
   takeProfit2Pips: number;
+  distanceUnit?: DistanceUnit;
   rewardRiskTp1: number;
   rewardRiskTp2: number;
   riskRewardRatio: string;

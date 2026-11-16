@@ -17,6 +17,7 @@ import type {
   AssetConfig,
   Candle,
   DailyPivotLevels,
+  DistanceUnit,
   InstrumentSpec,
   MT5EngineInput,
   MT5KeyLevels,
@@ -30,57 +31,16 @@ import {
   calculateRSI,
   detectSwingLevels,
 } from './indicators.ts';
+import {
+  DEFAULT_INSTRUMENT_SPECS,
+  formatDistanceUnitWord,
+  inferAssetCurrencies,
+  normalizeSpecKey,
+  resolveAssetPipSpec,
+} from '../instrumentMeta.ts';
 import { isSyntheticAsset } from '../../services/symbolMap.ts';
 
-export const DEFAULT_INSTRUMENT_SPECS: Record<string, InstrumentSpec> = {
-  'EUR/USD': { symbol: 'EUR/USD', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.0001, decimals: 5 },
-  'GBP/USD': { symbol: 'GBP/USD', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.0001, decimals: 5 },
-  'USD/JPY': { symbol: 'USD/JPY', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'JPY', pipSize: 0.01, decimals: 3 },
-  'AUD/USD': { symbol: 'AUD/USD', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.0001, decimals: 5 },
-  'USD/CAD': { symbol: 'USD/CAD', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'CAD', pipSize: 0.0001, decimals: 5 },
-  'USD/CHF': { symbol: 'USD/CHF', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'CHF', pipSize: 0.0001, decimals: 5 },
-  'EUR/GBP': { symbol: 'EUR/GBP', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'GBP', pipSize: 0.0001, decimals: 5 },
-  'GBP/JPY': { symbol: 'GBP/JPY', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'JPY', pipSize: 0.01, decimals: 3 },
-  'EUR/JPY': { symbol: 'EUR/JPY', contractSize: 100000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'JPY', pipSize: 0.01, decimals: 3 },
-  'XAU/USD': { symbol: 'XAU/USD', contractSize: 100, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.01, decimals: 2 },
-  'XAG/USD': { symbol: 'XAG/USD', contractSize: 5000, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.001, decimals: 3 },
-  'BTC/USD': { symbol: 'BTC/USD', contractSize: 1, minLot: 0.001, lotStep: 0.001, quoteCcy: 'USD', pipSize: 1.0, decimals: 2 },
-  'ETH/USD': { symbol: 'ETH/USD', contractSize: 1, minLot: 0.01, lotStep: 0.01, quoteCcy: 'USD', pipSize: 0.1, decimals: 2 },
-};
-
-export function normalizeSpecKey(raw: string): string {
-  const s = (raw || '').trim().toUpperCase();
-  if (!s) return '';
-  if (s.includes('XAU') || s.includes('GOLD')) return 'XAU/USD';
-  if (s.includes('XAG') || s.includes('SILVER')) return 'XAG/USD';
-
-  const stripped = s.replace(/^FRX|^CRY|^WLDAUD|^WLD/, '');
-  if (stripped.length === 6 && /^[A-Z]{6}$/.test(stripped)) {
-    return `${stripped.slice(0, 3)}/${stripped.slice(3, 6)}`;
-  }
-  return s;
-}
-
-export function inferAssetCurrencies(asset: AssetConfig): { baseCcy: string; quoteCcy: string } {
-  const clean = (asset.symbol || '').toUpperCase().replace(/^FRX|^CRY/, '').replace(/[^A-Z0-9]/g, '');
-  if (/^(EUR|GBP|AUD|NZD|USD|CAD|CHF|JPY|XAU|XAG){2}$/.test(clean) && clean.length === 6) {
-    return { baseCcy: clean.slice(0, 3), quoteCcy: clean.slice(3, 6) };
-  }
-  const nameClean = (asset.name || '').toUpperCase().replace(/[^A-Z]/g, '');
-  if (nameClean.includes('GOLD') || nameClean.includes('XAUUSD')) {
-    return { baseCcy: 'XAU', quoteCcy: 'USD' };
-  }
-  if (nameClean.includes('SILVER') || nameClean.includes('XAGUSD')) {
-    return { baseCcy: 'XAG', quoteCcy: 'USD' };
-  }
-  if (/^[A-Z]{6}$/.test(nameClean)) {
-    return { baseCcy: nameClean.slice(0, 3), quoteCcy: nameClean.slice(3, 6) };
-  }
-  if (clean.startsWith('BTC') || clean.startsWith('ETH') || asset.type === 'CRYPTO') {
-    return { baseCcy: clean.slice(0, 3) || 'CRYPTO', quoteCcy: 'USD' };
-  }
-  return { baseCcy: 'USD', quoteCcy: 'USD' };
-}
+export { DEFAULT_INSTRUMENT_SPECS, inferAssetCurrencies, normalizeSpecKey };
 
 export function resolveInstrumentSpec(
   asset: AssetConfig,
@@ -90,6 +50,7 @@ export function resolveInstrumentSpec(
   const key = normalizeSpecKey(asset.symbol) || normalizeSpecKey(asset.name);
   const { quoteCcy: inferredQuote } = inferAssetCurrencies(asset);
   const defaultBySymbol = DEFAULT_INSTRUMENT_SPECS[key];
+  const resolvedPip = resolveAssetPipSpec(asset);
 
   let defaultContract = 1;
   if (defaultBySymbol) {
@@ -116,10 +77,11 @@ export function resolveInstrumentSpec(
     quoteCcy: (overrideSpec?.quoteCcy || defaultBySymbol?.quoteCcy || inferredQuote || 'USD').toUpperCase(),
     pipSize: overrideSpec?.pipSize && overrideSpec.pipSize > 0
       ? Number(overrideSpec.pipSize)
-      : defaultBySymbol?.pipSize ?? asset.pipSize ?? 0.0001,
+      : resolvedPip.pipSize,
     decimals: typeof overrideSpec?.decimals === 'number'
       ? overrideSpec.decimals
-      : defaultBySymbol?.decimals ?? asset.decimals ?? 5,
+      : resolvedPip.decimals,
+    distanceUnit: overrideSpec?.distanceUnit || resolvedPip.distanceUnit,
   };
 
   if (typeof contractSizeOverride === 'number' && Number.isFinite(contractSizeOverride) && contractSizeOverride > 0) {
@@ -281,21 +243,22 @@ export function computeDailyPivotLevels(prevDay: Candle | undefined): DailyPivot
 
 export function computeRoundNumbers(price: number, asset: AssetConfig): number[] {
   if (!Number.isFinite(price) || price <= 0) return [];
+  const { pipSize, decimals } = resolveAssetPipSpec(asset);
   let step = 0.01; // big figure on 5-decimal FX (e.g. 1.0800, 1.0900, 1.1000)
   if (asset.type === 'COMMODITY' && asset.symbol.toUpperCase().includes('XAU')) {
     step = 50;
-  } else if (asset.pipSize >= 1) {
-    step = 1000;
-  } else if (asset.pipSize >= 0.01) {
+  } else if (pipSize >= 1) {
+    step = price >= 10000 ? 1000 : price >= 1000 ? 100 : 10;
+  } else if (pipSize >= 0.01) {
     step = price >= 500 ? 50 : 1.0; // USDJPY big figure 150.00, 151.00; R_100 big 50
-  } else if (asset.pipSize >= 0.001) {
+  } else if (pipSize >= 0.001) {
     step = 0.1;
   }
 
   const base = Math.floor(price / step) * step;
   const out: number[] = [];
   for (let i = -3; i <= 3; i++) {
-    const level = parseFloat((base + i * step).toFixed(asset.decimals || 5));
+    const level = parseFloat((base + i * step).toFixed(decimals));
     if (level > 0) out.push(level);
   }
   return out;
@@ -309,10 +272,11 @@ export function computeMT5KeyLevels(
   asset: AssetConfig,
   entryPrice: number
 ): MT5KeyLevels {
+  const { pipSize } = resolveAssetPipSpec(asset);
   const structureCandles = structureTimeframe === 'H1' ? h1Candles : m15Candles;
-  const structureSwings = detectSwingLevels(structureCandles, asset.pipSize || 0.0001);
+  const structureSwings = detectSwingLevels(structureCandles, pipSize);
   const m15Swings = structureTimeframe === 'H1'
-    ? detectSwingLevels(m15Candles.slice(-60), asset.pipSize || 0.0001)
+    ? detectSwingLevels(m15Candles.slice(-60), pipSize)
     : structureSwings;
 
   const prevDay = d1Candles.length >= 2 ? d1Candles[d1Candles.length - 2] : undefined;
@@ -419,7 +383,7 @@ function checkMT5Session(asset: AssetConfig, nowMs: number): {
       blocked: false,
       sessionName: 'London / NY Overlap (Prime FX)',
       sessionQuality: 'PRIME',
-      note: 'London/NY overlap (12:00–17:00 UTC): peak institutional FX liquidity and tightest spreads.',
+      note: 'London/NY overlap (12:00–17:00 UTC): peak FX market liquidity and tightest spreads.',
     };
   }
 
@@ -491,6 +455,7 @@ function buildWaitMT5Result(params: {
   reasons: [string, string, string];
   inputsSnapshot: Record<string, unknown>;
   riskWarning?: string;
+  distanceUnit?: DistanceUnit;
 }): MT5SignalOutput {
   const {
     input,
@@ -506,6 +471,7 @@ function buildWaitMT5Result(params: {
     reasons,
     inputsSnapshot,
     riskWarning,
+    distanceUnit,
   } = params;
   const isoNow = new Date(nowMs).toISOString();
 
@@ -548,6 +514,7 @@ function buildWaitMT5Result(params: {
     reasons,
     whyNotTrade,
     riskWarning,
+    distanceUnit,
     structureTimeframe,
     timeframe: structureTimeframe,
     createdAt: isoNow,
@@ -561,8 +528,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
   const nowMs = input.nowMs ?? Date.now();
   const structureTimeframe: 'H1' | 'M15' = input.structureTimeframe || 'H1';
   const spec = resolveInstrumentSpec(input.asset, input.instrumentSpec, input.contractSizeOverride);
-  const dec = spec.decimals || input.asset.decimals || 5;
-  const pipSize = spec.pipSize || input.asset.pipSize || 0.0001;
+  const resolvedPip = resolveAssetPipSpec(input.asset);
+  const dec = spec.decimals || resolvedPip.decimals;
+  const pipSize = spec.pipSize || resolvedPip.pipSize;
+  const distanceUnit: DistanceUnit = spec.distanceUnit || resolvedPip.distanceUnit;
+  const unitSingular = distanceUnit === 'points' ? 'point' : 'pip';
+  const unitPlural = distanceUnit === 'points' ? 'points' : 'pips';
 
   const accountCurrency = (input.accountCurrency || 'USD').toUpperCase();
   const accountBalance = typeof input.accountBalance === 'number' && Number.isFinite(input.accountBalance)
@@ -817,6 +788,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
   };
 
   if (htfDirection === 'WAIT') {
+    const atrDist = parseFloat((atrStructure / pipSize).toFixed(1));
     const reason = `Higher-timeframe bias conflict or neutral chop (D1: ${d1Bias.bias}, H4: ${h4Bias.bias}).`;
     return buildWaitMT5Result({
       input,
@@ -831,11 +803,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `${structureTimeframe} structure is ${structureAssessment.bias} with ATR(14) at ${(atrStructure / pipSize).toFixed(1)} pips.`,
+        `${structureTimeframe} structure is ${structureAssessment.bias} with ATR(14) at ${atrDist.toFixed(1)} ${formatDistanceUnitWord(atrDist, distanceUnit)}.`,
         'Wait for D1 and H4 directional alignment before entering an MT5 position.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'HTF_BIAS_CONFLICT' },
       riskWarning,
+      distanceUnit,
     });
   }
 
@@ -959,6 +932,8 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
 
   if (rawSlDistance > 3.0 * atrStructure) {
     const ratioAtr = (rawSlDistance / atrStructure).toFixed(2);
+    const reqDist = parseFloat((rawSlDistance / pipSize).toFixed(1));
+    const maxDist = parseFloat(((3 * atrStructure) / pipSize).toFixed(1));
     const reason = `Stop would be too wide (${ratioAtr}×ATR exceeds the 3.0×ATR structural maximum).`;
     return buildWaitMT5Result({
       input,
@@ -973,11 +948,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Nearest structural swing at ${structuralSwingPrice.toFixed(dec)} + 0.25×ATR requires ${(rawSlDistance / pipSize).toFixed(1)} pips vs 3×ATR ceiling of ${((3 * atrStructure) / pipSize).toFixed(1)} pips.`,
+        `Nearest structural swing at ${structuralSwingPrice.toFixed(dec)} + 0.25×ATR requires ${reqDist.toFixed(1)} ${formatDistanceUnitWord(reqDist, distanceUnit)} vs 3×ATR ceiling of ${maxDist.toFixed(1)} ${formatDistanceUnitWord(maxDist, distanceUnit)}.`,
         'Wait for price to form a closer structural swing before committing risk.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'STOP_TOO_WIDE', rawSlDistance, atrStructure },
       riskWarning,
+      distanceUnit,
     });
   }
 
@@ -1005,7 +981,8 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
 
   if (spreadPrice >= 0.15 * slDistance) {
     const spreadSharePct = ((spreadPrice / slDistance) * 100).toFixed(1);
-    const reason = `Broker spread (${spreadPipsUsed} pips = ${spreadSharePct}% of stop distance) meets or exceeds 15% of SL distance.`;
+    const minSlDist = parseFloat(((spreadPrice / 0.15) / pipSize).toFixed(1));
+    const reason = `Broker spread (${spreadPipsUsed} ${formatDistanceUnitWord(spreadPipsUsed, distanceUnit)} = ${spreadSharePct}% of stop distance) meets or exceeds 15% of SL distance.`;
     return buildWaitMT5Result({
       input,
       nowMs,
@@ -1019,11 +996,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Minimum affordable SL distance for a ${spreadPipsUsed}-pip spread is ${((spreadPrice / 0.15) / pipSize).toFixed(1)} pips.`,
+        `Minimum affordable SL distance for a ${spreadPipsUsed}-${unitSingular} spread is ${minSlDist.toFixed(1)} ${formatDistanceUnitWord(minSlDist, distanceUnit)}.`,
         'Lower spread or wait for a wider higher-timeframe structure setup.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'SPREAD_TOO_HIGH', spreadPrice, slDistance },
       riskWarning,
+      distanceUnit,
     });
   }
 
@@ -1069,6 +1047,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
   if (rewardRiskTp1 < 1.5) {
     const blockingLevelPrice =
       htfDirection === 'BUY' ? entryPrice + nearestLevelDist : entryPrice - nearestLevelDist;
+    const minRoomDist = parseFloat(((1.5 * slDistance) / pipSize).toFixed(1));
     const reason = `Reward:risk to TP1 (1:${rewardRiskTp1.toFixed(2)}) is below 1.5 due to nearby opposing key level at ${blockingLevelPrice.toFixed(dec)}.`;
     return buildWaitMT5Result({
       input,
@@ -1083,7 +1062,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Proposed SL distance is ${(slDistance / pipSize).toFixed(1)} pips, requiring at least ${(1.5 * slDistance / pipSize).toFixed(1)} pips clear room to TP1.`,
+        `Proposed SL distance is ${stopLossPips.toFixed(1)} ${formatDistanceUnitWord(stopLossPips, distanceUnit)}, requiring at least ${minRoomDist.toFixed(1)} ${formatDistanceUnitWord(minRoomDist, distanceUnit)} clear room to TP1.`,
         'Stand aside until price clears the opposing level or pulls back for better asymmetry.',
       ],
       inputsSnapshot: {
@@ -1093,6 +1072,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
         blockingLevelPrice,
       },
       riskWarning,
+      distanceUnit,
     });
   }
 
@@ -1227,20 +1207,21 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
 
   const copyOrderText = [
     `${orderLabel} ${cleanSymbol} @ ${entryPrice.toFixed(dec)}`,
-    `SL: ${stopLoss.toFixed(dec)} (${stopLossPips} pips)`,
-    `TP1: ${takeProfit1.toFixed(dec)} (+${takeProfit1Pips} pips | 1:${rewardRiskTp1.toFixed(2)})`,
-    `TP2: ${takeProfit2.toFixed(dec)} (+${takeProfit2Pips} pips | 1:${rewardRiskTp2.toFixed(2)})`,
+    `SL: ${stopLoss.toFixed(dec)} (${stopLossPips} ${formatDistanceUnitWord(stopLossPips, distanceUnit)})`,
+    `TP1: ${takeProfit1.toFixed(dec)} (+${takeProfit1Pips} ${formatDistanceUnitWord(takeProfit1Pips, distanceUnit)} | 1:${rewardRiskTp1.toFixed(2)})`,
+    `TP2: ${takeProfit2.toFixed(dec)} (+${takeProfit2Pips} ${formatDistanceUnitWord(takeProfit2Pips, distanceUnit)} | 1:${rewardRiskTp2.toFixed(2)})`,
     `Size: ${lotText} | Risk: ${accountCurrency} ${sizing.riskMoney.toFixed(2)} (${effectiveRiskPct}%)`,
     `Valid: ${validityWindowDesc} | Management: ${tradeManagementNote}`,
   ].join(' | ');
 
   const rewardRiskRatio = `1:${rewardRiskTp1.toFixed(2)} (TP2 1:${rewardRiskTp2.toFixed(2)})`;
+  const atrDist = parseFloat((atrStructure / pipSize).toFixed(1));
 
   const reasons: [string, string, string] = [
-    `D1 (${d1Bias.bias}) & H4 (${h4Bias.bias}) bias aligned with ${structureTimeframe} structure (ATR ${(atrStructure / pipSize).toFixed(
+    `D1 (${d1Bias.bias}) & H4 (${h4Bias.bias}) bias aligned with ${structureTimeframe} structure (ATR ${atrDist.toFixed(
       1
-    )} pips; swing invalidation at ${structuralSwingPrice.toFixed(dec)}).`,
-    `M5 entry (${orderKind} @ ${entryPrice.toFixed(dec)}): SL ${stopLoss.toFixed(dec)} (${stopLossPips} pips), TP1 ${takeProfit1.toFixed(
+    )} ${formatDistanceUnitWord(atrDist, distanceUnit)}; swing invalidation at ${structuralSwingPrice.toFixed(dec)}).`,
+    `M5 entry (${orderKind} @ ${entryPrice.toFixed(dec)}): SL ${stopLoss.toFixed(dec)} (${stopLossPips} ${formatDistanceUnitWord(stopLossPips, distanceUnit)}), TP1 ${takeProfit1.toFixed(
       dec
     )} (1:${rewardRiskTp1.toFixed(2)}), TP2 ${takeProfit2.toFixed(dec)} (1:${rewardRiskTp2.toFixed(2)}).`,
     `${session.sessionName}: ${tradeManagementNote}`,
@@ -1260,6 +1241,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
     riskMoney: sizing.riskMoney,
     quoteToAccountRate,
     spreadPipsUsed,
+    distanceUnit,
     session,
     rawScore,
   };
@@ -1303,6 +1285,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
     reasons,
     accountSizingWarning,
     riskWarning,
+    distanceUnit,
     structureTimeframe,
     timeframe: structureTimeframe,
     createdAt: new Date(nowMs).toISOString(),

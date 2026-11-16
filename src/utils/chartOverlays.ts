@@ -5,6 +5,7 @@
  * Zero Math.random, zero DOM dependencies, safe for both React and Node/tsx unit tests.
  */
 
+import type { DistanceUnit } from '../types.ts';
 import type { MarketContextSummary } from './engines/marketContext.ts';
 import type { BinarySignalOutput, MT5SignalOutput } from './engines/types.ts';
 
@@ -51,13 +52,18 @@ export interface ChartHistorySignalItem {
 
 export interface BuildSignalOverlayOptions {
   compact?: boolean;
+  distanceUnit?: DistanceUnit;
 }
 
-function formatShortPips(pips: number | null | undefined, signed: '+' | '-' | ''): string {
+function formatShortDistance(
+  pips: number | null | undefined,
+  signed: '+' | '-' | '',
+  unit: DistanceUnit = 'pips'
+): string {
   if (typeof pips !== 'number' || !Number.isFinite(pips) || pips <= 0) return '';
   const absVal = Math.abs(pips);
   const formatted = Number.isInteger(absVal) ? String(absVal) : absVal.toFixed(1);
-  return `${signed}${formatted}p`;
+  return `${signed}${formatted}${unit === 'points' ? ' pts' : 'p'}`;
 }
 
 /**
@@ -73,6 +79,7 @@ export function buildSignalChartOverlays(
   }
 
   const compact = Boolean(options.compact);
+  const unit: DistanceUnit = options.distanceUnit || signal.distanceUnit || 'pips';
 
   if (signal.profile === 'MT5') {
     const overlays: ChartOverlay[] = [];
@@ -121,7 +128,7 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.stopLoss === 'number' && Number.isFinite(signal.stopLoss) && signal.stopLoss > 0) {
-      const slTag = formatShortPips(signal.stopLossPips, '-');
+      const slTag = formatShortDistance(signal.stopLossPips, '-', unit);
       overlays.push({
         id: 'mt5-sl',
         type: 'priceLine',
@@ -137,7 +144,7 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.takeProfit1 === 'number' && Number.isFinite(signal.takeProfit1) && signal.takeProfit1 > 0) {
-      const tp1Tag = formatShortPips(signal.takeProfit1Pips, '+');
+      const tp1Tag = formatShortDistance(signal.takeProfit1Pips, '+', unit);
       overlays.push({
         id: 'mt5-tp1',
         type: 'priceLine',
@@ -153,7 +160,7 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.takeProfit2 === 'number' && Number.isFinite(signal.takeProfit2) && signal.takeProfit2 > 0) {
-      const tp2Tag = formatShortPips(signal.takeProfit2Pips, '+');
+      const tp2Tag = formatShortDistance(signal.takeProfit2Pips, '+', unit);
       overlays.push({
         id: 'mt5-tp2',
         type: 'priceLine',

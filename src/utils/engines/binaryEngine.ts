@@ -17,6 +17,7 @@ import type {
   BinaryExpiryChoice,
   BinarySignalOutput,
   Candle,
+  DistanceUnit,
   MarketEventItem,
   SignalStrength,
   TimestampedTick,
@@ -31,6 +32,7 @@ import {
   calculateRSI,
   detectSwingLevels,
 } from './indicators.ts';
+import { formatDistanceUnitWord, resolveAssetPipSpec } from '../instrumentMeta.ts';
 import { isSyntheticAsset } from '../../services/symbolMap.ts';
 
 const EXPIRY_SECONDS: Record<BinaryExpiry, number> = {
@@ -293,8 +295,9 @@ function buildWaitResult(params: {
   whyNotTrade: string;
   reasons: [string, string, string];
   inputsSnapshot: Record<string, unknown>;
+  distanceUnit?: DistanceUnit;
 }): BinarySignalOutput {
-  const { input, nowMs, entryPrice, payoutPct, rawScore, expiry, whyNotTrade, reasons, inputsSnapshot } = params;
+  const { input, nowMs, entryPrice, payoutPct, rawScore, expiry, whyNotTrade, reasons, inputsSnapshot, distanceUnit } = params;
   const isSynthetic = isSyntheticAsset(input.asset);
   return {
     engine: 'binary_v1',
@@ -318,6 +321,7 @@ function buildWaitResult(params: {
     validUntil: new Date(nowMs).toISOString(),
     generatedAt: nowMs,
     entryPrice,
+    distanceUnit,
     feedSource: input.feedSource || 'deriv_ws',
     inputsSnapshot,
   };
@@ -486,7 +490,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   // =========================================================================
   // 7. COMPUTE REAL MULTI-TIMEFRAME & TICK INDICATORS
   // =========================================================================
-  const pipSize = input.asset.pipSize || 0.0001;
+  const { pipSize, decimals: resolvedDec, distanceUnit } = resolveAssetPipSpec(input.asset);
   const m1Closes = m1Candles.map((c) => c.close);
   const ema9M1 = calculateEMA(m1Closes, 9);
   const ema21M1 = calculateEMA(m1Closes, 21);
@@ -941,8 +945,9 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   }
 
   // Active live-tick counter-move protection & key level wall protection
+  const microRounded = parseFloat(netMicroPips.toFixed(1));
   if (candidateDirection === 'CALL' && (netMicroPips < -0.5 * atrInPips || momentumProxy.sellPct >= 62)) {
-    const reason = `60s live tick stream is moving downward (${netMicroPips.toFixed(1)} pips, ${momentumProxy.sellPct}% down deltas) against bullish M1 setup.`;
+    const reason = `60s live tick stream is moving downward (${netMicroPips.toFixed(1)} ${formatDistanceUnitWord(microRounded, distanceUnit)}, ${momentumProxy.sellPct}% down deltas) against bullish M1 setup.`;
     return buildWaitResult({
       input,
       nowMs,
@@ -957,11 +962,12 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
         'Stand by until 60s tick momentum turns back upward.',
       ],
       inputsSnapshot: { ...snapshot, blocker: 'TICK_COUNTER_MOVE' },
+      distanceUnit,
     });
   }
 
   if (candidateDirection === 'PUT' && (netMicroPips > 0.5 * atrInPips || momentumProxy.buyPct >= 62)) {
-    const reason = `60s live tick stream is moving upward (+${netMicroPips.toFixed(1)} pips, ${momentumProxy.buyPct}% up deltas) against bearish M1 setup.`;
+    const reason = `60s live tick stream is moving upward (+${netMicroPips.toFixed(1)} ${formatDistanceUnitWord(microRounded, distanceUnit)}, ${momentumProxy.buyPct}% up deltas) against bearish M1 setup.`;
     return buildWaitResult({
       input,
       nowMs,
@@ -976,6 +982,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
         'Stand by until 60s tick momentum turns downward.',
       ],
       inputsSnapshot: { ...snapshot, blocker: 'TICK_COUNTER_MOVE' },
+      distanceUnit,
     });
   }
 
@@ -1020,7 +1027,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   // =========================================================================
   // 9. ACTIONABLE BINARY SIGNAL (NO SL/TP, NO PROBABILITY %, 6s FRESHNESS)
   // =========================================================================
-  const dec = input.asset.decimals || 5;
+  const dec = resolvedDec || input.asset.decimals || 5;
   const reasons: [string, string, string] =
     candidateDirection === 'CALL'
       ? [
@@ -1055,6 +1062,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
     validUntil: new Date(nowMs + 6000).toISOString(),
     generatedAt: nowMs,
     entryPrice: latestPrice,
+    distanceUnit,
     feedSource: input.feedSource || 'deriv_ws',
     inputsSnapshot: snapshot,
   };

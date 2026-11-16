@@ -3,6 +3,7 @@ import type {
   AssetConfig,
   BinaryExpirySelection,
   BinaryExpiryWindow,
+  DistanceUnit,
   FeedHealthStatus,
   PriceDistributionProxy,
   SignalStrength,
@@ -69,6 +70,7 @@ export interface BinarySignalOutput {
   validUntil: string;
   generatedAt: number;
   entryPrice: number;
+  distanceUnit?: DistanceUnit;
   feedSource: string;
   inputsSnapshot: Record<string, unknown>;
 }
@@ -156,6 +158,7 @@ export interface MT5SignalOutput {
   whyNotTrade?: string;
   accountSizingWarning?: string;
   riskWarning?: string;
+  distanceUnit?: DistanceUnit;
   structureTimeframe: 'H1' | 'M15';
   timeframe: string;
   createdAt: string;
@@ -168,6 +171,7 @@ export type { Candle } from '../../services/liveFeed.ts';
 export type {
   AnalysisProfile,
   AssetConfig,
+  DistanceUnit,
   InstrumentSpec,
   PriceDistributionProxy,
   SignalStrength,

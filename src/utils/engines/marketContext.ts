@@ -11,7 +11,7 @@
  * Zero win rates, zero probability estimates, every metric carries its sample size.
  */
 
-import type { AssetConfig, Candle, DailyPivotLevels } from './types.ts';
+import type { AssetConfig, Candle, DailyPivotLevels, DistanceUnit } from './types.ts';
 import {
   calculateATRSeries,
   calculateEMA,
@@ -21,8 +21,11 @@ import {
 import {
   computeDailyPivotLevels,
   computeRoundNumbers,
-  resolveInstrumentSpec,
 } from './mt5Engine.ts';
+import {
+  formatDistanceUnitWord,
+  resolveAssetPipSpec,
+} from '../instrumentMeta.ts';
 
 export type ContextTimeframe = 'M15' | 'H1' | 'H4' | 'D1';
 export type TrendDirectionLabel = 'Bullish' | 'Bearish' | 'Neutral';
@@ -80,7 +83,9 @@ export interface MarketContextSummary {
   symbol: string;
   assetName: string;
   pipSize: number;
+  tickSize?: number;
   decimals: number;
+  distanceUnit: DistanceUnit;
   currentPrice: number;
   computedAtIso: string;
   trendTable: TrendTimeframeRow[];
@@ -92,32 +97,34 @@ export interface MarketContextSummary {
 }
 
 /**
- * Resolves exact pip size for any AssetConfig (including EUR/USD = 0.0001, USD/JPY = 0.01, XAU/USD = 0.01).
+ * Resolves exact pip/point size for any AssetConfig (including EUR/USD = 0.0001, GBP/USD = 0.0001, USD/JPY = 0.01, XAU/USD = 0.01, BTC/USD = 1.0).
  */
-export function resolveAssetPipSize(asset: Pick<AssetConfig, 'symbol' | 'name' | 'type' | 'pipSize' | 'decimals'>): {
+export function resolveAssetPipSize(
+  asset: Pick<AssetConfig, 'symbol' | 'name' | 'type' | 'pipSize' | 'tickSize' | 'decimals' | 'distanceUnit'>
+): {
   pipSize: number;
+  tickSize: number;
   decimals: number;
+  distanceUnit: DistanceUnit;
 } {
-  const spec = resolveInstrumentSpec(asset as AssetConfig);
-  const pipSize =
-    typeof asset.pipSize === 'number' && Number.isFinite(asset.pipSize) && asset.pipSize > 0
-      ? asset.pipSize
-      : spec.pipSize;
-  const decimals =
-    typeof asset.decimals === 'number' && Number.isFinite(asset.decimals)
-      ? asset.decimals
-      : spec.decimals;
-  return { pipSize, decimals };
+  const spec = resolveAssetPipSpec(asset);
+  return {
+    pipSize: spec.pipSize,
+    tickSize: spec.tickSize,
+    decimals: spec.decimals,
+    distanceUnit: spec.distanceUnit,
+  };
 }
 
 /**
- * Computes distance in pips from `currentPrice` to `levelPrice`, plus plain-language description.
+ * Computes distance in pips/points from `currentPrice` to `levelPrice`, plus plain-language description.
  */
 export function formatLevelDistance(
   currentPrice: number,
   levelPrice: number,
   levelLabel: string,
-  pipSize: number
+  pipSize: number,
+  unit: DistanceUnit = 'pips'
 ): {
   signedPips: number;
   absPips: number;
@@ -141,11 +148,12 @@ export function formatLevelDistance(
   }
 
   const relation = signedRaw > 0 ? 'above' : 'below';
+  const unitWord = formatDistanceUnitWord(absPips, unit);
   return {
     signedPips,
     absPips,
     relation,
-    plainText: `price is ${absPips.toFixed(1)} pips ${relation} ${levelLabel}`,
+    plainText: `price is ${absPips.toFixed(1)} ${unitWord} ${relation} ${levelLabel}`,
   };
 }
 
@@ -352,7 +360,7 @@ export function computeMarketContext(params: {
   d1Candles: Candle[];
   nowSec?: number;
 }): MarketContextSummary {
-  const { pipSize, decimals } = resolveAssetPipSize(params.asset);
+  const { pipSize, tickSize, decimals, distanceUnit } = resolveAssetPipSize(params.asset);
 
   const fallbackClose =
     params.m15Candles[params.m15Candles.length - 1]?.close ??
@@ -450,7 +458,7 @@ export function computeMarketContext(params: {
   }
 
   if (currentPrice > 0) {
-    const rounds = computeRoundNumbers(currentPrice, { ...params.asset, pipSize, decimals });
+    const rounds = computeRoundNumbers(currentPrice, { ...params.asset, pipSize, decimals, distanceUnit });
     const above = rounds.filter((r) => r >= currentPrice).sort((a, b) => a - b)[0];
     const below = rounds.filter((r) => r < currentPrice).sort((a, b) => b - a)[0];
     if (above) {
@@ -476,7 +484,7 @@ export function computeMarketContext(params: {
   const levelsMap: KeyLevelMapItem[] = levelsRaw
     .filter((lvl) => Number.isFinite(lvl.price) && lvl.price > 0)
     .map((lvl) => {
-      const dist = formatLevelDistance(currentPrice, lvl.price, lvl.label, pipSize);
+      const dist = formatLevelDistance(currentPrice, lvl.price, lvl.label, pipSize, distanceUnit);
       return {
         id: lvl.id,
         label: lvl.label,
@@ -498,7 +506,9 @@ export function computeMarketContext(params: {
     symbol: params.asset.symbol,
     assetName: params.asset.name,
     pipSize,
+    tickSize,
     decimals,
+    distanceUnit,
     currentPrice,
     computedAtIso: new Date((params.nowSec ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
     trendTable,

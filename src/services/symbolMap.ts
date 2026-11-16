@@ -1,4 +1,5 @@
 import type { AssetConfig } from '../types.ts';
+import { resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 
 export interface DerivSymbolDefinition {
   derivSymbol: string;
@@ -45,13 +46,24 @@ export const SYMBOL_REGISTRY: DerivSymbolDefinition[] = [
 /**
  * Default AssetConfig array for UI selection tabs and dropdowns
  */
-export const ASSETS: AssetConfig[] = SYMBOL_REGISTRY.map((item) => ({
-  symbol: item.derivSymbol,
-  name: item.uiLabel,
-  type: item.category,
-  decimals: item.decimals,
-  pipSize: item.pipSize,
-}));
+export const ASSETS: AssetConfig[] = SYMBOL_REGISTRY.map((item) => {
+  const resolved = resolveAssetPipSpec({
+    symbol: item.derivSymbol,
+    name: item.uiLabel,
+    type: item.category,
+    decimals: item.decimals,
+    pipSize: item.pipSize,
+  });
+  return {
+    symbol: item.derivSymbol,
+    name: item.uiLabel,
+    type: item.category,
+    decimals: resolved.decimals,
+    pipSize: resolved.pipSize,
+    tickSize: resolved.tickSize,
+    distanceUnit: resolved.distanceUnit,
+  };
+});
 
 /**
  * Maps any UI label or symbol name to Deriv official symbol format

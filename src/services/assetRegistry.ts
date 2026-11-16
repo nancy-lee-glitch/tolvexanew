@@ -11,8 +11,9 @@
  * - Remove all `basePrice` usage as a displayed price.
  */
 
-import type { AssetConfig } from '../types.ts';
+import type { AssetConfig, DistanceUnit } from '../types.ts';
 import { SYMBOL_REGISTRY, isWeekendForexClosed } from './symbolMap.ts';
+import { resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
 
 export type AssetCategory = 'Forex' | 'Stocks' | 'Indices' | 'Commodities' | 'Crypto' | 'Synthetics';
 
@@ -23,6 +24,8 @@ export interface DynamicAsset extends AssetConfig {
   exchange_is_open: boolean;
   is_trading_suspended: boolean;
   pipSize: number;
+  tickSize: number;
+  distanceUnit: DistanceUnit;
   decimals: number;
   is_otc?: boolean;
 }
@@ -158,13 +161,23 @@ function buildBootstrapAssets(): DynamicAsset[] {
         : !isWeekendForexClosed(def.derivSymbol);
     symbolOpenMap.set(def.derivSymbol, isOpen);
 
+    const resolved = resolveAssetPipSpec({
+      symbol: def.derivSymbol,
+      name: def.uiLabel,
+      type: def.category,
+      decimals: def.decimals,
+      pipSize: def.pipSize,
+    });
+
     return {
       symbol: def.derivSymbol,
       name: def.uiLabel,
       type: def.category,
       categoryName: cat,
-      decimals: def.decimals,
-      pipSize: def.pipSize,
+      decimals: resolved.decimals,
+      pipSize: resolved.pipSize,
+      tickSize: resolved.tickSize,
+      distanceUnit: resolved.distanceUnit,
       exchange_is_open: isOpen,
       is_trading_suspended: false,
       market: def.category.toLowerCase(),
@@ -263,12 +276,16 @@ export function ingestActiveSymbols(rawSymbols: any[]): DynamicAsset[] {
 
     symbolOpenMap.set(symbol, isOpen);
 
-    const rawPip = item.pip ?? item.pip_size ?? item.pip_value;
-    const parsedPip = Number(rawPip);
-    const pipSize = Number.isFinite(parsedPip) && parsedPip > 0 ? parsedPip : (known?.pipSize ?? 0.0001);
-    const decimals = Number.isFinite(parsedPip) && parsedPip > 0
-      ? deriveDecimalsFromPip(parsedPip)
-      : (known?.decimals ?? deriveDecimalsFromPip(pipSize));
+    const rawStep = item.pip ?? item.pip_size ?? item.pip_value;
+    const parsedStep = Number(rawStep);
+    const tickSize =
+      Number.isFinite(parsedStep) && parsedStep > 0
+        ? parsedStep
+        : (known ? Math.pow(10, -known.decimals) : 0.0001);
+    const decimals =
+      Number.isFinite(parsedStep) && parsedStep > 0
+        ? deriveDecimalsFromPip(parsedStep)
+        : (known?.decimals ?? deriveDecimalsFromPip(tickSize));
 
     const displayName = String(
       item.underlying_symbol_name ?? item.display_name ?? item.name ?? known?.uiLabel ?? symbol
@@ -281,13 +298,25 @@ export function ingestActiveSymbols(rawSymbols: any[]): DynamicAsset[] {
     else if (categoryName === 'Stocks') type = 'STOCK';
     else if (categoryName === 'Indices') type = 'INDEX';
 
+    const resolvedSpec = resolveAssetPipSpec({
+      symbol,
+      name: displayName,
+      type,
+      market: String(item.market || ''),
+      decimals,
+      tickSize,
+      pipSize: type === 'FOREX' ? undefined : (known?.pipSize ?? tickSize),
+    });
+
     list.push({
       symbol,
       name: displayName,
       type,
       categoryName,
-      decimals,
-      pipSize,
+      decimals: resolvedSpec.decimals,
+      pipSize: resolvedSpec.pipSize,
+      tickSize: resolvedSpec.tickSize,
+      distanceUnit: resolvedSpec.distanceUnit,
       exchange_is_open: isOpen,
       is_trading_suspended: isSuspended,
       market: String(item.market || 'synthetic_index'),
