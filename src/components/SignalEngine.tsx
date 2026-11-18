@@ -49,10 +49,12 @@ import {
   type BrokerAssetMeta,
   type MarketEventRow,
 } from '../utils/supabaseClient.ts';
-import { getBrokerPlatforms } from '../utils/siteConfigManager.ts';
+import { getBrokerPlatforms, resolveBrokerDestinationUrl } from '../utils/siteConfigManager.ts';
+import { useBrand } from '../utils/brand.ts';
 import { isSyntheticAsset, SYNTHETIC_INDICES_NOTICE } from '../services/symbolMap.ts';
 import { SignalHistory } from './SignalHistory.tsx';
 import type { EngineChartSignal } from '../utils/chartOverlays.ts';
+import { buildResultView } from '../utils/resultView.ts';
 
 interface SignalEngineProps {
   activeAsset: AssetConfig;
@@ -122,6 +124,7 @@ export function SignalEngine({
   onMarketContextUpdate,
   onProfileChange,
 }: SignalEngineProps) {
+  const { siteName } = useBrand();
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
   const [platforms] = useState<BrokerPlatformItem[]>(() => getBrokerPlatforms());
   const [selectedPlatformId, setSelectedPlatformId] = useState<string>(() => {
@@ -211,6 +214,7 @@ export function SignalEngine({
       console.warn('[SignalEngine] Failed to save selected platform preference to storage:', err);
     }
     if (signal) setSignal(null);
+    setIsMoreDetailsOpen(false);
     onSignalOutput?.(null);
   };
 
@@ -255,6 +259,7 @@ export function SignalEngine({
   const [signal, setSignal] = useState<SignalData | null>(null);
   const [marketContext, setMarketContext] = useState<MarketContextSummary | null>(null);
   const [isLoadingContext, setIsLoadingContext] = useState<boolean>(false);
+  const [isMoreDetailsOpen, setIsMoreDetailsOpen] = useState<boolean>(false);
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [freshnessSec, setFreshnessSec] = useState<number>(6.0);
   const [isExpired, setIsExpired] = useState<boolean>(false);
@@ -264,6 +269,7 @@ export function SignalEngine({
     setSignal(null);
     setMarketContext(null);
     setIsLoadingContext(false);
+    setIsMoreDetailsOpen(false);
     setIsLocked(false);
     setIsExpired(false);
     setFreshnessSec(0);
@@ -622,7 +628,7 @@ export function SignalEngine({
         status: 'ANALYSIS_BLOCKED',
         blockedReason: `Live tick buffer warming (${safeTicks.length}/5 real ticks captured for ${activeAsset.name}).`,
         plainLanguageReason:
-          'Tickvere strictly requires real WebSocket ticks before evaluating setups. Buffers start empty and never use fake seed data. No credits deducted.',
+          `${siteName} strictly requires real WebSocket ticks before evaluating setups. Buffers start empty and never use fake seed data. No credits deducted.`,
         riskNote: 'Trading involves risk. Always wait for confirmed live market velocity.',
         gatePassed: false,
         confluenceFactorsList: [],
@@ -755,6 +761,7 @@ export function SignalEngine({
           return;
         }
 
+        setIsMoreDetailsOpen(false);
         setSignal(mappedSignal);
         onSignalOutput?.(binaryRes);
         setIsRechecking(false);
@@ -1033,6 +1040,7 @@ export function SignalEngine({
         d1Candles,
       });
 
+      setIsMoreDetailsOpen(false);
       setSignal(generatedSignal);
       setMarketContext(mt5Ctx);
       onSignalOutput?.(mt5Res);
@@ -1225,24 +1233,43 @@ export function SignalEngine({
     setTimeout(() => setCopiedMt5Json(false), 2000);
   };
 
-  const progressOffset = ((6.0 - freshnessSec) / 6.0) * 88;
+  const resultView = useMemo(
+    () =>
+      buildResultView(signal, analysisProfile, {
+        binaryBalance,
+        binaryRiskPct,
+        brokerPayoutPct: brokerMeta.payoutPct,
+        nowMs: mt5NowMs,
+        decimals: assetPipSpec.decimals,
+        distanceUnit: assetPipSpec.distanceUnit,
+      }),
+    [
+      signal,
+      analysisProfile,
+      binaryBalance,
+      binaryRiskPct,
+      brokerMeta.payoutPct,
+      mt5NowMs,
+      assetPipSpec.decimals,
+      assetPipSpec.distanceUnit,
+    ]
+  );
 
   return (
-    <div className="space-y-4" id="signal-engine-cockpit">
-      {/* 1. TOP STATUS BAR: Live Quantitative Telemetry */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 sm:p-4 shadow-xl font-mono text-xs">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-2.5">
-          <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-            <span className="font-bold text-white text-xs sm:text-sm">
-              Live Quant Gate &bull; {activeAsset?.name || 'EUR/USD'}
+    <div className="space-y-3.5" id="signal-engine-cockpit">
+      {/* 1. COMPACT TOP STATUS BAR */}
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-xl font-mono text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isFeedActive ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+            <span className="font-bold text-white text-xs sm:text-sm truncate">
+              {activeAsset?.name || 'EUR/USD'} &bull; {analysisMode === 'quick' ? 'Quick Trade' : 'MT5 Trade Plan'}
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-400">Balance:</span>
+          <div className="flex items-center gap-2 shrink-0">
             <span className="font-bold text-emerald-400">
-              {isVIP ? 'UNLIMITED VIP' : `${credits} CR`}
+              {isVIP ? 'VIP' : `${credits} CR`}
             </span>
             {isVIP && (
               <button
@@ -1255,90 +1282,32 @@ export function SignalEngine({
             )}
           </div>
         </div>
-
-        {/* Live Indicator Pills */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between">
-            <span className="text-slate-400">RSI (14):</span>
-            <span
-              className={`font-bold ${
-                liveAudit.rsi > 70 ? 'text-rose-400' : liveAudit.rsi < 30 ? 'text-emerald-400' : 'text-slate-200'
-              }`}
-            >
-              {liveAudit.rsi.toFixed(1)}
-            </span>
-          </div>
-
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between">
-            <span className="text-slate-400">EMA Trend:</span>
-            <span
-              className={`font-bold ${
-                liveAudit.emaTrend === 'BULLISH' || liveAudit.emaTrend === 'CROSSOVER_UP'
-                  ? 'text-emerald-400'
-                  : 'text-rose-400'
-              }`}
-            >
-              {liveAudit.emaTrend}
-            </span>
-          </div>
-
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between sm:col-span-1">
-            <span className="text-slate-300 text-[10px] leading-snug">
-              Last 60 seconds of ticks:{' '}
-              <strong className="text-emerald-400">{last60sTickStats.buyPct}% up</strong>,{' '}
-              <strong className="text-rose-400">{last60sTickStats.sellPct}% down</strong>{' '}
-              <span className="text-slate-400">(not a forecast)</span>
-            </span>
-          </div>
-
-          <div className="bg-slate-950/80 p-2 rounded-xl border border-slate-800 flex items-center justify-between gap-2">
-            {liveAudit.recommendedAction !== 'WAIT' ? (
-              <>
-                <span className="text-slate-400">Setup strength (not a win probability):</span>
-                <span className={`font-bold shrink-0 ${
-                  liveAudit.strength === 'High'
-                    ? 'text-emerald-400'
-                    : liveAudit.strength === 'Medium'
-                    ? 'text-amber-400'
-                    : 'text-slate-300'
-                }`}>
-                  {liveAudit.strength}
-                </span>
-              </>
-            ) : (
-              <>
-                <span className="text-slate-400">Live status:</span>
-                <span className="font-bold text-amber-300 shrink-0">WAIT</span>
-              </>
-            )}
-          </div>
-        </div>
       </div>
 
-      {/* 2. UNIFIED BROKER / PLATFORM SELECTOR & AUTO-SCAN (Rule 4 & Rule 7) */}
-      <div data-tour="mode-switcher" className="bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-lg space-y-3 font-mono">
+      {/* 2. STEP 1 — PLATFORM / BROKER SELECTOR */}
+      <div data-tour="mode-switcher" className="bg-slate-900 border border-slate-800 rounded-2xl p-3 shadow-lg space-y-2.5 font-mono">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
           <div className="flex-1">
             <div className="flex items-center justify-between mb-1">
               <label htmlFor="broker-platform-select" className="text-[10px] text-slate-400 uppercase tracking-wider font-bold flex items-center gap-1.5">
-                <span>Broker / Trading Platform</span>
+                <span>1. Broker / Platform</span>
                 <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
                   analysisProfile === 'MT5'
                     ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40'
                     : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                 }`}>
-                  {analysisProfile === 'MT5' ? 'MetaTrader 5 (SL/TP)' : 'Quick Expiry (CALL/PUT)'}
+                  {analysisProfile === 'MT5' ? 'MetaTrader 5' : 'Quick Trade'}
                 </span>
               </label>
 
-              {currentPlatform.referralUrl && (
+              {resolveBrokerDestinationUrl(currentPlatform.id, currentPlatform.referralUrl) && (
                 <a
-                  href={currentPlatform.referralUrl}
+                  href={resolveBrokerDestinationUrl(currentPlatform.id, currentPlatform.referralUrl)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-[10px] text-emerald-400 hover:text-emerald-300 font-bold underline flex items-center gap-0.5"
                 >
-                  <span>Launch {currentPlatform.name}</span>
+                  <span>Open {currentPlatform.name}</span>
                   <span className="text-[9px]">↗</span>
                 </a>
               )}
@@ -1353,7 +1322,7 @@ export function SignalEngine({
               >
                 {platforms.filter((p) => p.enabled).map((p) => (
                   <option key={p.id} value={p.id} className="bg-slate-900 text-white">
-                    {p.name} — {p.profile === 'MT5' ? 'MetaTrader 5 (SL/TP Forex)' : 'Binary Option (Fixed Expiry)'}
+                    {p.name} — {p.profile === 'MT5' ? 'MetaTrader 5 (Trade Plan)' : 'Quick Trade (Fixed Expiry)'}
                   </option>
                 ))}
               </select>
@@ -1363,15 +1332,10 @@ export function SignalEngine({
                 </svg>
               </div>
             </div>
-
-            {/* Honest UX Subtitle (No private EO scraping claims) */}
-            <p className="text-[11px] text-slate-400 mt-1.5 leading-tight">
-              Live prices: <span className="text-emerald-400 font-bold">Deriv public market feed</span> &bull; Strategy profile: <span className="text-slate-200 font-bold">{currentPlatform.name} ({analysisProfile === 'MT5' ? 'MetaTrader 5 SL/TP' : 'Binary Option CALL/PUT'})</span>
-            </p>
           </div>
 
           {/* Auto-Scan After WAIT Toggle */}
-          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1.5 pt-1 sm:pt-0 border-t sm:border-t-0 border-slate-800 shrink-0">
+          <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1 pt-1 sm:pt-0 border-t sm:border-t-0 border-slate-800 shrink-0">
             <label className="flex items-center gap-2 cursor-pointer select-none">
               <span className="text-[11px] text-slate-300 font-bold">Auto-scan after WAIT</span>
               <div
@@ -1403,22 +1367,16 @@ export function SignalEngine({
                 />
               </div>
             </label>
-            <span className="text-[9px] text-slate-500 font-sans">
-              {autoScanEnabled ? 'Auto-retries on 8s cycle (max 10)' : 'Disabled (manual scan)'}
-            </span>
           </div>
         </div>
 
         {/* Auto-Scan Active Visual Countdown Banner */}
         {autoScanSecondsRemaining > 0 && (
-          <div className="bg-amber-500/15 border border-amber-500/30 rounded-xl p-2.5 flex items-center justify-between text-xs animate-in fade-in duration-150">
+          <div className="bg-amber-500/15 border border-amber-500/30 rounded-xl p-2 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-amber-300">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
               <span className="font-bold">
-                Auto-scanning… {autoScanAttempt + 1}/{MAX_AUTO_SCAN_ATTEMPTS}
-              </span>
-              <span className="text-[10px] text-amber-400/80 bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-800/60">
-                Next scan in {autoScanSecondsRemaining}s
+                Auto-scanning… {autoScanAttempt + 1}/{MAX_AUTO_SCAN_ATTEMPTS} ({autoScanSecondsRemaining}s)
               </span>
             </div>
             <button
@@ -1430,23 +1388,23 @@ export function SignalEngine({
               }}
               className="text-[10px] text-slate-400 hover:text-white px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded transition"
             >
-              Cancel Auto-Scan
+              Cancel
             </button>
           </div>
         )}
       </div>
 
-      {/* 3. ANALYSIS HORIZON SELECTOR (Mode-specific: Binary Auto/1m/2m/3m/5m vs MT5 M15/H1) */}
-      <div data-tour="timeframe-selector" className="space-y-1.5">
-        <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-          <span className="uppercase tracking-wider">Analysis Horizon</span>
-          <span className="text-emerald-400 font-bold bg-emerald-950/50 border border-emerald-500/30 px-2 py-0.5 rounded">
-            Target: {analysisMode === 'quick' ? activeBinaryHorizonCfg.desc : activeMt5HorizonCfg.desc}
-          </span>
-        </div>
-
+      {/* 3. STEP 2 — MODE-SPECIFIC INPUTS ONLY */}
+      <div data-tour="timeframe-selector" className="bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-2.5">
         {analysisMode === 'quick' ? (
           <>
+            <div className="flex items-center justify-between gap-2 text-xs font-mono">
+              <span className="font-bold text-white">2. Quick Trade — pick how long</span>
+              <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/50 border border-emerald-500/30 px-2 py-0.5 rounded">
+                {activeBinaryHorizonCfg.id === 'auto' ? 'Auto (1m–5m)' : activeBinaryHorizonCfg.id.toUpperCase()}
+              </span>
+            </div>
+
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5" id="timeframe-grid">
               {BINARY_HORIZONS.map((opt) => {
                 const isActive = opt.id === binaryHorizon;
@@ -1459,7 +1417,7 @@ export function SignalEngine({
                     className={`py-2 px-2 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 text-center ${
                       isActive
                         ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-emerald-400 text-emerald-300 font-black shadow-md shadow-emerald-500/20'
-                        : 'bg-slate-900/80 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                        : 'bg-slate-950 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
                     }`}
                   >
                     <span className="text-[11px] font-black leading-tight">{opt.label}</span>
@@ -1468,32 +1426,79 @@ export function SignalEngine({
                 );
               })}
             </div>
-            <p className="text-[11px] text-slate-400 font-sans leading-snug pt-0.5">
+            <p className="text-[11px] text-slate-400 font-sans leading-snug">
               How long until your trade closes. Shorter is faster and noisier, and leaves less time to place the trade.
             </p>
           </>
         ) : (
-          <div className="grid grid-cols-2 gap-2" id="timeframe-grid">
-            {MT5_HORIZONS.map((opt) => {
-              const isActive = opt.id === mt5Horizon;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  id={`tf-btn-${opt.id}`}
-                  onClick={() => setMt5Horizon(opt.id)}
-                  className={`py-2.5 px-3 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 text-center ${
-                    isActive
-                      ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-blue-400 text-blue-200 font-black shadow-md shadow-blue-500/20'
-                      : 'bg-slate-900/80 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
-                  }`}
-                >
-                  <span className="text-xs font-black leading-tight">{opt.label}</span>
-                  <span className="text-[10px] opacity-75 font-normal">{opt.sub}</span>
-                </button>
-              );
-            })}
-          </div>
+          <>
+            <div className="flex items-center justify-between gap-2 text-xs font-mono">
+              <span className="font-bold text-white">2. Trade Plan — pick the chart and your risk</span>
+              <span className="text-[10px] text-blue-300 font-bold bg-blue-950/50 border border-blue-500/30 px-2 py-0.5 rounded">
+                {activeMt5HorizonCfg.sub}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2" id="timeframe-grid">
+              {MT5_HORIZONS.map((opt) => {
+                const isActive = opt.id === mt5Horizon;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    id={`tf-btn-${opt.id}`}
+                    onClick={() => setMt5Horizon(opt.id)}
+                    className={`py-2 px-3 rounded-xl text-xs font-mono transition-all flex flex-col items-center justify-center gap-0.5 text-center ${
+                      isActive
+                        ? 'bg-gradient-to-b from-slate-800 to-slate-900 border-2 border-blue-400 text-blue-200 font-black shadow-md shadow-blue-500/20'
+                        : 'bg-slate-950 border border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                    }`}
+                  >
+                    <span className="text-xs font-black leading-tight">{opt.label}</span>
+                    <span className="text-[10px] opacity-75 font-normal">{opt.sub}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* MT5 Account Risk Controls */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono text-[10px]">
+              <div>
+                <span className="text-slate-400 block mb-1">Account Balance ({mt5AccountCurrency})</span>
+                <div className="flex items-center gap-1">
+                  {[100, 500, 1000, 5000, 10000].map((b) => (
+                    <button
+                      key={b}
+                      type="button"
+                      onClick={() => handleUpdateMt5Balance(b)}
+                      className={`flex-1 py-1.5 rounded-lg text-center transition ${
+                        mt5Balance === b ? 'bg-blue-500 text-white font-bold' : 'bg-slate-950 text-slate-400 border border-slate-800'
+                      }`}
+                    >
+                      {b >= 1000 ? `${b / 1000}k` : b}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <span className="text-slate-400 block mb-1">Risk per trade (% of balance)</span>
+                <div className="flex items-center gap-1">
+                  {[0.5, 1.0, 2.0, 3.0].map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => handleUpdateMt5RiskPct(r)}
+                      className={`flex-1 py-1.5 rounded-lg text-center transition ${
+                        mt5RiskPct === r ? 'bg-blue-500 text-white font-bold' : 'bg-slate-950 text-slate-400 border border-slate-800'
+                      }`}
+                    >
+                      {r}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -1639,671 +1644,457 @@ export function SignalEngine({
         </div>
       )}
 
-      {/* 6. PRIMARY ANALYSIS CARD (MODE A VS MODE B) */}
+      {/* 6. PRIMARY ANALYSIS CARD (BINARY QUICK TRADE vs MT5 TRADE PLAN) */}
       <div
         id="signal-display-container"
         data-tour="confluence-gate"
-        className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-2xl relative overflow-hidden transition-all duration-300 space-y-3"
+        className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-2xl relative overflow-hidden transition-all duration-300 space-y-3"
       >
         {/* Permanent Synthetic Indices Notice on Analysis Card */}
         {isSynthetic && (
           <div
             data-testid="synthetic-analysis-notice"
-            className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-3 font-mono text-[11px] text-amber-200 flex items-start gap-2.5"
+            className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-2.5 font-mono text-[11px] text-amber-200 flex items-start gap-2"
           >
             <span className="text-amber-400 shrink-0 font-bold">⚠️</span>
-            <span className="leading-relaxed">{SYNTHETIC_INDICES_NOTICE}</span>
+            <span className="leading-snug">{SYNTHETIC_INDICES_NOTICE}</span>
           </div>
         )}
-        {!signal ? (
-          /* Standby / Initial State */
-          <div className="text-center py-5 space-y-2">
-            <div className="w-11 h-11 rounded-2xl bg-slate-800/80 border border-slate-700 flex items-center justify-center mx-auto text-emerald-400">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-            </div>
-            <div>
-              <h3 className="font-bold text-white text-xs sm:text-sm font-mono uppercase tracking-wide">
-                Confirmation Gate Ready &bull; {analysisMode === 'quick' ? 'Binary Expiry Engine' : 'MT5 Style Mode'}
-              </h3>
-              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                {analysisMode === 'quick'
-                  ? 'Evaluates M1/M5/M15 candles, 60s live ticks, session quality, news buffer, and broker payout math before issuing CALL, PUT, or WAIT.'
-                  : 'MT5 Gate evaluates swing structure, price distribution proxy, and invalidation levels. No trades placed in chop.'}
-              </p>
-            </div>
-          </div>
-        ) : signal.status === 'ANALYSIS_BLOCKED' ? (
-          /* BLOCKED STATE: Missing symbol or timeframe */
-          <div className="bg-rose-950/30 border border-rose-500/50 rounded-xl p-4 font-mono text-xs space-y-2.5 text-center">
-            <div className="w-10 h-10 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center mx-auto text-rose-400">
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-            </div>
-            <div className="font-bold text-rose-300 text-sm">
-              ANALYSIS BLOCKED
-            </div>
-            <p className="text-slate-300 text-xs">
-              {signal.blockedReason}
-            </p>
-            <p className="text-[11px] text-slate-400">
-              {signal.plainLanguageReason}
+
+        {!resultView || !signal ? (
+          /* Standby State */
+          <div className="text-center py-4 space-y-1.5">
+            <h3 className="font-bold text-white text-xs sm:text-sm font-mono uppercase tracking-wide">
+              {analysisMode === 'quick' ? 'Quick Trade Ready' : 'MT5 Trade Plan Ready'}
+            </h3>
+            <p className="text-xs text-slate-400 max-w-sm mx-auto">
+              {analysisMode === 'quick'
+                ? 'Tap Scan below for a CALL, PUT, or WAIT decision based on live candles and ticks.'
+                : 'Tap Scan below for Entry, Stop-loss, TP1/TP2, Lot size, or WAIT.'}
             </p>
           </div>
-        ) : analysisMode === 'quick' ? (
-          /* ============================================================== */
-          /* SECTION A: BINARY OPTIONS ENGINE CARD                          */
-          /* Output: CALL | PUT | WAIT, dynamic expiry, strength word,      */
-          /* 3 plain-English reasons, break-even payout math, 1-2% stake    */
-          /* NO Stop Loss / Take Profit / lot size / % win probability      */
-          /* ============================================================== */
-          <div className="space-y-3.5">
-            {/* Header: Direction, Symbol, Dynamic Expiry & 6s Radial Timer */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <div className="flex items-center gap-2.5">
-                <span
-                  id="signal-direction-badge"
-                  className={`text-base font-black font-mono uppercase px-3.5 py-1.5 rounded-xl shadow-lg ${
-                    signal.direction === 'CALL'
-                      ? 'text-slate-950 bg-emerald-400 shadow-emerald-400/20'
-                      : signal.direction === 'PUT'
-                      ? 'text-white bg-rose-500 shadow-rose-500/20'
-                      : 'text-amber-200 bg-amber-500/20 border border-amber-500/40'
-                  }`}
-                >
-                  {signal.direction === 'CALL'
-                    ? 'CALL (HIGHER)'
-                    : signal.direction === 'PUT'
-                    ? 'PUT (LOWER)'
-                    : 'WAIT / NO TRADE'}
-                </span>
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-mono font-bold text-slate-200">
-                      {signal.asset} &bull; Expiry {(signal.expiry || signal.timeframe).toUpperCase()}
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">
-                    Platform: {currentPlatform.name}
-                    {signal.direction !== 'WAIT' && (
-                      <>
-                        {' '}&bull; Setup strength (not a win probability):{' '}
-                        <strong className={
-                          signal.strength === 'High'
-                            ? 'text-emerald-400'
-                            : signal.strength === 'Medium'
-                            ? 'text-amber-300'
-                            : 'text-slate-300'
-                        }>
-                          {signal.strength || 'Low'}
-                        </strong>
-                      </>
-                    )}
-                  </span>
-                </div>
-              </div>
-
-              {/* 6-Second Freshness Window Radial Timer */}
-              {signal.direction !== 'WAIT' && (
-                <div className="flex items-center gap-2">
-                  <div className="relative w-8 h-8 flex items-center justify-center">
-                    <svg className="w-8 h-8 -rotate-90" viewBox="0 0 36 36">
-                      <circle cx="18" cy="18" r="14" fill="none" stroke="#1e293b" strokeWidth="3" />
-                      <circle
-                        cx="18"
-                        cy="18"
-                        r="14"
-                        fill="none"
-                        stroke={isExpired ? '#f43f5e' : '#10b981'}
-                        strokeWidth="3"
-                        strokeDasharray="88"
-                        strokeDashoffset={progressOffset}
-                        className="transition-all duration-100"
-                      />
-                    </svg>
-                    <span className="absolute text-[10px] font-mono font-bold text-white">
-                      {Math.ceil(freshnessSec)}s
-                    </span>
-                  </div>
-                </div>
-              )}
+        ) : resultView.kind === 'BLOCKED' ? (
+          /* BLOCKED STATE */
+          <div className="bg-rose-950/30 border border-rose-500/50 rounded-xl p-4 font-mono text-xs space-y-2 text-center">
+            <div className="font-bold text-rose-300 text-sm">ANALYSIS PAUSED</div>
+            <p className="text-slate-200 text-xs">{resultView.blockedReason}</p>
+            <p className="text-[11px] text-slate-400">{resultView.plainLanguageReason}</p>
+          </div>
+        ) : resultView.kind === 'WAIT' ? (
+          /* WAIT RESULT: Verdict, One Plain Reason, Next Check Window — Nothing Else */
+          <div data-testid="wait-result-card" className="space-y-2.5">
+            <div className="flex items-center gap-2.5">
+              <span
+                id="signal-direction-badge"
+                className="text-base sm:text-lg font-black font-mono px-3.5 py-1.5 rounded-xl text-amber-200 bg-amber-500/20 border border-amber-500/40"
+              >
+                {resultView.verdict.badge}
+              </span>
+              <span className="text-xs font-mono text-slate-400">
+                {signal.asset} &bull; {currentPlatform.name}
+              </span>
             </div>
-
-            {/* Freshness Banner for Actionable Binary Mode */}
-            {signal.direction !== 'WAIT' && (
-              <div className="space-y-2">
-                <div
-                  id="freshness-banner"
-                  className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between transition-all ${
-                    !isExpired
-                      ? 'bg-emerald-950/70 border border-emerald-500/40 text-emerald-300'
-                      : 'bg-rose-950/70 border border-rose-500/40 text-rose-300 animate-pulse'
-                  }`}
-                >
-                  <span>
-                    {isExpired
-                      ? '🔴 ENTRY WINDOW EXPIRED — RE-SCAN'
-                      : `🟢 ENTER WITHIN ${signal.enterWithinSeconds || 6} SECONDS`}
-                  </span>
-                  <span className="text-[10px]">
-                    {isExpired ? 'Void' : `Valid: ${freshnessSec.toFixed(1)}s`}
-                  </span>
-                </div>
-
-                {(signal.expiry || signal.timeframe) === '1m' && (
-                  <div
-                    data-testid="binary-1m-timing-notice"
-                    className="px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 font-mono text-[11px] font-semibold"
+            <p className="text-xs sm:text-sm text-slate-200 leading-relaxed font-medium">
+              {resultView.reason}
+            </p>
+            <p className="text-xs font-mono text-amber-300/90">
+              {resultView.checkAgainText}
+            </p>
+          </div>
+        ) : resultView.kind === 'BINARY' ? (
+          /* BINARY ("Quick Trade") ACTIONABLE RESULT */
+          <div data-testid="binary-result-card" className="space-y-3">
+            {/* 1. Verdict Block */}
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span
+                    id="signal-direction-badge"
+                    className={`text-base sm:text-lg font-black font-mono px-3.5 py-1 rounded-xl shadow-lg ${
+                      resultView.direction === 'CALL'
+                        ? 'text-slate-950 bg-emerald-400 shadow-emerald-400/20'
+                        : 'text-white bg-rose-500 shadow-rose-500/20'
+                    }`}
                   >
-                    Open your trade within 6 seconds. 1-minute trades leave little room for delay.
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Honest WAIT / Why-Not-Trade Advisory Box */}
-            {signal.direction === 'WAIT' && (
-              <div className="bg-amber-950/30 border border-amber-500/40 rounded-xl p-3 font-mono text-xs space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                    <span>⏳</span>
-                    <span>NO TRADE SIGNAL RIGHT NOW</span>
+                    {resultView.verdict.badge}
+                  </span>
+                  <span className="text-xs font-mono font-bold text-slate-300">
+                    {signal.asset}
                   </span>
                 </div>
-                <p className="text-slate-200 text-[11px] leading-relaxed font-semibold">
-                  {signal.whyNotTrade || signal.plainLanguageReason}
+                <p className="text-xs sm:text-sm text-white font-medium leading-snug">
+                  {resultView.verdict.plainSentence}
                 </p>
               </div>
-            )}
+            </div>
 
-            {/* 3 Plain-English Reasons */}
-            <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-3 space-y-2 font-mono">
-              <div className="flex items-center justify-between text-[11px] border-b border-slate-850 pb-1.5">
-                <span className="text-slate-300 font-bold uppercase">Why This Signal (Candle &amp; Tick Audit):</span>
-                <span className={signal.gatePassed ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                  {signal.gatePassed ? '✓ ALIGNED' : 'STANDBY'}
+            {/* 2. Single row of 3 key facts: Expiry, Enter within (live seconds), Suggested stake ($) */}
+            <div className="grid grid-cols-3 gap-2 font-mono text-center">
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] text-slate-400 block">Expiry</span>
+                <span className="text-xs sm:text-sm font-black text-cyan-300 block mt-0.5">
+                  {resultView.keyFacts.expiryLabel}
                 </span>
               </div>
-              <ul className="space-y-1.5 text-[11px] text-slate-300">
-                {(signal.reasons && signal.reasons.length > 0
-                  ? signal.reasons
-                  : [signal.plainLanguageReason || 'Awaiting directional alignment across M1, M5, and M15 candles.']
-                ).map((reasonText, idx) => (
-                  <li key={idx} className="flex items-start gap-2 leading-relaxed">
-                    <span className={`font-bold shrink-0 mt-0.5 ${signal.gatePassed ? 'text-emerald-400' : 'text-amber-400'}`}>
-                      {idx + 1}.
-                    </span>
-                    <span>{reasonText}</span>
+              <div className={`bg-slate-950 border rounded-xl p-2 ${isExpired ? 'border-rose-500/50' : 'border-emerald-500/40'}`}>
+                <span className="text-[10px] text-slate-400 block">Enter within</span>
+                <span className={`text-xs sm:text-sm font-black block mt-0.5 tabular-nums ${isExpired ? 'text-rose-400' : 'text-emerald-400'}`}>
+                  {isExpired ? 'Expired' : `${Math.max(0, Math.ceil(freshnessSec))}s`}
+                </span>
+              </div>
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
+                <span className="text-[10px] text-slate-400 block">Suggested stake</span>
+                <span className="text-xs sm:text-sm font-black text-white block mt-0.5 tabular-nums">
+                  ${resultView.keyFacts.suggestedStakeUsd.toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            {/* 3. Why (exactly 3 bullets, <= 90 chars each) */}
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-slate-300 uppercase">Why</div>
+              <ul className="space-y-1 text-xs text-slate-300">
+                {resultView.whyBullets.map((bullet, idx) => (
+                  <li key={idx} className="flex items-start gap-2 leading-snug">
+                    <span className="text-emerald-400 font-bold shrink-0">&bull;</span>
+                    <span>{bullet}</span>
                   </li>
                 ))}
               </ul>
             </div>
 
-            {/* Payout Break-Even Mathematics Callout */}
-            <div className="bg-slate-950/90 border border-cyan-500/30 rounded-xl p-3 font-mono text-xs space-y-1">
-              <div className="flex items-center justify-between text-cyan-300 font-bold text-[11px]">
-                <span>PAYOUT BREAK-EVEN MATH ({signal.payoutPct ?? brokerMeta.payoutPct}% PAYOUT)</span>
-                <span className="text-[10px] bg-cyan-500/15 border border-cyan-500/30 px-2 py-0.5 rounded">
-                  Break-Even: {(signal.breakEvenWinRatePct ?? 54.05).toFixed(2)}%
+            {/* 4. One strength chip (ONLY when signal.direction !== 'WAIT') + ONE break-even line */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5 text-[11px] font-mono">
+              {signal.direction !== 'WAIT' && (
+                <span
+                  data-testid="single-strength-chip"
+                  className="inline-flex items-center gap-1.5 bg-slate-950 border border-slate-700 px-2.5 py-1 rounded-lg text-slate-300"
+                >
+                  <span>Setup strength (not a win probability):</span>
+                  <strong className={
+                    resultView.strengthChip.strength === 'High'
+                      ? 'text-emerald-400'
+                      : resultView.strengthChip.strength === 'Medium'
+                      ? 'text-amber-300'
+                      : 'text-slate-200'
+                  }>
+                    {resultView.strengthChip.strength}
+                  </strong>
                 </span>
-              </div>
-              <p className="text-[11px] text-slate-300 leading-relaxed">
-                {signal.breakEvenMessage || formatBreakEvenStatement(signal.payoutPct ?? brokerMeta.payoutPct)}
-              </p>
+              )}
+              <span className="text-cyan-300">
+                {resultView.breakEvenLine}
+              </span>
             </div>
 
-            {/* Strike, Strength Word & Expiry Summary */}
-            <div className="grid grid-cols-3 gap-2 text-center font-mono">
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] text-slate-500 uppercase block">Entry Quote</span>
-                <span className="text-xs font-bold text-white block mt-0.5">
-                  {typeof signal.entryPrice === 'number' ? signal.entryPrice.toFixed(activeAsset?.decimals || 5) : currentPrice}
-                </span>
-              </div>
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                {signal.direction !== 'WAIT' ? (
-                  <>
-                    <span className="text-[9px] text-slate-500 uppercase block leading-tight">Setup strength (not a win probability)</span>
-                    <span className={`text-xs font-black block mt-0.5 ${
-                      signal.strength === 'High' ? 'text-emerald-400' : signal.strength === 'Medium' ? 'text-amber-400' : 'text-slate-300'
-                    }`}>
-                      {signal.strength || 'Low'}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-[9px] text-slate-500 uppercase block leading-tight">Signal Status</span>
-                    <span className="text-xs font-black block mt-0.5 text-amber-300">WAIT / Stand Aside</span>
-                  </>
-                )}
-              </div>
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                <span className="text-[10px] text-slate-500 uppercase block">Contract Expiry</span>
-                <span className="text-xs font-bold text-cyan-300 block mt-0.5">
-                  {(signal.expiry || signal.timeframe).toUpperCase()}
-                </span>
-              </div>
-            </div>
+            {/* 5. One short risk line */}
+            <p className="text-[11px] text-slate-400 leading-snug">
+              {resultView.riskLine}
+            </p>
 
-            {/* Binary 1% - 2% Suggested Stake Sizing Control */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-300 font-bold text-[11px]">1%–2% SUGGESTED STAKE SIZE:</span>
-                <span className="text-emerald-400 font-black text-sm">
-                  ${((Math.max(0, binaryBalance) * binaryRiskPct) / 100).toFixed(2)}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[10px]">
-                <div>
-                  <label htmlFor="binary-balance-input" className="text-slate-400 block mb-1">
-                    Account Balance ($)
-                  </label>
-                  <input
-                    id="binary-balance-input"
-                    type="number"
-                    min="1"
-                    value={binaryBalance}
-                    onChange={(e) => setBinaryBalance(Math.max(0, Number(e.target.value)))}
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg py-1.5 px-2 text-xs text-white font-bold focus:border-emerald-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <span className="text-slate-400 block mb-1">Stake Risk Cap</span>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {[1, 2].map((pct) => (
-                      <button
-                        key={pct}
-                        type="button"
-                        onClick={() => setBinaryRiskPct(pct)}
-                        className={`py-1.5 rounded-lg font-bold transition ${
-                          binaryRiskPct === pct
-                            ? 'bg-emerald-500 text-slate-950'
-                            : 'bg-slate-900 text-slate-300 border border-slate-800'
-                        }`}
-                      >
-                        {pct}% (${((Math.max(0, binaryBalance) * pct) / 100).toFixed(2)})
-                      </button>
-                    ))}
+            {/* 6. More details accordion (collapsed by default) */}
+            <div className="border-t border-slate-800 pt-2">
+              <button
+                type="button"
+                aria-expanded={isMoreDetailsOpen}
+                onClick={() => setIsMoreDetailsOpen((prev) => !prev)}
+                className="w-full flex items-center justify-between py-1.5 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/70 border border-slate-800 text-xs font-mono font-semibold text-slate-200 transition cursor-pointer"
+              >
+                <span>More details</span>
+                <span className="text-slate-400">{isMoreDetailsOpen ? '▲ Hide' : '▼ Show'}</span>
+              </button>
+
+              {isMoreDetailsOpen && (
+                <div className="mt-3 space-y-3">
+                  {(signal.expiry || signal.timeframe) === '1m' && (
+                    <div
+                      data-testid="binary-1m-timing-notice"
+                      className="px-3 py-2 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 font-mono text-[11px] font-semibold"
+                    >
+                      Open your trade within 6 seconds. 1-minute trades leave little room for delay.
+                    </div>
+                  )}
+
+                  {/* Indicator Audit & Entry Quote */}
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-[11px] space-y-2">
+                    <div className="grid grid-cols-3 gap-2">
+                      <div>
+                        <span className="text-slate-500 block">Entry Quote</span>
+                        <span className="text-white font-bold">
+                          {typeof signal.entryPrice === 'number' ? signal.entryPrice.toFixed(assetPipSpec.decimals) : currentPrice}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">RSI (14)</span>
+                        <span className="text-slate-200 font-bold">{liveAudit.rsi.toFixed(1)}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block">EMA Trend</span>
+                        <span className="text-slate-200 font-bold">{liveAudit.emaTrend}</span>
+                      </div>
+                    </div>
+                    <div className="text-slate-300 border-t border-slate-800 pt-1.5">
+                      Last 60 seconds of ticks:{' '}
+                      <strong className="text-emerald-400">{last60sTickStats.buyPct}% up</strong>,{' '}
+                      <strong className="text-rose-400">{last60sTickStats.sellPct}% down</strong>{' '}
+                      <span className="text-slate-400">(not a forecast)</span>
+                    </div>
                   </div>
+
+                  {/* Stake Calculator & 1%-2% Risk Cap */}
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-300 font-bold text-[11px]">Stake calculator (1%–2% cap):</span>
+                      <span className="text-emerald-400 font-black text-sm">
+                        ${resultView.keyFacts.suggestedStakeUsd.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-[10px]">
+                      <div>
+                        <label htmlFor="binary-balance-input" className="text-slate-400 block mb-1">
+                          Account Balance ($)
+                        </label>
+                        <input
+                          id="binary-balance-input"
+                          type="number"
+                          min="1"
+                          value={binaryBalance}
+                          onChange={(e) => setBinaryBalance(Math.max(0, Number(e.target.value)))}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg py-1.5 px-2 text-xs text-white font-bold focus:border-emerald-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block mb-1">Stake Risk Cap</span>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {[1, 2].map((pct) => (
+                            <button
+                              key={pct}
+                              type="button"
+                              onClick={() => setBinaryRiskPct(pct)}
+                              className={`py-1.5 rounded-lg font-bold transition ${
+                                binaryRiskPct === pct
+                                  ? 'bg-emerald-500 text-slate-950'
+                                  : 'bg-slate-900 text-slate-300 border border-slate-800'
+                              }`}
+                            >
+                              {pct}% (${((Math.max(0, binaryBalance) * pct) / 100).toFixed(2)})
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Broker & Live Delta Tracker CTAs */}
+                  {!activeTrade && !isExpired && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 font-mono">
+                      {resolveBrokerDestinationUrl(currentPlatform.id, currentPlatform.referralUrl) && (
+                        <a
+                          href={resolveBrokerDestinationUrl(currentPlatform.id, currentPlatform.referralUrl)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs transition flex items-center justify-center gap-1.5"
+                        >
+                          <span>TRADE ON {currentPlatform.name.toUpperCase()}</span>
+                          <span>↗</span>
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleExecuteTrade}
+                        className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/40 font-black text-xs transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <span>TRACK LIVE DELTA ({resultView.keyFacts.expiryLabel})</span>
+                        <span>⚡</span>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Market Context (inside collapsed More details) */}
+                  <MarketContextPanel context={marketContext} isLoading={isLoadingContext} />
                 </div>
-              </div>
-              <p className="text-[10px] text-slate-500">
-                Never risk more than 2% per expiry or double up (martingale) to recover a loss.
-              </p>
-            </div>
-
-            {/* Execute On Broker CTA */}
-            {!activeTrade && !isExpired && signal.direction !== 'WAIT' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono">
-                <a
-                  href={currentPlatform.referralUrl || 'https://expertoption.com/?ref=TICKVERE'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs sm:text-sm shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-1.5 active:scale-98"
-                >
-                  <span>TRADE ON {currentPlatform.name.toUpperCase()}</span>
-                  <span className="text-xs">↗</span>
-                </a>
-                <button
-                  type="button"
-                  onClick={handleExecuteTrade}
-                  className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 text-emerald-400 border border-emerald-500/40 hover:border-emerald-400 font-black text-xs sm:text-sm shadow-md transition flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
-                >
-                  <span>TRACK LIVE DELTA ({(signal.expiry || signal.timeframe).toUpperCase()})</span>
-                  <span>⚡</span>
-                </button>
-              </div>
-            )}
-
-            {/* Plain language risk note */}
-            <div className="text-[10px] font-mono text-slate-500 text-center pt-1">
-              {signal.riskNote}
+              )}
             </div>
           </div>
         ) : (
-          /* ============================================================== */
-          /* MODE B: MT5 STYLE (MetaTrader 5 Clean Ordered Card)             */
-          /* ============================================================== */
-          <div className="space-y-3.5 font-mono">
-            {/* 1) Symbol + Timeframe Header + Validity Window (minutes only, no seconds) */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
-              <div className="flex items-center gap-2">
-                <span className="w-2.5 h-2.5 rounded-full bg-blue-400" />
-                <span className="text-xs font-bold text-white">
-                  Symbol: <strong className="text-blue-300">{signal.asset}</strong> &bull; Chart: <strong className="text-emerald-400">{signal.timeframe.toUpperCase()}</strong>
-                </span>
-              </div>
-              {signal.direction !== 'WAIT' && (
-                <span className="text-[10px] text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                  Setup strength (not a win probability): {signal.strength || 'Low'}
-                </span>
-              )}
-            </div>
-
-            {signal.direction !== 'WAIT' && (() => {
-              const validMs = signal.validUntil ? Date.parse(signal.validUntil) : NaN;
-              const minsLeft = Number.isFinite(validMs)
-                ? Math.max(0, Math.ceil((validMs - mt5NowMs) / 60_000))
-                : signal.mt5?.validityCandles
-                ? signal.mt5.validityCandles * 5
-                : 15;
-              return (
-                <div
-                  data-testid="mt5-validity-banner"
-                  className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center justify-between ${
-                    minsLeft > 0
-                      ? 'bg-blue-950/60 border border-blue-500/40 text-blue-200'
-                      : 'bg-rose-950/60 border border-rose-500/40 text-rose-300'
+          /* MT5 ("Trade Plan") ACTIONABLE RESULT */
+          <div data-testid="mt5-result-card" className="space-y-3">
+            {/* 1. Verdict Block */}
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  id="signal-direction-badge"
+                  className={`text-base sm:text-lg font-black font-mono px-3.5 py-1 rounded-xl shadow-lg ${
+                    resultView.direction === 'BUY'
+                      ? 'text-slate-950 bg-emerald-400 shadow-emerald-400/20'
+                      : 'text-white bg-rose-500 shadow-rose-500/20'
                   }`}
                 >
-                  <span>
-                    {minsLeft > 0
-                      ? `Validity Window: ${signal.validityWindowDesc || `${minsLeft} min`}`
-                      : 'Validity Window Ended — Re-scan for Fresh Levels'}
-                  </span>
-                  <span className="text-[10px]">
-                    {minsLeft > 0 ? `${minsLeft} min remaining` : 'Expired'}
-                  </span>
-                </div>
-              );
-            })()}
-
-            {/* 2) Structure */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 flex items-center justify-between text-xs">
-              <div>
-                <span className="text-[10px] text-slate-400 block uppercase">2) Market Structure:</span>
-                <span className={`font-black text-xs sm:text-sm ${
-                  signal.marketStructure === 'BULLISH'
-                    ? 'text-emerald-400'
-                    : signal.marketStructure === 'BEARISH'
-                    ? 'text-rose-400'
-                    : 'text-amber-400'
-                }`}>
-                  {signal.marketStructure} &bull; {signal.structureCue}
+                  {resultView.verdict.badge}
+                </span>
+                <span className="text-xs font-mono font-bold text-slate-300">
+                  {signal.asset} &bull; {signal.timeframe.toUpperCase()}
                 </span>
               </div>
-              <span className="text-[11px] text-slate-400 text-right max-w-[200px] truncate">
-                {signal.structureSummary}
-              </span>
+              <p className="text-xs sm:text-sm text-white font-medium leading-snug">
+                {resultView.verdict.plainSentence}
+              </p>
             </div>
 
-            {/* 3) Direction */}
-            <div className="flex items-center justify-between bg-slate-950 border border-slate-800 rounded-xl p-3">
-              <span className="text-xs text-slate-400 uppercase font-bold">3) Actionable Direction:</span>
-              <span className={`text-sm font-black uppercase px-3 py-1 rounded-lg ${
-                signal.direction === 'BUY' || signal.direction === 'CALL'
-                  ? 'bg-emerald-400 text-slate-950'
-                  : signal.direction === 'SELL' || signal.direction === 'PUT'
-                  ? 'bg-rose-500 text-white'
-                  : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-              }`}>
-                {signal.direction === 'BUY' || signal.direction === 'CALL'
-                  ? `BUY (${signal.orderKind || 'MARKET'})`
-                  : signal.direction === 'SELL' || signal.direction === 'PUT'
-                  ? `SELL (${signal.orderKind || 'MARKET'})`
-                  : 'WAIT / NO TRADE'}
-              </span>
-            </div>
-
-            {/* 4) Strict Checklist States (Identical for Free & VIP) */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
-              <div className="flex items-center justify-between text-[11px] border-b border-slate-850 pb-1.5">
+            {/* 2. Order Ticket Card (Exact fields to type into MT5) */}
+            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2.5 font-mono">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs tabular-nums">
                 <div>
-                  <span className="text-slate-300 font-bold uppercase">4) Confluence Checklist:</span>
-                  <span className="text-[10px] text-slate-500 block">Critical factors must pass &bull; No fiction in chop</span>
+                  <span className="text-[10px] text-slate-400 block">Entry</span>
+                  <span className="font-bold text-white">{resultView.orderTicket.entryText}</span>
                 </div>
-                <span className={signal.gatePassed ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
-                  {signal.gatePassed ? `CONFIRMED (${signal.strength || 'Medium'})` : 'WAIT (Gate Unmet)'}
+                <div>
+                  <span className="text-[10px] text-rose-400 block">Stop-loss</span>
+                  <span className="font-bold text-rose-300">{resultView.orderTicket.stopLossPriceText}</span>
+                  <span className="text-[10px] text-rose-400/80 block">{resultView.orderTicket.stopLossDistanceText}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-emerald-400 block">TP1</span>
+                  <span className="font-bold text-emerald-300">{resultView.orderTicket.tp1PriceText}</span>
+                  <span className="text-[10px] text-emerald-400/80 block">{resultView.orderTicket.tp1DistanceText}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-teal-400 block">TP2</span>
+                  <span className="font-bold text-teal-300">{resultView.orderTicket.tp2PriceText}</span>
+                  <span className="text-[10px] text-teal-400/80 block">{resultView.orderTicket.tp2DistanceText}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-xs tabular-nums">
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Lot size</span>
+                  <span className="font-bold text-white">{resultView.orderTicket.lotSizeText}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Risk in money</span>
+                  <span className="font-bold text-amber-300">{resultView.orderTicket.riskMoneyText}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 block">Reward:Risk</span>
+                  <span className="font-bold text-emerald-400">{resultView.orderTicket.rewardRiskText}</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleCopyMt5Setup}
+                className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-500/20 transition flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+              >
+                {copiedMt5Text ? <span>✓ Copied order</span> : <span>{resultView.orderTicket.primaryButtonLabel}</span>}
+              </button>
+            </div>
+
+            {/* 3. One Validity Line */}
+            <p data-testid="mt5-validity-line" className="text-xs font-mono text-blue-200 leading-snug">
+              {resultView.validityLine}
+            </p>
+
+            {/* 4. Why (3 bullets including higher-timeframe bias) */}
+            <div className="space-y-1">
+              <div className="text-[11px] font-mono font-bold text-slate-300 uppercase">Why</div>
+              <ul className="space-y-1 text-xs text-slate-300">
+                {resultView.whyBullets.map((bullet, idx) => (
+                  <li key={idx} className="flex items-start gap-2 leading-snug">
+                    <span className="text-blue-400 font-bold shrink-0">&bull;</span>
+                    <span>{bullet}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* 5. Single strength chip (ONLY when signal.direction !== 'WAIT') */}
+            {signal.direction !== 'WAIT' && (
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+                <span
+                  data-testid="single-strength-chip"
+                  className="inline-flex items-center gap-1.5 bg-slate-950 border border-slate-700 px-2.5 py-1 rounded-lg text-slate-300"
+                >
+                  <span>Setup strength (not a win probability):</span>
+                  <strong className={
+                    resultView.strengthChip.strength === 'High'
+                      ? 'text-emerald-400'
+                      : resultView.strengthChip.strength === 'Medium'
+                      ? 'text-amber-300'
+                      : 'text-slate-200'
+                  }>
+                    {resultView.strengthChip.strength}
+                  </strong>
                 </span>
               </div>
-              <div className="space-y-1.5">
-                {(signal.confluenceFactorsList || []).map((factor) => (
-                  <div
-                    key={factor.id}
-                    className="flex items-center justify-between text-xs p-1.5 rounded-lg bg-slate-900/60 border border-slate-800/60"
-                  >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className={`w-4 h-4 rounded flex items-center justify-center text-[10px] font-bold shrink-0 ${
-                        factor.status === 'PASS'
-                          ? 'bg-emerald-500/20 text-emerald-400'
-                          : factor.status === 'FAIL'
-                          ? 'bg-rose-500/20 text-rose-400'
-                          : 'bg-amber-500/20 text-amber-400'
-                      }`}>
-                        {factor.status === 'PASS' ? '✓' : factor.status === 'FAIL' ? '✗' : '?'}
-                      </span>
-                      <div className="truncate">
-                        <span className="text-slate-300">{factor.name}</span>
-                        <span className="text-[9px] text-slate-500 ml-1.5">[{factor.severity}]</span>
-                      </div>
-                    </div>
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                      factor.status === 'PASS'
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : factor.status === 'FAIL'
-                        ? 'bg-rose-500/20 text-rose-300'
-                        : 'bg-amber-500/20 text-amber-300'
-                    }`}>
-                      {factor.status}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Multi-Window Live Movement Confirmation (Rule 6) */}
-            {signal.multiWindow && (
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-xs space-y-2">
-                <div className="flex items-center justify-between border-b border-slate-850 pb-1.5">
-                  <span className="text-slate-300 font-bold uppercase text-[10px]">
-                    Multi-Window Consensus Check ({activeAsset.name}):
-                  </span>
-                  <span className={`text-[10px] font-bold ${signal.multiWindow.allAgreed ? 'text-emerald-400' : 'text-amber-400'}`}>
-                    {signal.multiWindow.allAgreed ? '✓ CONSENSUS CONFIRMED' : '⚠️ CONFLICTING LOOKBACKS'}
-                  </span>
-                </div>
-                <div className="grid grid-cols-3 gap-1.5 text-center text-[10px]">
-                  <div className="bg-slate-900 p-1.5 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block truncate">{signal.multiWindow.longWindowDesc}</span>
-                    <span className={`font-bold block mt-0.5 ${
-                      signal.multiWindow.longBias === 'BULLISH' ? 'text-emerald-400' : signal.multiWindow.longBias === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'
-                    }`}>
-                      {signal.multiWindow.longBias}
-                    </span>
-                  </div>
-                  <div className="bg-slate-900 p-1.5 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block truncate">{signal.multiWindow.midWindowDesc}</span>
-                    <span className={`font-bold block mt-0.5 ${
-                      signal.multiWindow.midBias === 'BULLISH' ? 'text-emerald-400' : signal.multiWindow.midBias === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'
-                    }`}>
-                      {signal.multiWindow.midBias}
-                    </span>
-                  </div>
-                  <div className="bg-slate-900 p-1.5 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block truncate">{signal.multiWindow.shortWindowDesc}</span>
-                    <span className={`font-bold block mt-0.5 ${
-                      signal.multiWindow.shortBias === 'BULLISH' ? 'text-emerald-400' : signal.multiWindow.shortBias === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'
-                    }`}>
-                      {signal.multiWindow.shortBias}
-                    </span>
-                  </div>
-                </div>
-                {signal.multiWindow.conflictSummary && (
-                  <p className="text-[10px] text-amber-300 leading-tight">
-                    {signal.multiWindow.conflictSummary}
-                  </p>
-                )}
-              </div>
             )}
 
-            {/* Signal History Learning Note */}
-            {signal.historyLearning && signal.historyLearning.totalRecent >= 4 && (
-              <div className={`p-2.5 rounded-xl border text-[10px] font-mono leading-relaxed ${
-                signal.historyLearning.status === 'CAUTION_RAISED_THRESHOLD'
-                  ? 'bg-amber-950/40 border-amber-500/40 text-amber-300'
-                  : 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300'
-              }`}>
-                <span>🧠 <strong>Session Memory ({signal.historyLearning.wins}W / {signal.historyLearning.losses}L recent):</strong> {signal.historyLearning.note}</span>
-              </div>
-            )}
+            {/* 6. More details accordion (collapsed by default) */}
+            <div className="border-t border-slate-800 pt-2">
+              <button
+                type="button"
+                aria-expanded={isMoreDetailsOpen}
+                onClick={() => setIsMoreDetailsOpen((prev) => !prev)}
+                className="w-full flex items-center justify-between py-1.5 px-2.5 rounded-xl bg-slate-950 hover:bg-slate-800/70 border border-slate-800 text-xs font-mono font-semibold text-slate-200 transition cursor-pointer"
+              >
+                <span>More details</span>
+                <span className="text-slate-400">{isMoreDetailsOpen ? '▲ Hide' : '▼ Show'}</span>
+              </button>
 
-            {/* 5, 6, 7) Entry Zone, Stop Loss, Take Profit (Only if Actionable - Never invented if WAIT) */}
-            {signal.direction !== 'WAIT' && signal.mt5 ? (
-              <div className="space-y-2.5">
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-center">
-                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-2">
-                    <span className="text-[10px] text-slate-400 uppercase block">5) Entry Zone</span>
-                    <span className="text-xs font-bold text-white block mt-0.5">
-                      {signal.entryZone ? `${signal.entryZone.min} - ${signal.entryZone.max}` : signal.entryPrice}
-                    </span>
-                  </div>
-                  <div className="bg-slate-950 border border-rose-500/30 rounded-xl p-2">
-                    <span className="text-[10px] text-rose-400 uppercase block">6) Stop Loss</span>
-                    <span className="text-xs font-bold text-rose-300 block mt-0.5">{signal.mt5.stopLossPrice}</span>
-                    <span className="text-[9px] text-rose-400/80">-{signal.mt5.stopLossPips} {formatDistanceUnitWord(signal.mt5.stopLossPips, assetPipSpec.distanceUnit)} (Structural)</span>
-                  </div>
-                  <div className="bg-slate-950 border border-emerald-500/30 rounded-xl p-2">
-                    <span className="text-[10px] text-emerald-400 uppercase block">7) Take Profit 1</span>
-                    <span className="text-xs font-bold text-emerald-300 block mt-0.5">{signal.mt5.takeProfit1Price}</span>
-                    <span className="text-[9px] text-emerald-400/80">
-                      +{signal.mt5.takeProfit1Pips} {formatDistanceUnitWord(signal.mt5.takeProfit1Pips, assetPipSpec.distanceUnit)} (1:{(signal.mt5.rewardRiskTp1 || 1.5).toFixed(2)})
-                    </span>
-                  </div>
-                  <div className="bg-slate-950 border border-teal-500/30 rounded-xl p-2">
-                    <span className="text-[10px] text-teal-400 uppercase block">7) Take Profit 2</span>
-                    <span className="text-xs font-bold text-teal-300 block mt-0.5">{signal.mt5.takeProfit2Price}</span>
-                    <span className="text-[9px] text-teal-400/80">
-                      +{signal.mt5.takeProfit2Pips} {formatDistanceUnitWord(signal.mt5.takeProfit2Pips, assetPipSpec.distanceUnit)} (1:{(signal.mt5.rewardRiskTp2 || 2.5).toFixed(2)})
-                    </span>
-                  </div>
-                </div>
-
-                {/* MT5 Position Size Calculator */}
-                <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-300 font-bold">Position Size ({mt5AccountCurrency}):</span>
-                    <span className="text-emerald-400 font-bold">
-                      {signal.mt5.recommendedLot > 0 ? (
-                        <>Recommended: <strong className="text-white text-sm">{signal.mt5.recommendedLot} Lots</strong></>
-                      ) : (
-                        <strong className="text-amber-300 text-xs">Below min lot (0 Lots)</strong>
-                      )}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div>
-                      <span className="text-slate-400 block mb-1">Account Balance ({mt5AccountCurrency}):</span>
-                      <div className="flex items-center gap-1">
-                        {[10, 100, 1000, 5000, 10000].map((b) => (
-                          <button
-                            key={b}
-                            type="button"
-                            onClick={() => handleUpdateMt5Balance(b)}
-                            className={`flex-1 py-1 rounded text-center transition ${
-                              mt5Balance === b ? 'bg-blue-500 text-white font-bold' : 'bg-slate-900 text-slate-400'
-                            }`}
-                          >
-                            ${b >= 1000 ? `${b / 1000}k` : b}
-                          </button>
-                        ))}
-                      </div>
+              {isMoreDetailsOpen && (
+                <div className="mt-3 space-y-3">
+                  <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 font-mono text-[11px] space-y-2 text-slate-300">
+                    <div className="text-cyan-300 font-semibold">
+                      {resultView.moreDetails.needsAtLeastWinRateLine}
                     </div>
                     <div>
-                      <span className="text-slate-400 block mb-1">Risk (% of balance, max 3%):</span>
-                      <div className="flex items-center gap-1">
-                        {[0.5, 1.0, 2.0, 3.0].map((r) => (
-                          <button
-                            key={r}
-                            type="button"
-                            onClick={() => handleUpdateMt5RiskPct(r)}
-                            className={`flex-1 py-1 rounded text-center transition ${
-                              mt5RiskPct === r ? 'bg-blue-500 text-white font-bold' : 'bg-slate-900 text-slate-400'
-                            }`}
-                          >
-                            {r}%
-                          </button>
-                        ))}
-                      </div>
+                      <span className="text-slate-400 font-bold">Trade management: </span>
+                      <span>{resultView.moreDetails.tradeManagement}</span>
                     </div>
+                    <div>
+                      <span className="text-slate-400 font-bold">Spread &amp; session: </span>
+                      <span>{resultView.moreDetails.spreadAndSessionNotes}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 font-bold">Invalidation rule: </span>
+                      <span>{resultView.moreDetails.invalidationRule}</span>
+                    </div>
+                    {resultView.moreDetails.accountSizingWarning && (
+                      <div className="p-2 rounded-lg bg-amber-950/40 border border-amber-500/40 text-amber-300">
+                        ⚠️ {resultView.moreDetails.accountSizingWarning}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleCopyMt5Json}
+                      className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 text-slate-200 font-bold text-[11px] rounded-lg border border-slate-700 transition cursor-pointer"
+                    >
+                      {copiedMt5Json ? '✓ Copied EA JSON' : 'Copy EA JSON'}
+                    </button>
                   </div>
 
-                  {/* Small Account Warning Callout */}
-                  {signal.accountSizingWarning && (
-                    <div className="mt-2 p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/40 text-[11px] text-amber-300 leading-relaxed">
-                      ⚠️ <strong>Account Sizing Notice:</strong> {signal.accountSizingWarning}
-                    </div>
-                  )}
+                  {/* Market Context (inside collapsed More details) */}
+                  <MarketContextPanel context={marketContext} isLoading={isLoadingContext} />
                 </div>
-
-                {/* Copy Buttons */}
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={handleCopyMt5Setup}
-                    className="py-2 px-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-500/20 transition flex items-center justify-center gap-1.5 active:scale-95"
-                  >
-                    {copiedMt5Text ? <span>✓ COPIED SETUP!</span> : <span>COPY MT5 SETUP</span>}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleCopyMt5Json}
-                    className="py-2 px-3 bg-slate-800 hover:bg-slate-750 text-slate-200 font-bold text-xs rounded-xl border border-slate-700 transition flex items-center justify-center gap-1.5 active:scale-95"
-                  >
-                    {copiedMt5Json ? <span>✓ COPIED JSON!</span> : <span>COPY EA JSON</span>}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* If WAIT state, SL/TP are never invented */
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 text-center space-y-1 text-slate-400 text-xs">
-                <span className="font-bold text-amber-300 block">5, 6, 7) Entry / SL / TP: OMITTED</span>
-                <span>Stop Loss & Take Profit levels are never invented when structure is ranging or unconfirmed.</span>
-              </div>
-            )}
-
-            {/* 8) Invalidation / When to stay out */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs space-y-1">
-              <span className="text-[10px] text-amber-400 font-bold block uppercase">
-                8) Invalidation &amp; When To Stay Out:
-              </span>
-              <p className="text-slate-300 leading-relaxed text-[11px]">
-                {signal.invalidationReason || 'Wait for structure breakout before taking risk.'}
-              </p>
-            </div>
-
-            {/* 9) Short plain-language reason */}
-            <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-xs space-y-1">
-              <span className="text-[10px] text-cyan-400 font-bold block uppercase">
-                9) Analysis Summary:
-              </span>
-              <p className="text-slate-300 leading-relaxed text-[11px]">
-                {signal.plainLanguageReason}
-              </p>
-            </div>
-
-            {/* Risk Line */}
-            <div className="text-[10px] text-slate-500 text-center pt-1">
-              {signal.riskNote}
+              )}
             </div>
           </div>
         )}
 
-        {/* Market Context Panel (identical for Free & VIP under every analysis) */}
-        {signal && (
-          <MarketContextPanel context={marketContext} isLoading={isLoadingContext} />
+        {/* Hidden compatibility marker note for Stage 4F feed audit (kept concise only on actionable or non-WAIT audit, omitted on pure WAIT per Krug rule) */}
+        {signal && resultView?.kind !== 'WAIT' && (
+          <div className="pt-2 border-t border-slate-800/80 text-[10px] font-mono text-slate-400 flex flex-wrap items-center justify-between gap-2">
+            <span>
+              {analysisMode === 'quick'
+                ? "Prices from Deriv public feed; broker fills may differ."
+                : "Candles from Deriv public feed; MT5 broker spread may differ."}
+            </span>
+            {analysisMode === 'quick' && !isMoreDetailsOpen && (
+              <span className="text-slate-500">
+                Last 60 seconds of ticks: {last60sTickStats.buyPct}% up, {last60sTickStats.sellPct}% down (not a forecast)
+              </span>
+            )}
+          </div>
         )}
-
-        {/* Broker Disclaimer Notice (Requirement #8) */}
-        <div className="mt-3 pt-2.5 border-t border-slate-800/80 px-2.5 py-1.5 rounded-xl bg-slate-950/60 text-[11px] font-mono text-slate-400 flex items-center gap-2">
-          <span className="text-emerald-400 text-xs shrink-0 font-bold">ℹ</span>
-          <span className="leading-tight">
-            {analysisMode === 'quick'
-              ? "Prices come from the Deriv market feed. Your broker's price can differ slightly, which matters most on 1-minute expiries."
-              : "Prices and candles come from the Deriv market feed. Your MT5 broker's spread and quotes can differ slightly."}
-          </span>
-        </div>
       </div>
 
       {/* 7. MANDATORY OUTCOME FEEDBACK LOOP */}

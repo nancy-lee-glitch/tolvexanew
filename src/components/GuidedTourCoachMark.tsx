@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useBrand, applyBrandTokens } from '../utils/brand.ts';
 
 export interface TourStep {
   targetKey: string;
@@ -67,7 +68,7 @@ export const TOUR_STEPS: TourStep[] = [
     title: '5. Multi-Factor Confluence Gate',
     description:
       'Before recommending any trade, the gate tests M1/M5/M15 candle structure, EMA alignment, RSI momentum, ATR volatility, and price distribution proxy. If the market is choppy or near high-impact news, it outputs WAIT.',
-    tip: 'Preserving capital during chop is essential. Tickvere outputs WAIT when conditions are unclear.',
+    tip: 'Preserving capital during chop is essential. {{BRAND_NAME}} outputs WAIT when conditions are unclear.',
     badge: 'Step 5 of 9 • Risk Gate',
     shape: 'box',
     preferredPosition: 'top',
@@ -140,6 +141,7 @@ export function GuidedTourCoachMark({
   onSetPage,
   onOpenRadar,
 }: GuidedTourCoachMarkProps) {
+  const { siteName } = useBrand();
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const [targetFound, setTargetFound] = useState<boolean>(false);
@@ -476,7 +478,7 @@ export function GuidedTourCoachMark({
           <div className="bg-slate-950/90 border border-emerald-500/30 rounded-2xl p-2.5 mb-3.5 text-[11px] font-mono text-slate-300 flex items-start gap-2 shadow-inner">
             <span className="text-amber-400 text-xs shrink-0">💡</span>
             <span className="leading-snug">
-              <strong className="text-amber-300 font-bold">Pro Tip:</strong> {step.tip}
+              <strong className="text-amber-300 font-bold">Pro Tip:</strong> {applyBrandTokens(step.tip, siteName)}
             </span>
           </div>
         )}

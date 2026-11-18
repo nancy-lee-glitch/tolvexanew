@@ -17,8 +17,10 @@ import { getSupabaseClient } from './supabaseClient.ts';
 export function getAuthHeaders(): Record<string, string> {
   let token = '';
   if (typeof window !== 'undefined') {
-    token = localStorage.getItem('pulsetrade_session_token') || sessionStorage.getItem('pulsetrade_session_token') || '';
-    if (!token) {
+    const lsToken = typeof localStorage !== 'undefined' ? localStorage.getItem('pulsetrade_session_token') : null;
+    const ssToken = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('pulsetrade_session_token') : null;
+    token = lsToken || ssToken || '';
+    if (!token && typeof localStorage !== 'undefined') {
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
         if (key && key.startsWith('sb-') && key.endsWith('-auth-token')) {
@@ -123,26 +125,60 @@ export const DEFAULT_SITE_SETTINGS: SiteSettings = {
 
 const LEGACY_BRAND_TOKEN = ['tol', 'vexa'].join('');
 const LEGACY_TAGLINE_TOKEN = ['micro', 'volatility'].join('-');
+const LEGACY_APP_TOKEN = ['pulse', 'trade'].join('');
 
-function normalizeSiteSettings(raw: Partial<SiteSettings> | null | undefined): SiteSettings {
-  const merged: SiteSettings = { ...DEFAULT_SITE_SETTINGS, ...(raw || {}) };
-  const nameLower = (merged.siteName || '').trim().toLowerCase();
-  if (!nameLower || nameLower === LEGACY_BRAND_TOKEN || nameLower === 'pulsetrade' || nameLower === 'pulsetrade pro') {
-    merged.siteName = DEFAULT_SITE_SETTINGS.siteName;
+export interface SaveSiteSettingsResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
+  publishedAt?: string;
+  verified?: boolean;
+  mismatch?: string;
+  settings?: SiteSettings;
+}
+
+function hasNonEmptyText(val: unknown): val is string {
+  return typeof val === 'string' && val.trim().length > 0;
+}
+
+export function normalizeSiteSettings(raw: Partial<SiteSettings> | null | undefined): SiteSettings {
+  const src = raw || {};
+  return {
+    ...DEFAULT_SITE_SETTINGS,
+    ...src,
+    siteName: hasNonEmptyText(src.siteName) ? src.siteName : DEFAULT_SITE_SETTINGS.siteName,
+    siteTagline: hasNonEmptyText(src.siteTagline) ? src.siteTagline : DEFAULT_SITE_SETTINGS.siteTagline,
+    badgeText: typeof src.badgeText === 'string' ? src.badgeText : DEFAULT_SITE_SETTINGS.badgeText,
+    bannerText: hasNonEmptyText(src.bannerText) ? src.bannerText : DEFAULT_SITE_SETTINGS.bannerText,
+    supportTelegram: hasNonEmptyText(src.supportTelegram) ? src.supportTelegram : DEFAULT_SITE_SETTINGS.supportTelegram,
+    supportWhatsapp: typeof src.supportWhatsapp === 'string' ? src.supportWhatsapp : DEFAULT_SITE_SETTINGS.supportWhatsapp,
+    supportEmail: hasNonEmptyText(src.supportEmail) ? src.supportEmail : DEFAULT_SITE_SETTINGS.supportEmail,
+    logoUrl: typeof src.logoUrl === 'string' ? src.logoUrl : DEFAULT_SITE_SETTINGS.logoUrl,
+    faviconUrl: typeof src.faviconUrl === 'string' ? src.faviconUrl : DEFAULT_SITE_SETTINGS.faviconUrl,
+  };
+}
+
+export function detectLegacyBrandWarnings(settings: Partial<SiteSettings>): string[] {
+  const legacyWords = [LEGACY_BRAND_TOKEN, LEGACY_TAGLINE_TOKEN, LEGACY_APP_TOKEN];
+  const fields: Array<{ label: string; value: string | undefined }> = [
+    { label: 'Site name', value: settings.siteName },
+    { label: 'Tagline', value: settings.siteTagline },
+    { label: 'Header badge', value: settings.badgeText },
+    { label: 'Announcement banner', value: settings.bannerText },
+    { label: 'Telegram link', value: settings.supportTelegram },
+    { label: 'Support email', value: settings.supportEmail },
+  ];
+  const warnings: string[] = [];
+  for (const field of fields) {
+    const val = (field.value || '').trim();
+    if (!val) continue;
+    const lower = val.toLowerCase();
+    const matched = legacyWords.find((word) => lower.includes(word));
+    if (matched) {
+      warnings.push(`${field.label} contains legacy term "${matched}". Keeping your exact text; review before publishing.`);
+    }
   }
-  const taglineLower = (merged.siteTagline || '').toLowerCase();
-  if (!merged.siteTagline?.trim() || taglineLower.includes(LEGACY_TAGLINE_TOKEN) || taglineLower.includes(LEGACY_BRAND_TOKEN)) {
-    merged.siteTagline = DEFAULT_SITE_SETTINGS.siteTagline;
-  }
-  const tgLower = (merged.supportTelegram || '').toLowerCase();
-  if (tgLower.includes('pulsetrade') || tgLower.includes(LEGACY_BRAND_TOKEN)) {
-    merged.supportTelegram = DEFAULT_SITE_SETTINGS.supportTelegram;
-  }
-  const emailLower = (merged.supportEmail || '').toLowerCase();
-  if (!emailLower || emailLower.includes(LEGACY_BRAND_TOKEN) || emailLower.includes('pulsetrade')) {
-    merged.supportEmail = DEFAULT_SITE_SETTINGS.supportEmail;
-  }
-  return merged;
+  return warnings;
 }
 
 export const DEFAULT_NOWPAYMENTS_CONFIG: NowPaymentsConfig = {
@@ -180,7 +216,7 @@ export function applyDocumentBranding(settings: SiteSettings) {
 
   // Title
   if (settings.siteName) {
-    document.title = `${settings.siteName} – ${settings.siteTagline || 'Live Market Analysis Companion'}`;
+    document.title = `${settings.siteName} – ${settings.siteTagline || DEFAULT_SITE_SETTINGS.siteTagline}`;
   }
 
   // Favicon
@@ -210,6 +246,12 @@ export function applyDocumentBranding(settings: SiteSettings) {
   }
 }
 
+function broadcastSettingsChanged(settings: SiteSettings) {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('pulsetrade_settings_changed', { detail: settings }));
+  }
+}
+
 /**
  * Fetch remote site settings from Supabase (preferred) or Backend API
  */
@@ -228,8 +270,11 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
 
       if (!error && data?.value) {
         settings = normalizeSiteSettings(data.value);
-        localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+        }
         applyDocumentBranding(settings);
+        broadcastSettingsChanged(settings);
         return settings;
       }
     } catch (err) {
@@ -244,12 +289,15 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
       const data = await res.json();
       if (data && data.settings) {
         settings = normalizeSiteSettings(data.settings.site_branding || data.settings);
-        localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+        }
         applyDocumentBranding(settings);
+        broadcastSettingsChanged(settings);
         return settings;
       }
     }
-  } catch (err) {
+  } catch {
     // Graceful offline fallback
   }
 
@@ -257,36 +305,108 @@ export async function fetchRemoteSiteSettings(): Promise<SiteSettings> {
   return settings;
 }
 
-/**
- * Save site settings and broadcast changes across tabs and backend
- */
-export async function saveSiteSettings(newSettings: SiteSettings): Promise<boolean> {
-  const merged = { ...DEFAULT_SITE_SETTINGS, ...newSettings };
-  
-  // 1. Save locally and apply document branding
-  if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(merged));
-    applyDocumentBranding(merged);
-    window.dispatchEvent(new CustomEvent('pulsetrade_settings_changed', { detail: merged }));
-  }
+function formatPublishedHHMM(date = new Date()): string {
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  return `${hh}:${mm}`;
+}
 
-  // 2. Save to server backend with auth headers
+function findBrandingMismatch(expected: SiteSettings, actualRaw: unknown): string | undefined {
+  if (!actualRaw || typeof actualRaw !== 'object') {
+    return 'Server verification did not return site_branding.';
+  }
+  const actual = actualRaw as Record<string, unknown>;
+  const keysToCompare: Array<keyof SiteSettings> = [
+    'siteName',
+    'siteTagline',
+    'supportEmail',
+    'supportTelegram',
+    'supportWhatsapp',
+    'badgeText',
+    'bannerText',
+    'bannerEnabled',
+    'logoUrl',
+    'faviconUrl',
+  ];
+  const diffs = keysToCompare.filter((key) => {
+    if (typeof expected[key] === 'boolean') {
+      return Boolean(actual[key]) !== Boolean(expected[key]);
+    }
+    return String(actual[key] ?? '') !== String(expected[key] ?? '');
+  });
+  if (diffs.length > 0) {
+    return `Stored value differs on field(s): ${diffs.join(', ')}`;
+  }
+  return undefined;
+}
+
+/**
+ * Server-first save: POST to /api/admin/settings, read back GET /api/admin/settings to verify,
+ * and apply locally + broadcast only when the server accepts the save.
+ */
+export async function saveSiteSettings(newSettings: SiteSettings): Promise<SaveSiteSettingsResult> {
+  const merged = normalizeSiteSettings(newSettings);
+
+  let postStatus: number | undefined;
   try {
     const res = await fetch('/api/admin/settings', {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ key: 'site_branding', value: merged }),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      console.warn('[Server Settings Save Warning]', data?.error);
-      return false;
+    postStatus = res.status;
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.ok === false) {
+      const errorMsg =
+        (data && typeof data.error === 'string' && data.error) ||
+        (res.status === 401 || res.status === 403
+          ? 'You are not signed in as an admin. Sign in again.'
+          : `Server returned HTTP ${res.status}`);
+      return { ok: false, status: res.status, error: errorMsg };
     }
-    return true;
   } catch (err: any) {
-    console.warn('[Server Settings Save Network Error]', err);
-    return false;
+    return {
+      ok: false,
+      status: postStatus,
+      error: err?.message || 'Network error saving branding settings.',
+    };
   }
+
+  let verified = false;
+  let mismatch: string | undefined;
+  try {
+    const verifyRes = await fetch('/api/admin/settings', {
+      method: 'GET',
+      headers: getAuthHeaders(),
+      cache: 'no-store',
+    });
+    if (verifyRes.ok) {
+      const verifyJson = await verifyRes.json().catch(() => null);
+      mismatch = findBrandingMismatch(merged, verifyJson?.settings?.site_branding);
+      verified = !mismatch;
+    } else {
+      mismatch = `Verification read failed (HTTP ${verifyRes.status})`;
+    }
+  } catch (err: any) {
+    mismatch = err?.message || 'Verification read failed';
+  }
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(merged));
+    } catch {}
+  }
+  applyDocumentBranding(merged);
+  broadcastSettingsChanged(merged);
+
+  return {
+    ok: true,
+    status: postStatus ?? 200,
+    publishedAt: formatPublishedHHMM(),
+    verified,
+    mismatch,
+    settings: merged,
+  };
 }
 
 /**
@@ -819,13 +939,30 @@ export async function adminTestRedeemVipKey(
 // =========================================================================
 // BROKER PLATFORMS MANAGER (EXPERTOPTION, DERIV, POCKETOPTION, QUOTEX, MT5)
 // =========================================================================
+export const PLAIN_BROKER_HOMEPAGES: Record<string, string> = {
+  expert_option: 'https://expertoption.com',
+  expertoption: 'https://expertoption.com',
+  deriv: 'https://deriv.com',
+  pocket_option: 'https://pocketoption.com',
+  pocketoption: 'https://pocketoption.com',
+  quotex: 'https://quotex.com',
+  mt5: '',
+};
+
+export function resolveBrokerDestinationUrl(platformIdOrBroker: string, storedReferralUrl?: string): string {
+  const trimmed = (storedReferralUrl || '').trim();
+  if (trimmed) return trimmed;
+  const key = (platformIdOrBroker || '').trim().toLowerCase();
+  return PLAIN_BROKER_HOMEPAGES[key] ?? '';
+}
+
 export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
   {
     id: 'expert_option',
     name: 'ExpertOption',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://expertoption.com/?ref=TICKVERE',
+    referralUrl: 'https://expertoption.com',
     badge: 'QUICK EXPIRY',
     icon: '⚡',
     sortOrder: 1,
@@ -835,7 +972,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'Deriv',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://track.deriv.com/_tickvere',
+    referralUrl: 'https://deriv.com',
     badge: 'FX & CRYPTO',
     icon: '🎯',
     sortOrder: 2,
@@ -845,7 +982,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'PocketOption',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://pocketoption.com/?ref=TICKVERE',
+    referralUrl: 'https://pocketoption.com',
     badge: 'DIGITAL OPTIONS',
     icon: '📈',
     sortOrder: 3,
@@ -855,7 +992,7 @@ export const DEFAULT_BROKER_PLATFORMS: BrokerPlatformItem[] = [
     name: 'Quotex',
     profile: 'BINARY_QUICK',
     enabled: true,
-    referralUrl: 'https://quotex.com/?ref=TICKVERE',
+    referralUrl: 'https://quotex.com',
     badge: 'BINARY FX',
     icon: '📊',
     sortOrder: 4,
@@ -876,8 +1013,10 @@ export function getBrokerPlatforms(): BrokerPlatformItem[] {
   return DEFAULT_BROKER_PLATFORMS;
 }
 
-export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]> {
-  const supabase = getSupabaseClient();
+export async function fetchRemoteBrokerPlatforms(
+  supabaseOverride?: ReturnType<typeof getSupabaseClient>
+): Promise<BrokerPlatformItem[]> {
+  const supabase = supabaseOverride !== undefined ? supabaseOverride : getSupabaseClient();
   if (supabase) {
     try {
       const { data } = await supabase
@@ -887,12 +1026,7 @@ export async function fetchRemoteBrokerPlatforms(): Promise<BrokerPlatformItem[]
         .maybeSingle();
 
       if (data?.value && Array.isArray(data.value) && data.value.length > 0) {
-        return data.value.map((p: BrokerPlatformItem) => ({
-          ...p,
-          referralUrl: (p.referralUrl || '')
-            .replace(new RegExp(LEGACY_BRAND_TOKEN, 'gi'), 'TICKVERE')
-            .replace(new RegExp(`_${LEGACY_BRAND_TOKEN}`, 'gi'), '_tickvere'),
-        }));
+        return data.value as BrokerPlatformItem[];
       }
     } catch (err) {
       console.warn('[Supabase Broker Platforms Fetch Error]', err);
@@ -1094,13 +1228,13 @@ export const DEFAULT_BROKERS_SETTINGS: BrokersSettings = {
     deriv: {
       enabled: true,
       label: 'Open Deriv',
-      referralUrl: 'https://track.deriv.com',
+      referralUrl: 'https://deriv.com',
       openInNewTab: true,
     },
     expertOption: {
       enabled: true,
       label: 'Open ExpertOption',
-      referralUrl: 'https://r.expertoption.com',
+      referralUrl: 'https://expertoption.com',
       openInNewTab: true,
     },
   },
@@ -1115,7 +1249,7 @@ export const DEFAULT_BROKERS_SETTINGS: BrokersSettings = {
 export const DEFAULT_BROKER_CONFIG: ExternalBrokerConfig = {
   enabled: true,
   brokerName: 'Deriv',
-  brokerUrl: 'https://track.deriv.com',
+  brokerUrl: 'https://deriv.com',
   openInNewTab: true,
   buttonLabel: 'Open Deriv',
 };
@@ -1131,6 +1265,12 @@ function normalizeBrokersSettings(raw: Partial<BrokersSettings> | null | undefin
     },
     referralBonus: { ...DEFAULT_BROKERS_SETTINGS.referralBonus, ...(raw?.referralBonus || {}) },
   };
+  if (raw?.brokers?.deriv && typeof raw.brokers.deriv.referralUrl === 'string') {
+    merged.brokers.deriv.referralUrl = raw.brokers.deriv.referralUrl;
+  }
+  if (raw?.brokers?.expertOption && typeof raw.brokers.expertOption.referralUrl === 'string') {
+    merged.brokers.expertOption.referralUrl = raw.brokers.expertOption.referralUrl;
+  }
   if ((merged.referralBonus.referralCode || '').trim().toUpperCase() === LEGACY_BRAND_TOKEN.toUpperCase()) {
     merged.referralBonus.referralCode = DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode;
   }
@@ -1152,19 +1292,19 @@ export function getBrokersSettings(): BrokersSettings {
 
 export function getBrokerConfig(): ExternalBrokerConfig {
   const currentBrokers = getBrokersSettings();
-  if (currentBrokers.brokers.deriv.enabled && currentBrokers.brokers.deriv.referralUrl) {
+  if (currentBrokers.brokers.deriv.enabled) {
     return {
       enabled: true,
       brokerName: 'Deriv',
-      brokerUrl: currentBrokers.brokers.deriv.referralUrl,
+      brokerUrl: resolveBrokerDestinationUrl('deriv', currentBrokers.brokers.deriv.referralUrl),
       openInNewTab: currentBrokers.brokers.deriv.openInNewTab,
       buttonLabel: currentBrokers.brokers.deriv.label || 'Open Deriv',
     };
-  } else if (currentBrokers.brokers.expertOption.enabled && currentBrokers.brokers.expertOption.referralUrl) {
+  } else if (currentBrokers.brokers.expertOption.enabled) {
     return {
       enabled: true,
       brokerName: 'ExpertOption',
-      brokerUrl: currentBrokers.brokers.expertOption.referralUrl,
+      brokerUrl: resolveBrokerDestinationUrl('expert_option', currentBrokers.brokers.expertOption.referralUrl),
       openInNewTab: currentBrokers.brokers.expertOption.openInNewTab,
       buttonLabel: currentBrokers.brokers.expertOption.label || 'Open ExpertOption',
     };

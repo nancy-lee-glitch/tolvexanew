@@ -1,4 +1,5 @@
 import React, { type ReactNode } from 'react';
+import { getBrandSnapshot } from '../utils/brand.ts';
 
 interface Props {
   children: ReactNode;
@@ -19,7 +20,8 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   override componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('[Tickvere Error Boundary Caught]', error, errorInfo);
+    const { siteName } = getBrandSnapshot();
+    console.error(`[${siteName} Error Boundary Caught]`, error, errorInfo);
   }
 
   handleReload = () => {
@@ -29,6 +31,7 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   override render() {
     if (this.state.hasError) {
+      const { siteName } = getBrandSnapshot();
       return (
         <div className="bg-slate-900 border border-rose-500/40 rounded-2xl p-6 text-center space-y-4 my-4 font-mono shadow-2xl">
           <div className="w-12 h-12 mx-auto rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
@@ -37,11 +40,14 @@ export class ErrorBoundary extends React.Component<Props, State> {
             </svg>
           </div>
           <div>
+            <div className="text-[10px] uppercase tracking-widest text-slate-400 font-bold mb-1">
+              {siteName}
+            </div>
             <h3 className="text-white font-bold text-base">
               {this.props.fallbackTitle || 'Execution Component Recovered'}
             </h3>
             <p className="text-slate-400 text-xs mt-1 max-w-md mx-auto">
-              A temporary telemetry rendering state occurred. The quantitative risk engine is protecting your active session.
+              A temporary telemetry rendering state occurred. {siteName} is protecting your active session.
             </p>
           </div>
           <button

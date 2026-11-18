@@ -54,7 +54,8 @@ export const ACTIVE_APP_ID = (ENV_APP_ID || '1089').trim();
 export const IS_CUSTOM_APP_ID_CONFIGURED = Boolean(ENV_APP_ID);
 export const DERIV_ENDPOINTS = [PRIMARY_ENDPOINT, FALLBACK_ENDPOINT];
 
-const SESSION_TOKEN_KEY = 'tickvere_deriv_token';
+export const DERIV_SESSION_TOKEN_KEY = 'tickvere_deriv_token';
+const SESSION_TOKEN_KEY = DERIV_SESSION_TOKEN_KEY;
 
 /**
  * Thin adapter around LiveFeed.

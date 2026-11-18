@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { usePWAInstall } from '../hooks/usePWAInstall.ts';
+import { useBrand } from '../utils/brand.ts';
 
 export const PWAInstallButton: React.FC<{ className?: string }> = ({ className = '' }) => {
+  const { siteName } = useBrand();
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
 
@@ -17,7 +19,7 @@ export const PWAInstallButton: React.FC<{ className?: string }> = ({ className =
         type="button"
         onClick={install}
         className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500/20 to-teal-500/20 border border-emerald-500/40 hover:bg-emerald-500/30 text-emerald-300 text-xs font-mono font-bold transition shadow-sm ${className}`}
-        title="Install Tickvere as Progressive Web App"
+        title={`Install ${siteName} as Progressive Web App`}
       >
         <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
@@ -82,7 +84,7 @@ export const PWAInstallButton: React.FC<{ className?: string }> = ({ className =
                     3
                   </span>
                   <span>
-                    Confirm by tapping <strong>Add</strong> in the top-right corner. Tickvere launches full-screen like a native app!
+                    Confirm by tapping <strong>Add</strong> in the top-right corner. {siteName} launches full-screen like a native app!
                   </span>
                 </div>
               </div>

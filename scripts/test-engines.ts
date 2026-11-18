@@ -3,8 +3,8 @@
  * Run with: npx tsx scripts/test-engines.ts
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import {
   analyzeBinarySignal,
   calculateBreakEvenWinRate,
@@ -27,7 +27,32 @@ import {
   resolveAssetPipSize,
 } from '../src/utils/engines/marketContext.ts';
 import { validateContractSizeOverrides } from '../src/utils/supabaseClient.ts';
+import {
+  DEFAULT_BROKER_CONFIG,
+  DEFAULT_BROKER_PLATFORMS,
+  DEFAULT_BROKERS_SETTINGS,
+  DEFAULT_SITE_SETTINGS,
+  detectLegacyBrandWarnings,
+  fetchRemoteBrokerPlatforms,
+  normalizeSiteSettings,
+  resolveBrokerDestinationUrl,
+  saveBrokerPlatforms,
+  saveSiteSettings,
+} from '../src/utils/siteConfigManager.ts';
+import {
+  applyBrandTokens,
+  getBrandSnapshot,
+  loadBrandOnce,
+  resetBrandLoaderForTests,
+} from '../src/utils/brand.ts';
 import { formatDistanceUnitWord, resolveAssetPipSpec } from '../src/utils/instrumentMeta.ts';
+import {
+  buildMarketContextSummaryLines,
+  buildResultView,
+  computeNextCandleCloseMinutes,
+  getSortedNearestLevels,
+  getTopAndQuietSessionHours,
+} from '../src/utils/resultView.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
 import historyRefreshHandler from '../api/history/refresh.ts';
@@ -1980,17 +2005,665 @@ function runStage4FPipBrandWordingTests() {
   );
 }
 
+// ============================================================================
+// 18. STAGE 4G: REFERRAL URL INTEGRITY & MARKET RADAR SCHEDULE COPY
+// ============================================================================
+async function runStage4GReferralAndRadarTests() {
+  console.log('\n18. Stage 4G Referral URL Round-Trip & MarketRadar Copy:');
+
+  // 18a. No invented referral/affiliate codes in defaults
+  const defaultUrls = [
+    ...DEFAULT_BROKER_PLATFORMS.map((p) => p.referralUrl || ''),
+    DEFAULT_BROKERS_SETTINGS.brokers.deriv.referralUrl,
+    DEFAULT_BROKERS_SETTINGS.brokers.expertOption.referralUrl,
+    DEFAULT_BROKER_CONFIG.brokerUrl,
+  ];
+  const hasInventedCode = defaultUrls.some((u) => {
+    const lower = u.toLowerCase();
+    return (
+      lower.includes('?ref=') ||
+      lower.includes('_tickvere') ||
+      lower.includes('track.deriv') ||
+      lower.includes('r.expertoption')
+    );
+  });
+  assert(
+    !hasInventedCode,
+    'Default referralUrl values contain zero invented referral/affiliate codes'
+  );
+
+  // Empty referralUrl falls back cleanly to plain broker homepage without tracking
+  assert(
+    resolveBrokerDestinationUrl('deriv', '') === 'https://deriv.com' &&
+      resolveBrokerDestinationUrl('expert_option', '') === 'https://expertoption.com' &&
+      resolveBrokerDestinationUrl('pocket_option', '') === 'https://pocketoption.com' &&
+      resolveBrokerDestinationUrl('quotex', '') === 'https://quotex.com',
+    'Empty referralUrl routes users to plain broker homepage without tracking'
+  );
+
+  // 18b. Stored admin referralUrl round-trips byte-for-byte unchanged through save & fetch
+  const legacyTag = ['tol', 'vexa'].join('');
+  const customAffiliateUrl =
+    `https://partner.deriv.com/promo?ref=ADMIN_CUSTOM_99&subid=${legacyTag}_legacy&_${legacyTag}=keep`;
+  const storedPlatforms = DEFAULT_BROKER_PLATFORMS.map((p) =>
+    p.id === 'deriv' ? { ...p, referralUrl: customAffiliateUrl } : { ...p }
+  );
+
+  let persistedJson = '';
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    persistedJson = String(init?.body || '');
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }) as typeof fetch;
+
+  try {
+    const saveRes = await saveBrokerPlatforms(storedPlatforms);
+    assert(saveRes.success, 'saveBrokerPlatforms succeeds for custom affiliate referralUrl');
+    const savedPayload = JSON.parse(persistedJson);
+    const mockSupabase = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: { value: savedPayload.value } }),
+          }),
+        }),
+      }),
+    } as unknown as Parameters<typeof fetchRemoteBrokerPlatforms>[0];
+
+    const fetched = await fetchRemoteBrokerPlatforms(mockSupabase);
+    const roundTrippedDeriv = fetched.find((p) => p.id === 'deriv');
+    assert(
+      roundTrippedDeriv?.referralUrl === customAffiliateUrl,
+      `Stored referralUrl round-trips unchanged (${roundTrippedDeriv?.referralUrl})`
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  // 18c. MarketRadar, AdminCenter note, and SignalEngine checks
+  const rootDir = resolve(process.cwd());
+  const marketRadarSrc = readFileSync(resolve(rootDir, 'src/components/MarketRadar.tsx'), 'utf8');
+  const adminSrc = readFileSync(resolve(rootDir, 'src/components/AdminCenter.tsx'), 'utf8');
+  const signalUi = readFileSync(resolve(rootDir, 'src/components/SignalEngine.tsx'), 'utf8');
+
+  assert(
+    marketRadarSrc.includes('Session schedule (UTC clock)') &&
+      marketRadarSrc.includes('Typical activity by time of day. Not live market data.'),
+    'MarketRadar.tsx shows "Session schedule (UTC clock)" and "Typical activity by time of day. Not live market data."'
+  );
+  assert(
+    adminSrc.includes('Paste your own affiliate link. If left empty, users go to the broker without tracking.'),
+    'AdminCenter.tsx displays affiliate link helper note'
+  );
+  assert(
+    !signalUi.includes('?ref=TICKVERE'),
+    'SignalEngine.tsx contains no hardcoded ?ref=TICKVERE fallback URL'
+  );
+}
+
+// ============================================================================
+// 19. STAGE 4H-A: ADMIN BRANDING, SERVER-FIRST SAVE & DYNAMIC BRAND MODULE
+// ============================================================================
+function listSourceFilesRecursive(dirPath: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dirPath)) {
+    const full = join(dirPath, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) {
+      out.push(...listSourceFilesRecursive(full));
+    } else if (full.endsWith('.ts') || full.endsWith('.tsx')) {
+      out.push(full);
+    }
+  }
+  return out;
+}
+
+async function runStage4HBrandingTests() {
+  console.log('\n19. Stage 4H-A Admin Branding & Dynamic Brand Tests:');
+
+  // 19a. normalizeSiteSettings keeps admin-entered legacy words intact, only defaulting empty values
+  const legacyWord = ['tol', 'vexa'].join('');
+  const legacyTag = ['micro', 'volatility'].join('-');
+  const normalizedCustom = normalizeSiteSettings({
+    siteName: `My ${legacyWord} Desk`,
+    siteTagline: `Custom ${legacyTag} Terminal`,
+    supportTelegram: 'https://t.me/pulsetrade_custom',
+    supportEmail: `desk@${legacyWord}.io`,
+  });
+  assert(
+    normalizedCustom.siteName === `My ${legacyWord} Desk` &&
+      normalizedCustom.siteTagline === `Custom ${legacyTag} Terminal` &&
+      normalizedCustom.supportTelegram === 'https://t.me/pulsetrade_custom' &&
+      normalizedCustom.supportEmail === `desk@${legacyWord}.io`,
+    'normalizeSiteSettings preserves admin-entered values verbatim even with legacy words'
+  );
+
+  const normalizedEmpty = normalizeSiteSettings({
+    siteName: '   ',
+    siteTagline: '',
+    supportTelegram: '',
+    supportEmail: ' ',
+  });
+  assert(
+    normalizedEmpty.siteName === DEFAULT_SITE_SETTINGS.siteName &&
+      normalizedEmpty.siteTagline === DEFAULT_SITE_SETTINGS.siteTagline &&
+      normalizedEmpty.supportTelegram === DEFAULT_SITE_SETTINGS.supportTelegram &&
+      normalizedEmpty.supportEmail === DEFAULT_SITE_SETTINGS.supportEmail,
+    'normalizeSiteSettings falls back to DEFAULT_SITE_SETTINGS only for empty fields'
+  );
+
+  const legacyWarnings = detectLegacyBrandWarnings(normalizedCustom);
+  assert(
+    legacyWarnings.length >= 3 && normalizedCustom.siteName === `My ${legacyWord} Desk`,
+    `detectLegacyBrandWarnings emits non-blocking warnings (${legacyWarnings.length}) without mutating input`
+  );
+
+  // 19b. Server-first saveSiteSettings() behavior (fail closed before touching localStorage/document/events)
+  const origFetch = globalThis.fetch;
+  const origLocalStorage = (globalThis as any).localStorage;
+  const origSessionStorage = (globalThis as any).sessionStorage;
+  const origDocument = (globalThis as any).document;
+  const origWindow = (globalThis as any).window;
+  const origCustomEvent = (globalThis as any).CustomEvent;
+
+  const store = new Map<string, string>();
+  const dispatchedEvents: Array<{ type: string; detail: unknown }> = [];
+  const docMock = { title: 'Initial Title', getElementById: () => null, querySelector: () => null };
+  const lsMock = {
+    get length() {
+      return store.size;
+    },
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+  };
+  const winMock = {
+    dispatchEvent: (ev: { type: string; detail?: unknown }) => {
+      dispatchedEvents.push({ type: ev.type, detail: ev.detail });
+      return true;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+
+  (globalThis as any).localStorage = lsMock;
+  (globalThis as any).sessionStorage = lsMock;
+  (globalThis as any).document = docMock;
+  (globalThis as any).window = winMock;
+  (globalThis as any).CustomEvent = class MockCustomEvent {
+    type: string;
+    detail: unknown;
+    constructor(type: string, init?: { detail?: unknown }) {
+      this.type = type;
+      this.detail = init?.detail;
+    }
+  };
+
+  try {
+    // Unauthorized 401: must fail and leave localStorage, document.title & events untouched
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: false, error: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+
+    const fail401 = await saveSiteSettings({ ...DEFAULT_SITE_SETTINGS, siteName: 'HackName' });
+    assert(
+      !fail401.ok &&
+        fail401.status === 401 &&
+        store.size === 0 &&
+        docMock.title === 'Initial Title' &&
+        dispatchedEvents.length === 0,
+      'saveSiteSettings on 401 returns ok=false without updating localStorage, document.title, or dispatching event'
+    );
+
+    // Server 200 + GET read-back verification match
+    let sentBranding: any = null;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}'));
+        sentBranding = body.value;
+        return new Response(JSON.stringify({ ok: true, setting: { key: 'site_branding', value: sentBranding } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, settings: { site_branding: sentBranding } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const okSave = await saveSiteSettings({
+      ...DEFAULT_SITE_SETTINGS,
+      siteName: 'NovaQuant',
+      siteTagline: 'Precision Desk',
+    });
+    const storedAfterSave = JSON.parse(store.get('pulsetrade_site_settings') || '{}');
+    assert(
+      okSave.ok &&
+        okSave.verified === true &&
+        !okSave.mismatch &&
+        /^\d{2}:\d{2}$/.test(okSave.publishedAt || '') &&
+        storedAfterSave.siteName === 'NovaQuant' &&
+        docMock.title === 'NovaQuant – Precision Desk' &&
+        dispatchedEvents.length === 1 &&
+        dispatchedEvents[0].type === 'pulsetrade_settings_changed',
+      'saveSiteSettings on 200 verifies GET read-back, updates localStorage, document.title, and broadcasts event'
+    );
+
+    // Server 200 + GET read-back mismatch detected cleanly
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          settings: { site_branding: { ...DEFAULT_SITE_SETTINGS, siteName: 'StaleServerName' } },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const mismatchSave = await saveSiteSettings({ ...DEFAULT_SITE_SETTINGS, siteName: 'NovaQuant' });
+    assert(
+      mismatchSave.ok &&
+        mismatchSave.verified === false &&
+        Boolean(mismatchSave.mismatch?.includes('siteName')),
+      `saveSiteSettings detects read-after-write mismatch (${mismatchSave.mismatch})`
+    );
+
+    // 19c. brand.ts snapshot, token helper, and shared single-fetch promise
+    const snap = getBrandSnapshot();
+    assert(
+      snap.siteName === 'NovaQuant' &&
+        typeof snap.tagline === 'string' &&
+        typeof snap.supportEmail === 'string' &&
+        typeof snap.supportTelegram === 'string' &&
+        applyBrandTokens('Powered by {{BRAND_NAME}}', snap.siteName) === 'Powered by NovaQuant',
+      'getBrandSnapshot() returns { siteName, tagline, supportEmail, supportTelegram } and applyBrandTokens formats strings'
+    );
+
+    resetBrandLoaderForTests();
+    let apiFetchCalls = 0;
+    globalThis.fetch = (async (url: unknown) => {
+      if (String(url).includes('/api/admin/settings')) {
+        apiFetchCalls++;
+        return new Response(
+          JSON.stringify({ ok: true, settings: { site_branding: { ...DEFAULT_SITE_SETTINGS, siteName: 'SharedBrand' } } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({ message: 'Not queried in test' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const p1 = loadBrandOnce();
+    const p2 = loadBrandOnce();
+    const [b1, b2] = await Promise.all([p1, p2]);
+    assert(
+      p1 === p2 && apiFetchCalls === 1 && b1.siteName === 'SharedBrand' && b2.siteName === 'SharedBrand',
+      `loadBrandOnce() deduplicates concurrent remote fetches (sharedPromise=${p1 === p2}, apiCalls=${apiFetchCalls})`
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+    (globalThis as any).localStorage = origLocalStorage;
+    (globalThis as any).sessionStorage = origSessionStorage;
+    (globalThis as any).document = origDocument;
+    (globalThis as any).window = origWindow;
+    (globalThis as any).CustomEvent = origCustomEvent;
+    resetBrandLoaderForTests();
+  }
+
+  // 19d. Literal "Tickvere" must NOT appear anywhere in src/components/* or src/data/*
+  const rootDir = resolve(process.cwd());
+  const compAndDataFiles = [
+    ...listSourceFilesRecursive(resolve(rootDir, 'src/components')),
+    ...listSourceFilesRecursive(resolve(rootDir, 'src/data')),
+  ];
+  const literalTarget = ['Tick', 'vere'].join('').toLowerCase();
+  const violatingFiles = compAndDataFiles
+    .filter((abs) => readFileSync(abs, 'utf8').toLowerCase().includes(literalTarget))
+    .map((abs) => abs.replace(`${rootDir}/`, ''));
+  assert(
+    violatingFiles.length === 0,
+    `Zero hardcoded brand literals exist in src/components/* or src/data/* (found: ${violatingFiles.join(', ') || 'none'})`
+  );
+
+  // 19e. AdminCenter.tsx UX requirements verification
+  const adminSrc = readFileSync(resolve(rootDir, 'src/components/AdminCenter.tsx'), 'utf8');
+  const requiredAdminPhrases = [
+    'You are not signed in as an admin. Sign in again.',
+    'Published at',
+    'NOT saved:',
+    'Site name (short; shown in the header, legal pages and footer)',
+    'Tagline (shown after the name in the browser tab)',
+    'Browser tab:',
+    'Link previews on WhatsApp, Telegram and Google come from index.html and change only when the code is updated and redeployed.',
+    'Where this name appears',
+    'browser tab',
+    'legal pages',
+    'install prompt',
+    'error page',
+  ];
+  const missingAdminPhrases = requiredAdminPhrases.filter((phrase) => !adminSrc.includes(phrase));
+  assert(
+    missingAdminPhrases.length === 0,
+    `AdminCenter.tsx contains all Stage 4H-A labels, errors, status text, note & checklist (missing: ${missingAdminPhrases.join(', ') || 'none'})`
+  );
+}
+
+// ============================================================================
+// 20. STAGE 4H-B: SIMPLIFIED RESULT VIEWS & MARKET CONTEXT PROGRESSIVE DISCLOSURE
+// ============================================================================
+function runStage4HSimplifiedUiTests() {
+  console.log('\n20. Stage 4H-B Simplified Result Views & Market Context Disclosure:');
+
+  // 20a. Binary actionable CALL view
+  const longReason =
+    'This is an intentionally very long explanatory reason that exceeds ninety characters and must be trimmed cleanly at a word boundary.';
+  const binCallView = buildResultView(
+    {
+      engine: 'binary_v1',
+      profile: 'BINARY_QUICK',
+      platform: 'expert_option',
+      asset: 'EUR/USD',
+      symbol: 'frxEURUSD',
+      direction: 'CALL',
+      expiry: '3m',
+      expirySeconds: 180,
+      strength: 'High',
+      rawScore: 86,
+      reasons: [longReason, 'EMA9 > EMA21 on M5', 'M15 aligned bullish'],
+      payoutPct: 85,
+      breakEvenWinRatePct: 54.05,
+      breakEvenMessage: 'Break-even 54.05%',
+      enterWithinSeconds: 6,
+      createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+      validUntil: new Date(PRIME_FX_NOW_MS + 6000).toISOString(),
+      generatedAt: PRIME_FX_NOW_MS,
+      entryPrice: 1.085,
+      feedSource: 'wss://api.derivws.com',
+      inputsSnapshot: {},
+    },
+    'BINARY_QUICK',
+    { binaryBalance: 200, binaryRiskPct: 2, nowMs: PRIME_FX_NOW_MS }
+  );
+
+  assert(
+    binCallView !== null &&
+      binCallView.kind === 'BINARY' &&
+      binCallView.verdict.badge === 'CALL ▲' &&
+      binCallView.verdict.plainSentence.includes('rise over the next 3 minutes'),
+    'Binary CALL buildResultView produces CALL ▲ verdict and plain sentence'
+  );
+  if (binCallView && binCallView.kind === 'BINARY') {
+    assert(
+      binCallView.keyFacts.expiryLabel === '3 MIN' &&
+        binCallView.keyFacts.enterWithinSeconds === 6 &&
+        binCallView.keyFacts.suggestedStakeUsd === 4 &&
+        binCallView.whyBullets.length === 3 &&
+        binCallView.whyBullets.every((b) => b.length <= 90) &&
+        binCallView.strengthChip.label.includes('Setup strength') &&
+        binCallView.strengthChip.strength === 'High' &&
+        binCallView.breakEvenLine === 'Break-even win rate at 85% payout: 54.05%' &&
+        binCallView.moreDetails.defaultOpen === false &&
+        !('orderTicket' in binCallView) &&
+        !('stopLoss' in binCallView) &&
+        !('lotSize' in binCallView),
+      'Binary CALL result has 3 key facts, 3 <=90-char bullets, 1 strength chip, break-even line, collapsed details, and ZERO MT5 fields'
+    );
+  }
+
+  // 20b. MT5 actionable BUY view
+  const mt5BuyView = buildResultView(
+    {
+      engine: 'mt5_v1',
+      profile: 'MT5',
+      platform: 'mt5',
+      asset: 'EUR/USD',
+      symbol: 'frxEURUSD',
+      direction: 'BUY',
+      orderKind: 'MARKET',
+      entryPrice: 1.085,
+      entryZone: null,
+      stopLoss: 1.083,
+      stopLossPips: 20,
+      takeProfit1: 1.088,
+      takeProfit1Pips: 30,
+      takeProfit2: 1.09,
+      takeProfit2Pips: 50,
+      lotSize: 0.5,
+      riskMoney: 100,
+      accountCurrency: 'USD',
+      rewardRiskTp1: 1.5,
+      rewardRiskTp2: 2.5,
+      rewardRiskRatio: '1:1.50',
+      validityCandles: 3,
+      validityMinutes: 15,
+      validityWindowDesc: '15 min',
+      validUntil: new Date(PRIME_FX_NOW_MS + 15 * 60_000).toISOString(),
+      invalidationLevel: 1.0825,
+      invalidationDriftPrice: 0.002,
+      invalidationRule: 'Price closes below 1.08250',
+      sessionNote: 'London/NY overlap active.',
+      sessionQuality: 'PRIME',
+      tradeManagementNote: 'Move SL to break-even at 1R; partial at TP1.',
+      copyOrderText: 'EURUSD BUY 0.50 lots @ 1.08500 SL 1.08300 TP1 1.08800',
+      strength: 'Medium',
+      rawScore: 80,
+      reasons: ['Clean H1 higher low pullback', 'R:R to TP1 is 1:1.50', 'Price holds above H1 support'],
+      structureTimeframe: 'H1',
+      timeframe: 'H1',
+      createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+      generatedAt: PRIME_FX_NOW_MS,
+      feedSource: 'wss://api.derivws.com',
+      inputsSnapshot: { d1Bias: 'BULLISH', h4Bias: 'BULLISH' },
+    },
+    'MT5',
+    { nowMs: PRIME_FX_NOW_MS, decimals: 5, distanceUnit: 'pips' }
+  );
+
+  assert(
+    mt5BuyView !== null &&
+      mt5BuyView.kind === 'MT5' &&
+      mt5BuyView.verdict.badge === 'BUY (MARKET)' &&
+      mt5BuyView.verdict.plainSentence.includes('BUY setup on the H1 chart'),
+    'MT5 BUY buildResultView produces BUY verdict and chart sentence'
+  );
+  if (mt5BuyView && mt5BuyView.kind === 'MT5') {
+    assert(
+      mt5BuyView.orderTicket.entryText === '1.08500' &&
+        mt5BuyView.orderTicket.stopLossPriceText === '1.08300' &&
+        mt5BuyView.orderTicket.tp1PriceText === '1.08800' &&
+        mt5BuyView.orderTicket.tp2PriceText === '1.09000' &&
+        mt5BuyView.orderTicket.lotSizeText === '0.5 lots' &&
+        mt5BuyView.orderTicket.riskMoneyText === 'USD 100.00' &&
+        mt5BuyView.orderTicket.rewardRiskText === '1:1.50' &&
+        mt5BuyView.orderTicket.primaryButtonLabel === 'Copy order' &&
+        mt5BuyView.validityLine.includes('Valid for about 15 min, or until price crosses 1.08250') &&
+        mt5BuyView.whyBullets.length === 3 &&
+        mt5BuyView.whyBullets.some((b) => /\b(D1|H4|bias|higher-timeframe)\b/i.test(b)) &&
+        mt5BuyView.moreDetails.defaultOpen === false &&
+        mt5BuyView.moreDetails.needsAtLeastWinRateLine === 'Needs at least 40.0% winning trades to break even at this reward:risk' &&
+        !('keyFacts' in mt5BuyView) &&
+        !('breakEvenLine' in mt5BuyView),
+      'MT5 BUY result renders compact order ticket, Copy order CTA, validity line, HTF bias bullet, collapsed details with R:R breakeven, and zero binary fields'
+    );
+  }
+
+  // 20c. WAIT returns ONLY verdict, reason, and next_check in BOTH Binary and MT5 profiles
+  const waitBinary = buildResultView(
+    {
+      asset: 'EUR/USD',
+      timeframe: '5m',
+      expiry: '5m',
+      direction: 'WAIT',
+      strength: 'Medium',
+      trend: 'Neutral',
+      velocity: 'Live',
+      generatedAt: PRIME_FX_NOW_MS,
+      whyNotTrade: 'Choppy consolidation between PDH and PDL.',
+    },
+    'BINARY_QUICK',
+    { nowMs: Date.UTC(2026, 2, 18, 12, 1, 0) }
+  );
+  const waitMt5 = buildResultView(
+    {
+      asset: 'EUR/USD',
+      timeframe: 'H1',
+      direction: 'WAIT',
+      strength: 'High',
+      trend: 'Neutral',
+      velocity: 'Candle Structure',
+      generatedAt: PRIME_FX_NOW_MS,
+      whyNotTrade: 'Stop would be too wide.',
+    },
+    'MT5',
+    { nowMs: Date.UTC(2026, 2, 18, 12, 48, 0) }
+  );
+
+  assert(
+    waitBinary?.kind === 'WAIT' &&
+      waitBinary.sections.length === 3 &&
+      waitBinary.sections[0] === 'verdict' &&
+      waitBinary.sections[1] === 'reason' &&
+      waitBinary.sections[2] === 'next_check' &&
+      waitBinary.strengthChip === null &&
+      waitBinary.moreDetails === null &&
+      waitBinary.checkAgainText === 'Check again in about 4 minutes' &&
+      waitMt5?.kind === 'WAIT' &&
+      waitMt5.sections.length === 3 &&
+      waitMt5.strengthChip === null &&
+      waitMt5.moreDetails === null &&
+      waitMt5.checkAgainText === 'Check again in about 12 minutes' &&
+      computeNextCandleCloseMinutes('1m', Date.UTC(2026, 2, 18, 12, 0, 30)) === 1,
+    'WAIT returns strictly verdict, reason, and next_check minutes with zero strength chip or accordion'
+  );
+
+  // 20d. Market Context 3-line summary, 5 nearest levels, top 3 active & quiet hours
+  const sampleD1 = makeCandles({
+    count: 46,
+    startPrice: 1.072,
+    step: 0.0003,
+    stepSec: 86400,
+    endEpochSec: PRIME_FX_NOW_SEC,
+    spreadPips: 50,
+    pipSize: 0.0001,
+  });
+  const sampleH4 = makeCandles({
+    count: 40,
+    startPrice: 1.08,
+    step: 0.0002,
+    stepSec: 14400,
+    endEpochSec: PRIME_FX_NOW_SEC,
+    spreadPips: 25,
+    pipSize: 0.0001,
+  });
+  const sampleH1 = makeCandles({
+    count: 1400,
+    startPrice: 1.083,
+    step: 0.00001,
+    stepSec: 3600,
+    endEpochSec: PRIME_FX_NOW_SEC,
+    spreadPips: 15,
+    pipSize: 0.0001,
+  });
+  const sampleM15 = makeCandles({
+    count: 60,
+    startPrice: 1.086,
+    step: 0.00005,
+    stepSec: 900,
+    endEpochSec: PRIME_FX_NOW_SEC,
+    spreadPips: 8,
+    pipSize: 0.0001,
+  });
+
+  const ctx = computeMarketContext({
+    asset: { name: 'EUR/USD', symbol: 'frxEURUSD', type: 'FOREX', pipSize: 0.00001, decimals: 5 },
+    currentPrice: 1.0875,
+    m15Candles: sampleM15,
+    h1Candles: sampleH1,
+    h4Candles: sampleH4,
+    d1Candles: sampleD1,
+  });
+  const summaryLines = buildMarketContextSummaryLines(ctx);
+  const top5Levels = getSortedNearestLevels(ctx, 5);
+  const { mostActiveHours, quietestHours } = getTopAndQuietSessionHours(ctx);
+
+  assert(
+    summaryLines.trendLine.includes('M15') &&
+      summaryLines.trendLine.includes('H1') &&
+      summaryLines.trendLine.includes('H4') &&
+      summaryLines.trendLine.includes('D1') &&
+      summaryLines.volatilityLine.includes('n=30') &&
+      summaryLines.levelsLine.includes('Nearest') &&
+      top5Levels.length === 5 &&
+      mostActiveHours.length === 3 &&
+      quietestHours.length === 3 &&
+      mostActiveHours.every((h) => h.sampleCount > 0) &&
+      quietestHours.every((h) => h.sampleCount > 0),
+    `MarketContext 3-line summary, top-5 nearest levels, and top-3 active/quiet hours include sample counts (vol="${summaryLines.volatilityLine}", lvl="${summaryLines.levelsLine}")`
+  );
+
+  // 20e. Component UI verification (SignalEngine.tsx & MarketContextPanel.tsx)
+  const rootDir = resolve(process.cwd());
+  const signalUi = readFileSync(resolve(rootDir, 'src/components/SignalEngine.tsx'), 'utf8');
+  const contextPanelUi = readFileSync(resolve(rootDir, 'src/components/MarketContextPanel.tsx'), 'utf8');
+
+  // Count how many times literal "Setup strength" appears in SignalEngine.tsx UI
+  // It is built purely via resultView.strengthChip.label (in resultView.ts), NEVER duplicated in top HUD!
+  const topHudEnd = signalUi.indexOf('2. STEP 1');
+  const topHudSection = topHudEnd > 0 ? signalUi.slice(0, topHudEnd) : '';
+
+  assert(
+    signalUi.includes('Quick Trade — pick how long') &&
+      signalUi.includes('Trade Plan — pick the chart and your risk') &&
+      signalUi.includes('More details') &&
+      signalUi.includes('useState<boolean>(false)') &&
+      !topHudSection.includes('Setup strength') &&
+      signalUi.includes("resultView.kind === 'WAIT'") &&
+      signalUi.includes('<MarketContextPanel context={marketContext} isLoading={isLoadingContext} />') &&
+      !signalUi.includes('1%–2% SUGGESTED STAKE SIZE:'),
+    'SignalEngine.tsx renders distinct Step 2 headings, removes top-HUD strength duplicate, keeps WAIT minimal, and nests MarketContextPanel inside More details'
+  );
+
+  assert(
+    contextPanelUi.includes('See full context') &&
+      contextPanelUi.includes('Show all levels') &&
+      contextPanelUi.includes('Most active hours') &&
+      contextPanelUi.includes('Quietest hours') &&
+      contextPanelUi.includes('Show all hours') &&
+      contextPanelUi.includes('const [isFullOpen, setIsFullOpen] = useState(false)'),
+    'MarketContextPanel.tsx defaults collapsed with See full context, 5 levels + Show all levels, and active/quiet top-3 + Show all hours'
+  );
+}
+
 runSignalLogValidationTests()
   .then(() => runHistoryRefreshGuards())
+  .then(() => runStage4GReferralAndRadarTests())
+  .then(() => runStage4HBrandingTests())
   .then(() => {
     runMt5Tests();
     runStage4EHorizonTests();
     runStage4FPipBrandWordingTests();
+    runStage4HSimplifiedUiTests();
     console.log('\n------------------------------------------------------------');
-    console.log(`Combined Binary + MT5 + Stage 4A + Stage 4D + Stage 4E + Stage 4F Results: ${passed}/${total} tests passed`);
+    console.log(`Combined Binary + MT5 + Stage 4A-4H Results: ${passed}/${total} tests passed`);
     console.log('------------------------------------------------------------\n');
 
-    if (passed !== total) {
-      process.exit(1);
-    }
+    process.exit(passed === total ? 0 : 1);
   });

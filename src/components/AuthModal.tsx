@@ -12,7 +12,8 @@ import {
   sendPasswordResetEmail,
   updateUserPassword,
 } from '../utils/supabaseClient.ts';
-import { getBrokersSettings } from '../utils/siteConfigManager.ts';
+import { DEFAULT_BROKERS_SETTINGS, getBrokersSettings } from '../utils/siteConfigManager.ts';
+import { DERIV_SESSION_TOKEN_KEY } from '../services/derivFeed.ts';
 
 interface AuthModalProps {
   mode: AuthModalMode;
@@ -230,9 +231,10 @@ export function AuthModal({
     try {
       let extraCredits = 0;
       const cleanRef = referralCode.trim().toUpperCase();
-      const targetRef = (brokersSettings.referralBonus.referralCode || 'TICKVERE').toUpperCase();
+      const defaultRef = DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode;
+      const targetRef = (brokersSettings.referralBonus.referralCode || defaultRef).toUpperCase();
 
-      if (brokersSettings.referralBonus.enabled && (cleanRef === targetRef || cleanRef === 'TICKVERE' || cleanRef === 'DERIV')) {
+      if (brokersSettings.referralBonus.enabled && (cleanRef === targetRef || cleanRef === defaultRef || cleanRef === 'DERIV')) {
         extraCredits = brokersSettings.referralBonus.extraCredits || 5;
       }
 
@@ -330,7 +332,7 @@ export function AuthModal({
     }
 
     try {
-      sessionStorage.removeItem('tickvere_deriv_token');
+      sessionStorage.removeItem(DERIV_SESSION_TOKEN_KEY);
     } catch {
       // Silently handled
     }
@@ -597,7 +599,7 @@ export function AuthModal({
                   </div>
                   <p className="text-[11px] text-slate-300 leading-snug font-sans">
                     {brokersSettings.referralBonus.message ||
-                      `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || 'TICKVERE'} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
+                      `Sign up using the partner referral link or enter code ${brokersSettings.referralBonus.referralCode || DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode} to receive +${brokersSettings.referralBonus.extraCredits} bonus credits!`}
                   </p>
                 </div>
               )}
@@ -687,7 +689,7 @@ export function AuthModal({
                   type="text"
                   value={referralCode}
                   onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
-                  placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || 'TICKVERE'} (or leave blank)`}
+                  placeholder={`e.g. ${brokersSettings.referralBonus.referralCode || DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode} (or leave blank)`}
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-amber-300 font-mono focus:border-amber-500 focus:outline-none uppercase"
                 />
               </div>

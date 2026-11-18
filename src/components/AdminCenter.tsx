@@ -13,6 +13,9 @@ import type {
   BrokerPlatformItem,
 } from '../types.ts';
 import {
+  DEFAULT_SITE_SETTINGS,
+  DEFAULT_BROKERS_SETTINGS,
+  detectLegacyBrandWarnings,
   getSiteSettings,
   saveSiteSettings,
   fetchRemoteSiteSettings,
@@ -40,6 +43,7 @@ import {
   getBrokerPlatforms,
   fetchRemoteBrokerPlatforms,
   saveBrokerPlatforms,
+  resolveBrokerDestinationUrl,
   fetchDirectWalletOrders,
   approveDirectWalletOrder,
   rejectDirectWalletOrder,
@@ -535,7 +539,10 @@ export function AdminCenter({
         if (vipPkg && vipPkg.price_usd > 0) {
           const updatedSettings = { ...siteSettings, vipPriceUsd: vipPkg.price_usd };
           setSiteSettings(updatedSettings);
-          saveSiteSettings(updatedSettings);
+          const syncRes = await saveSiteSettings(updatedSettings);
+          if (!syncRes.ok) {
+            showToast(syncRes.error || 'VIP price updated, but branding sync to server failed.', 'error');
+          }
         }
       } else {
         showToast(res.message || 'Failed to save packages to server.', 'error');
@@ -600,19 +607,44 @@ export function AdminCenter({
   // TAB 4: BRANDING & PLATFORM CONFIG STATE & LOGIC
   // =========================================================================
   const [siteSettings, setSiteSettings] = useState<SiteSettings>(getSiteSettings());
-  const [settingsSaved, setSettingsSaved] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState<{
+    type: 'published' | 'warning' | 'error';
+    text: string;
+  } | null>(null);
 
-  const handleSaveBranding = async (e: React.FormEvent) => {
+  const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSettingsSaving(true);
-    setSettingsSaved(false);
     try {
-      const ok = await saveSiteSettings(siteSettings);
-      if (ok) {
-        setSettingsSaved(true);
-        showToast('Platform branding saved and synced across active trader sessions!', 'success');
-        setTimeout(() => setSettingsSaved(false), 3000);
+      const res = await saveSiteSettings(siteSettings);
+      if (!res.ok) {
+        const reason =
+          res.status === 401 || res.status === 403
+            ? 'You are not signed in as an admin. Sign in again.'
+            : res.error || 'Failed to save branding settings.';
+        showToast(reason, 'error');
+        setSettingsStatus({ type: 'error', text: `NOT saved: ${reason}` });
+        return;
+      }
+
+      if (res.settings) {
+        setSiteSettings(res.settings);
+      }
+
+      const publishedTime = res.publishedAt || new Date().toTimeString().slice(0, 5);
+      if (res.mismatch) {
+        showToast(`Saved, but verification read reported a mismatch: ${res.mismatch}`, 'error');
+        setSettingsStatus({
+          type: 'warning',
+          text: `Published at ${publishedTime} (verification mismatch: ${res.mismatch})`,
+        });
+      } else {
+        showToast(`Published at ${publishedTime} and synced across active sessions.`, 'success');
+        setSettingsStatus({
+          type: 'published',
+          text: `Published at ${publishedTime}`,
+        });
       }
     } finally {
       setSettingsSaving(false);
@@ -2255,11 +2287,11 @@ export function AdminCenter({
                         },
                       })
                     }
-                    placeholder="https://track.deriv.com/_..."
+                    placeholder="https://deriv.com"
                     className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 px-3 text-white focus:border-emerald-500 focus:outline-none font-mono"
                   />
                   <p className="text-[10px] text-slate-500 font-sans">
-                    Must start with https://. Traders clicking the Deriv button will be routed here.
+                    Paste your own affiliate link. If left empty, users go to the broker without tracking. Must start with https:// when set.
                   </p>
                 </div>
 
@@ -2359,11 +2391,11 @@ export function AdminCenter({
                         },
                       })
                     }
-                    placeholder="https://expertoption.com/?ref=..."
+                    placeholder="https://expertoption.com"
                     className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 px-3 text-white focus:border-emerald-500 focus:outline-none font-mono"
                   />
                   <p className="text-[10px] text-slate-500 font-sans">
-                    Must start with https://. Traders clicking ExpertOption will be routed here.
+                    Paste your own affiliate link. If left empty, users go to the broker without tracking. Must start with https:// when set.
                   </p>
                 </div>
 
@@ -2451,18 +2483,18 @@ export function AdminCenter({
                   </label>
                   <input
                     type="text"
-                    value={brokersSettings.referralBonus.referralCode || 'TICKVERE'}
+                    value={brokersSettings.referralBonus.referralCode || DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode}
                     onChange={(e) =>
                       setBrokersSettings({
                         ...brokersSettings,
                         referralBonus: { ...brokersSettings.referralBonus, referralCode: e.target.value.toUpperCase() },
                       })
                     }
-                    placeholder="TICKVERE"
+                    placeholder={DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode}
                     className="w-full bg-slate-900 border border-slate-800 rounded-xl py-2 px-3 text-white font-mono focus:border-amber-500 focus:outline-none"
                   />
                   <p className="text-[10px] text-slate-500 font-sans">
-                    Traders who register with this code or visit with <code className="text-amber-300">?ref={brokersSettings.referralBonus.referralCode || 'TICKVERE'}</code> receive the bonus.
+                    Traders who register with this code or visit with <code className="text-amber-300">?ref={brokersSettings.referralBonus.referralCode || DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode}</code> receive the bonus.
                   </p>
                 </div>
 
@@ -2498,7 +2530,7 @@ export function AdminCenter({
                       <span>🎁 Referral Bonus Active:</span>
                       <span className="text-white">+{brokersSettings.referralBonus.extraCredits} Free Credits on signup with code</span>
                       <span className="px-1.5 py-0.2 bg-amber-500/20 rounded border border-amber-500/30 text-amber-300 font-mono">
-                        {brokersSettings.referralBonus.referralCode || 'TICKVERE'}
+                        {brokersSettings.referralBonus.referralCode || DEFAULT_BROKERS_SETTINGS.referralBonus.referralCode}
                       </span>
                     </div>
                   )}
@@ -2517,7 +2549,7 @@ export function AdminCenter({
                 <div className="flex flex-wrap items-center gap-2">
                   {brokersSettings.brokers.deriv.enabled && (
                     <a
-                      href={brokersSettings.brokers.deriv.referralUrl || '#'}
+                      href={resolveBrokerDestinationUrl('deriv', brokersSettings.brokers.deriv.referralUrl)}
                       target={brokersSettings.brokers.deriv.openInNewTab ? '_blank' : '_self'}
                       rel="noopener noreferrer"
                       className="py-1.5 px-3.5 bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 text-white font-black rounded-xl transition text-xs shadow-md shadow-rose-500/20 flex items-center gap-1.5"
@@ -2530,7 +2562,7 @@ export function AdminCenter({
 
                   {brokersSettings.brokers.expertOption.enabled && (
                     <a
-                      href={brokersSettings.brokers.expertOption.referralUrl || '#'}
+                      href={resolveBrokerDestinationUrl('expert_option', brokersSettings.brokers.expertOption.referralUrl)}
                       target={brokersSettings.brokers.expertOption.openInNewTab ? '_blank' : '_self'}
                       rel="noopener noreferrer"
                       className="py-1.5 px-3.5 bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 text-white font-black rounded-xl transition text-xs shadow-md shadow-blue-500/20 flex items-center gap-1.5"
@@ -2552,7 +2584,7 @@ export function AdminCenter({
                     <span>📊 Supported Broker Platforms &amp; Strategy Profiles</span>
                   </h4>
                   <p className="text-[10px] text-slate-400 font-sans">
-                    Configure which broker platforms appear in the unified Cockpit selector. Selecting a binary broker sets the BINARY_QUICK profile (expiry minutes + CALL/PUT), while MetaTrader 5 activates the MT5 profile (Entry, SL, TP1, TP2).
+                    Configure which broker platforms appear in the unified Cockpit selector. Paste your own affiliate link. If left empty, users go to the broker without tracking.
                   </p>
                 </div>
                 <button
@@ -2591,7 +2623,7 @@ export function AdminCenter({
                     <div className="flex flex-wrap items-center gap-3">
                       <input
                         type="url"
-                        placeholder="https://... referral URL"
+                        placeholder="Paste affiliate link (optional)"
                         value={bp.referralUrl || ''}
                         onChange={(e) => {
                           const updated = [...brokerPlatforms];
@@ -2645,7 +2677,7 @@ export function AdminCenter({
       {/* TAB 5: BRANDING & PLATFORM CONFIG                                         */}
       {/* ========================================================================= */}
       {activeTab === 'branding' && (
-        <form onSubmit={handleSaveBranding} className="space-y-4 font-mono text-xs">
+        <form onSubmit={handleSaveSettings} className="space-y-4 font-mono text-xs">
           <div className="bg-slate-950/40 border border-slate-800 rounded-xl p-4 space-y-1">
             <h4 className="text-sm font-black text-white uppercase tracking-wider flex items-center gap-2">
               <span>🎨</span>
@@ -2797,7 +2829,7 @@ export function AdminCenter({
                       )}
                     </div>
                     <span className="text-[10px] text-slate-300 font-sans max-w-[90px] truncate">
-                      {siteSettings.siteName || 'Tickvere'}
+                      {siteSettings.siteName || DEFAULT_SITE_SETTINGS.siteName}
                     </span>
                   </div>
                 </div>
@@ -2809,7 +2841,7 @@ export function AdminCenter({
 
             <div className="space-y-1">
               <label className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
-                Platform Name
+                Site name (short; shown in the header, legal pages and footer)
               </label>
               <input
                 type="text"
@@ -2821,7 +2853,7 @@ export function AdminCenter({
 
             <div className="space-y-1">
               <label className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
-                Tagline / Subtitle
+                Tagline (shown after the name in the browser tab)
               </label>
               <input
                 type="text"
@@ -2830,6 +2862,32 @@ export function AdminCenter({
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-white focus:border-amber-500 focus:outline-none"
               />
             </div>
+
+            {/* Live Browser Tab Preview & Social Link Preview Note */}
+            <div className="sm:col-span-2 bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2">
+              <div className="text-xs text-emerald-300 font-bold">
+                Browser tab:{' '}
+                <span className="text-white">
+                  {(siteSettings.siteName || '').trim() || DEFAULT_SITE_SETTINGS.siteName} &ndash;{' '}
+                  {(siteSettings.siteTagline || '').trim() || DEFAULT_SITE_SETTINGS.siteTagline}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 font-sans">
+                Link previews on WhatsApp, Telegram and Google come from index.html and change only when the code is updated and redeployed.
+              </p>
+            </div>
+
+            {/* Non-blocking Legacy Word Warnings */}
+            {detectLegacyBrandWarnings(siteSettings).length > 0 && (
+              <div className="sm:col-span-2 bg-amber-950/30 border border-amber-500/40 rounded-xl p-3 space-y-1 text-amber-200 font-sans text-[11px]">
+                <div className="font-mono font-bold text-amber-300 uppercase text-[10px]">
+                  ⚠ Branding Review Warning (non-blocking)
+                </div>
+                {detectLegacyBrandWarnings(siteSettings).map((warning, idx) => (
+                  <div key={idx}>• {warning}</div>
+                ))}
+              </div>
+            )}
 
             <div className="space-y-1">
               <label className="text-[10px] text-slate-400 uppercase tracking-wider block font-bold">
@@ -2852,7 +2910,7 @@ export function AdminCenter({
                 type="email"
                 value={siteSettings.supportEmail || ''}
                 onChange={(e) => setSiteSettings({ ...siteSettings, supportEmail: e.target.value })}
-                placeholder="support@tickvere.com"
+                placeholder={DEFAULT_SITE_SETTINGS.supportEmail}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-white focus:border-amber-500 focus:outline-none"
               />
             </div>
@@ -2911,15 +2969,47 @@ export function AdminCenter({
             </div>
           </div>
 
-          <div className="flex items-center justify-between pt-3 border-t border-slate-800">
-            <button
-              type="submit"
-              disabled={settingsSaving}
-              className="py-2.5 px-6 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs uppercase rounded-xl transition shadow-lg shadow-amber-500/20 disabled:opacity-50"
-            >
-              {settingsSaving ? 'Saving...' : 'Save & Broadcast Branding'}
-            </button>
-            {settingsSaved && <span className="text-xs text-emerald-400 font-bold">✓ Settings Saved &amp; Applied!</span>}
+          {/* Where this name appears checklist */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 space-y-2">
+            <div className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">
+              Where this name appears
+            </div>
+            <div className="flex flex-wrap gap-2 text-[11px] font-sans text-slate-300">
+              {['browser tab', 'header', 'footer', 'legal pages', 'About', 'install prompt', 'error page'].map((loc) => (
+                <span
+                  key={loc}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-emerald-300"
+                >
+                  <span className="font-bold">✓</span>
+                  <span>{loc}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2 pt-3 border-t border-slate-800">
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="submit"
+                disabled={settingsSaving}
+                className="py-2.5 px-6 bg-gradient-to-r from-amber-500 to-amber-400 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs uppercase rounded-xl transition shadow-lg shadow-amber-500/20 disabled:opacity-50"
+              >
+                {settingsSaving ? 'Saving...' : 'Save & Broadcast Branding'}
+              </button>
+            </div>
+            {settingsStatus && (
+              <div
+                className={`text-xs font-bold px-3 py-2 rounded-xl border ${
+                  settingsStatus.type === 'published'
+                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                    : settingsStatus.type === 'warning'
+                    ? 'bg-amber-950/30 border-amber-500/40 text-amber-300'
+                    : 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                {settingsStatus.text}
+              </div>
+            )}
           </div>
         </form>
       )}

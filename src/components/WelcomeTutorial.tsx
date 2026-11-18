@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useBrand, applyBrandTokens } from '../utils/brand.ts';
 
 interface WelcomeTutorialProps {
   isOpen: boolean;
@@ -24,7 +25,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     icon: '⚡',
     accent: 'emerald',
     description:
-      'Welcome to the Tickvere Execution Cockpit. Our terminal reads live market candles and ticks directly from Deriv WebSocket streams.',
+      'Welcome to the {{BRAND_NAME}} Execution Cockpit. Our terminal reads live market candles and ticks directly from Deriv WebSocket streams.',
     bulletPoints: [
       {
         title: '6-Second Execution Window',
@@ -135,6 +136,7 @@ const TUTORIAL_STEPS: TutorialStep[] = [
 ];
 
 export function WelcomeTutorial({ isOpen, onClose, onExplorePricing }: WelcomeTutorialProps) {
+  const { siteName } = useBrand();
   const [currentStep, setCurrentStep] = useState(0);
 
   if (!isOpen) return null;
@@ -198,7 +200,7 @@ export function WelcomeTutorial({ isOpen, onClose, onExplorePricing }: WelcomeTu
               <span>{step.subtitle}</span>
             </span>
             <p className="text-xs text-slate-300 leading-relaxed font-sans">
-              {step.description}
+              {applyBrandTokens(step.description, siteName)}
             </p>
           </div>
 

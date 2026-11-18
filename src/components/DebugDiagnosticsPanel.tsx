@@ -6,8 +6,10 @@ import {
   type FeedDiagnosticsSnapshot,
 } from '../services/feedSingleton.ts';
 import { subscribeAssetRegistry, getAssetRegistryInfo } from '../services/assetRegistry.ts';
+import { useBrand } from '../utils/brand.ts';
 
 export function DebugDiagnosticsPanel() {
+  const { siteName } = useBrand();
   const [diag, setDiag] = useState<FeedDiagnosticsSnapshot>(() => getFeedDiagnostics());
   const [copied, setCopied] = useState(false);
 
@@ -39,7 +41,7 @@ export function DebugDiagnosticsPanel() {
   const formatPlainReport = (): string => {
     const ageLabel = diag.tickAgeSec !== null ? `${diag.tickAgeSec}s` : 'N/A';
     return [
-      'TICKVERE FEED DIAGNOSTICS',
+      `${siteName.toUpperCase()} FEED DIAGNOSTICS`,
       `Timestamp: ${new Date().toISOString()}`,
       `Endpoint: ${diag.endpoint || 'N/A'}`,
       `Feed Status: ${statusDisplay} (reason: ${diag.reason || 'none'}, issue: ${isFeedProblem ? 'YES' : 'NO'})`,

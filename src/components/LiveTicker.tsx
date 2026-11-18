@@ -11,6 +11,7 @@ import {
   type FeedHealthStatus,
   ACTIVE_APP_ID,
   IS_CUSTOM_APP_ID_CONFIGURED,
+  DERIV_SESSION_TOKEN_KEY,
 } from '../services/derivFeed.ts';
 import { AssetPicker } from './AssetPicker.tsx';
 import { getRegisteredAssets, isSymbolMarketOpen, type DynamicAsset } from '../services/assetRegistry.ts';
@@ -60,7 +61,7 @@ export function LiveTicker({
   const [showAssetPickerModal, setShowAssetPickerModal] = useState<boolean>(false);
   const [derivToken, setDerivToken] = useState<string>(() => {
     try {
-      return sessionStorage.getItem('tickvere_deriv_token') || '';
+      return sessionStorage.getItem(DERIV_SESSION_TOKEN_KEY) || '';
     } catch {
       return '';
     }
@@ -465,9 +466,9 @@ export function LiveTicker({
                         const trimmed = derivToken.trim();
                         try {
                           if (trimmed) {
-                            sessionStorage.setItem('tickvere_deriv_token', trimmed);
+                            sessionStorage.setItem(DERIV_SESSION_TOKEN_KEY, trimmed);
                           } else {
-                            sessionStorage.removeItem('tickvere_deriv_token');
+                            sessionStorage.removeItem(DERIV_SESSION_TOKEN_KEY);
                           }
                           feedServiceRef.current?.authorizeAccount(trimmed);
                           setTokenSavedMsg(trimmed ? 'Token saved to session' : 'Token cleared');
@@ -486,7 +487,7 @@ export function LiveTicker({
                         onClick={() => {
                           setDerivToken('');
                           try {
-                            sessionStorage.removeItem('tickvere_deriv_token');
+                            sessionStorage.removeItem(DERIV_SESSION_TOKEN_KEY);
                           } catch {}
                           feedServiceRef.current?.authorizeAccount('');
                           setTokenSavedMsg('Cleared');

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useBrand } from '../utils/brand.ts';
 
 interface PerformancePageProps {
   onLaunchCockpit: () => void;
@@ -7,6 +8,7 @@ interface PerformancePageProps {
 }
 
 export function PerformancePage({ onLaunchCockpit }: PerformancePageProps) {
+  const { siteName } = useBrand();
   return (
     <div className="max-w-5xl mx-auto space-y-6 font-mono text-xs animate-in fade-in duration-200">
       {/* Header */}
@@ -36,7 +38,7 @@ export function PerformancePage({ onLaunchCockpit }: PerformancePageProps) {
         </div>
 
         <p className="text-slate-400 font-sans text-xs sm:text-sm leading-relaxed max-w-3xl">
-          Tickvere only publishes performance data derived from signals that have been recorded and settled by our
+          {siteName} only publishes performance data derived from signals that have been recorded and settled by our
           system. <strong>WAIT signals are never recorded as wins or losses.</strong>
         </p>
       </div>
@@ -86,7 +88,7 @@ export function PerformancePage({ onLaunchCockpit }: PerformancePageProps) {
         <p className="font-sans leading-relaxed">
           Trading binary options, digital contracts, foreign exchange, and synthetic indices involves high financial risk
           and may not be suitable for all individuals. Rapid price fluctuations can result in the loss of your entire initial
-          stake. Historical win rates and statistical analyses do not guarantee future profitability. Tickvere provides
+          stake. Historical win rates and statistical analyses do not guarantee future profitability. {siteName} provides
           quantitative signals for analytical decision support only. Never trade with money you cannot afford to lose.
         </p>
       </div>

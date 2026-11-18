@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import type { BlogArticle } from '../types.ts';
 import { BLOG_ARTICLES } from '../data/blogArticles.ts';
 import { SafeImage } from './SafeImage.tsx';
+import { useBrand, applyBrandTokens } from '../utils/brand.ts';
 
 interface BlogSectionProps {
   selectedArticle: BlogArticle | null;
@@ -16,6 +17,7 @@ export function BlogSection({
   onGetStarted,
   onLaunchCockpit,
 }: BlogSectionProps) {
+  const { siteName } = useBrand();
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [copiedLink, setCopiedLink] = useState(false);
 
@@ -115,7 +117,7 @@ export function BlogSection({
         <div className="prose prose-invert max-w-none space-y-5 text-sm sm:text-base text-slate-300 leading-relaxed font-sans">
           {selectedArticle.content.map((paragraph, index) => (
             <p key={index} className="leading-relaxed">
-              {paragraph}
+              {applyBrandTokens(paragraph, siteName)}
             </p>
           ))}
         </div>
@@ -136,7 +138,7 @@ export function BlogSection({
         {/* In-Article CTA Banner */}
         <div className="bg-gradient-to-r from-emerald-950/90 via-slate-900 to-slate-900 border border-emerald-500/40 rounded-3xl p-6 sm:p-8 space-y-4 font-mono">
           <div className="space-y-1">
-            <h3 className="text-lg font-black text-white">Apply This Research with Tickvere</h3>
+            <h3 className="text-lg font-black text-white">Apply This Research with {siteName}</h3>
             <p className="text-xs text-slate-400">
               Test these exact latency principles in real-time with 10 free starter signal credits.
             </p>

@@ -5,13 +5,13 @@ export function MarketRadar() {
   const [status, setStatus] = useState<{
     color: string;
     dotColor: string;
-    text: string;
+    sessionTag: string;
     borderColor: string;
     textColor: string;
   }>({
     color: 'bg-emerald-950/80',
     dotColor: 'bg-emerald-400',
-    text: 'OPTIMAL SESSION: Safe to Trade (Peak Volume)',
+    sessionTag: 'Peak hours',
     borderColor: 'border-emerald-500/40',
     textColor: 'text-emerald-300',
   });
@@ -28,7 +28,7 @@ export function MarketRadar() {
         setStatus({
           color: 'bg-slate-900/90',
           dotColor: 'bg-emerald-400 animate-pulse',
-          text: 'OPTIMAL SESSION: Safe to Trade (Peak Volume)',
+          sessionTag: 'Peak hours',
           borderColor: 'border-emerald-500/40',
           textColor: 'text-emerald-300',
         });
@@ -36,7 +36,7 @@ export function MarketRadar() {
         setStatus({
           color: 'bg-slate-900/90',
           dotColor: 'bg-rose-400 animate-pulse',
-          text: 'HIGH RISK: Low Liquidity Session (Caution)',
+          sessionTag: 'Quiet hours',
           borderColor: 'border-rose-500/40',
           textColor: 'text-rose-300',
         });
@@ -44,7 +44,7 @@ export function MarketRadar() {
         setStatus({
           color: 'bg-slate-900/90',
           dotColor: 'bg-amber-400',
-          text: 'NORMAL: Trade with Caution',
+          sessionTag: 'Standard hours',
           borderColor: 'border-amber-500/40',
           textColor: 'text-amber-300',
         });
@@ -59,15 +59,27 @@ export function MarketRadar() {
   return (
     <aside id="floating-market-radar" className="sticky top-2 z-30 flex justify-center px-2 pointer-events-none mb-1 w-full max-w-full">
       <div
-        className={`pointer-events-auto max-w-[calc(100vw-16px)] shadow-2xl backdrop-blur-md px-2.5 sm:px-3.5 py-1 sm:py-1.5 rounded-full border ${status.borderColor} ${status.color} text-xs font-mono font-medium flex items-center justify-between gap-1.5 sm:gap-2 transition-all duration-300`}
+        className={`pointer-events-auto max-w-[calc(100vw-16px)] shadow-2xl backdrop-blur-md px-3 sm:px-4 py-1.5 rounded-2xl border ${status.borderColor} ${status.color} text-xs font-mono font-medium flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-3 transition-all duration-300`}
       >
-        <div className="flex items-center gap-1.5 min-w-0 truncate">
-          <span className={`w-2 h-2 rounded-full shrink-0 ${status.dotColor}`} />
-          <span className={`${status.textColor} font-semibold text-[10px] sm:text-xs truncate`}>{status.text}</span>
+        <div className="flex items-center justify-between gap-2 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0 truncate">
+            <span className={`w-2 h-2 rounded-full shrink-0 ${status.dotColor}`} />
+            <span className={`${status.textColor} font-semibold text-[10px] sm:text-xs truncate`}>
+              Session schedule (UTC clock) · {status.sessionTag}
+            </span>
+          </div>
+          <span className="sm:hidden text-[9px] text-slate-400 bg-slate-800/90 px-1.5 py-0.5 rounded font-bold border border-slate-700/60 shrink-0">
+            {utcTime || '00:00:00 UTC'}
+          </span>
         </div>
-        <span className="text-[9px] sm:text-[10px] text-slate-400 bg-slate-800/90 px-1.5 py-0.5 rounded font-bold border border-slate-700/60 shrink-0">
-          {utcTime || '00:00:00 UTC'}
-        </span>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-[10px] text-slate-400 font-sans truncate">
+            Typical activity by time of day. Not live market data.
+          </span>
+          <span className="hidden sm:inline-block text-[10px] text-slate-400 bg-slate-800/90 px-1.5 py-0.5 rounded font-bold border border-slate-700/60 shrink-0">
+            {utcTime || '00:00:00 UTC'}
+          </span>
+        </div>
       </div>
     </aside>
   );

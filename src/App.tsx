@@ -40,13 +40,15 @@ import { FloatingSupportFAB } from './components/FloatingSupportFAB.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import {
   getSiteSettings,
-  fetchRemoteSiteSettings,
   applyDocumentBranding,
   getBrokerConfig,
   fetchRemoteBrokerConfig,
   getBrokersSettings,
   fetchRemoteBrokersSettings,
+  resolveBrokerDestinationUrl,
 } from './utils/siteConfigManager.ts';
+import { loadBrandOnce } from './utils/brand.ts';
+import { DERIV_SESSION_TOKEN_KEY } from './services/derivFeed.ts';
 import {
   sendSupabasePresence,
   getCurrentSupabaseUser,
@@ -273,7 +275,7 @@ export default function App() {
 
   // Synchronize dynamic site settings & branding
   useEffect(() => {
-    fetchRemoteSiteSettings().then((s) => {
+    loadBrandOnce().then((s) => {
       setSiteSettings(s);
       applyDocumentBranding(s);
     });
@@ -360,7 +362,7 @@ export default function App() {
       setCredits(10);
       setIsVIP(false);
       try {
-        sessionStorage.removeItem('tickvere_deriv_token');
+        sessionStorage.removeItem(DERIV_SESSION_TOKEN_KEY);
       } catch {
         // Silently handled
       }
@@ -510,9 +512,9 @@ export default function App() {
           {/* User Auth & Actions Controls */}
           <div data-tour="credits-control" className="flex items-center gap-2 font-mono shrink-0">
             {/* External Partner Broker CTAs (Desktop only) */}
-            {brokersSettings.brokers.deriv.enabled && brokersSettings.brokers.deriv.referralUrl && (
+            {brokersSettings.brokers.deriv.enabled && (
               <a
-                href={brokersSettings.brokers.deriv.referralUrl}
+                href={resolveBrokerDestinationUrl('deriv', brokersSettings.brokers.deriv.referralUrl)}
                 target={brokersSettings.brokers.deriv.openInNewTab ? '_blank' : '_self'}
                 rel="noopener noreferrer"
                 className="hidden lg:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-rose-500 to-red-600 hover:from-rose-400 hover:to-red-500 text-white font-black text-xs transition shadow-md shadow-rose-500/20"
@@ -524,9 +526,9 @@ export default function App() {
               </a>
             )}
 
-            {brokersSettings.brokers.expertOption.enabled && brokersSettings.brokers.expertOption.referralUrl && (
+            {brokersSettings.brokers.expertOption.enabled && (
               <a
-                href={brokersSettings.brokers.expertOption.referralUrl}
+                href={resolveBrokerDestinationUrl('expert_option', brokersSettings.brokers.expertOption.referralUrl)}
                 target={brokersSettings.brokers.expertOption.openInNewTab ? '_blank' : '_self'}
                 rel="noopener noreferrer"
                 className="hidden lg:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 text-white font-black text-xs transition shadow-md shadow-blue-500/20"
@@ -1166,9 +1168,9 @@ export default function App() {
             </div>
 
             {/* External Partner Broker CTAs (When enabled in Admin) */}
-            {brokersSettings.brokers.deriv.enabled && brokersSettings.brokers.deriv.referralUrl && (
+            {brokersSettings.brokers.deriv.enabled && (
               <a
-                href={brokersSettings.brokers.deriv.referralUrl}
+                href={resolveBrokerDestinationUrl('deriv', brokersSettings.brokers.deriv.referralUrl)}
                 target={brokersSettings.brokers.deriv.openInNewTab ? '_blank' : '_self'}
                 rel="noopener noreferrer"
                 onClick={() => setIsMobileMoreOpen(false)}
@@ -1180,9 +1182,9 @@ export default function App() {
               </a>
             )}
 
-            {brokersSettings.brokers.expertOption.enabled && brokersSettings.brokers.expertOption.referralUrl && (
+            {brokersSettings.brokers.expertOption.enabled && (
               <a
-                href={brokersSettings.brokers.expertOption.referralUrl}
+                href={resolveBrokerDestinationUrl('expert_option', brokersSettings.brokers.expertOption.referralUrl)}
                 target={brokersSettings.brokers.expertOption.openInNewTab ? '_blank' : '_self'}
                 rel="noopener noreferrer"
                 onClick={() => setIsMobileMoreOpen(false)}
