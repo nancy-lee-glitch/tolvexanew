@@ -31,12 +31,17 @@ import {
   DEFAULT_BROKER_CONFIG,
   DEFAULT_BROKER_PLATFORMS,
   DEFAULT_BROKERS_SETTINGS,
+  DEFAULT_MIN_ACTIONABLE_STRENGTH,
   DEFAULT_SITE_SETTINGS,
   detectLegacyBrandWarnings,
   fetchRemoteBrokerPlatforms,
+  fetchRemoteMinActionableStrength,
+  getMinActionableStrength,
+  normalizeMinActionableStrength,
   normalizeSiteSettings,
   resolveBrokerDestinationUrl,
   saveBrokerPlatforms,
+  saveMinActionableStrength,
   saveSiteSettings,
 } from '../src/utils/siteConfigManager.ts';
 import {
@@ -51,7 +56,10 @@ import {
   buildResultView,
   computeNextCandleCloseMinutes,
   getSortedNearestLevels,
+  getStrengthRank,
   getTopAndQuietSessionHours,
+  isStrengthBelowMinimum,
+  MIN_STRENGTH_WAIT_REASON,
 } from '../src/utils/resultView.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
@@ -2652,17 +2660,430 @@ function runStage4HSimplifiedUiTests() {
   );
 }
 
+// ============================================================================
+// 21. STAGE 4I: ACCOUNT TOO SMALL GUARD, STRUCTURED WHY BULLETS & MIN STRENGTH
+// ============================================================================
+async function runStage4IResultFixesTests() {
+  console.log('\n21. Stage 4I Result View Fixes (Lot=0 Warning, Why Bullets, Min Actionable Strength):');
+
+  // 21a. MT5 account too small (lotSize === 0): warning at top, explicit plain sentence, no Copy order CTA
+  const baseMt5Small: MT5SignalOutput = {
+    engine: 'mt5_v1',
+    profile: 'MT5',
+    platform: 'mt5',
+    asset: 'EUR/USD',
+    symbol: 'frxEURUSD',
+    direction: 'SELL',
+    orderKind: 'MARKET',
+    entryPrice: 1.085,
+    entryZone: null,
+    stopLoss: 1.0875,
+    stopLossPips: 25,
+    takeProfit1: 1.08125,
+    takeProfit1Pips: 37.5,
+    takeProfit2: 1.07875,
+    takeProfit2Pips: 62.5,
+    lotSize: 0,
+    riskMoney: 0,
+    accountCurrency: 'USD',
+    rewardRiskTp1: 1.5,
+    rewardRiskTp2: 2.5,
+    rewardRiskRatio: '1:1.50',
+    validityCandles: 3,
+    validityMinutes: 15,
+    validityWindowDesc: '15m',
+    validUntil: new Date(PRIME_FX_NOW_MS + 15 * 60_000).toISOString(),
+    invalidationLevel: 1.0875,
+    invalidationDriftPrice: 0.0025,
+    invalidationRule: 'Cancel setup if price rises above 1.08750.',
+    sessionNote: 'London/NY overlap liquidity.',
+    sessionQuality: 'PRIME',
+    tradeManagementNote: 'Move stop-loss to break-even at 1R and take partial profit at TP1.',
+    copyOrderText: 'EURUSD SELL MARKET @ 1.08500 | SL 1.08750 | Lots 0',
+    accountSizingWarning: 'Your account is too small to take this trade at your chosen 1.0% risk.',
+    strength: 'High',
+    rawScore: 86,
+    reasons: [
+      'A very long detailed engine narrative exceeding ninety characters that previously got truncated mid-sentence with an ellipsis dot',
+      'SL placed at 1.08750 (25 pips) with 0 lots',
+      'Move stop-loss to break-even at 1R',
+    ],
+    structureTimeframe: 'H1',
+    timeframe: 'H1',
+    createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+    generatedAt: PRIME_FX_NOW_MS,
+    feedSource: 'wss://api.derivws.com/trading/v1/options/ws/public',
+    inputsSnapshot: {
+      d1Bias: { bias: 'BEARISH' },
+      h4Bias: { bias: 'BEARISH' },
+      h1Bias: { bias: 'BEARISH' },
+      session: { sessionName: 'London / New York Overlap', sessionQuality: 'PRIME' },
+    },
+  };
+
+  const sellSmallView = buildResultView(baseMt5Small, 'MT5', {
+    nowMs: PRIME_FX_NOW_MS,
+    minActionableStrength: 'Medium',
+  });
+  const buySmallView = buildResultView(
+    { ...baseMt5Small, direction: 'BUY', stopLoss: 1.0825, takeProfit1: 1.08875, takeProfit2: 1.09125 },
+    'MT5',
+    { nowMs: PRIME_FX_NOW_MS, minActionableStrength: 'Medium' }
+  );
+  const validLotView = buildResultView(
+    {
+      ...baseMt5Small,
+      lotSize: 0.25,
+      riskMoney: 62.5,
+      accountSizingWarning: undefined,
+      copyOrderText: 'EURUSD SELL MARKET @ 1.08500 | SL 1.08750 | TP1 1.08125 | TP2 1.07875 | Lots 0.25',
+    },
+    'MT5',
+    { nowMs: PRIME_FX_NOW_MS, minActionableStrength: 'Medium' }
+  );
+
+  assert(
+    sellSmallView?.kind === 'MT5' &&
+      Boolean(sellSmallView.accountTooSmallWarning?.includes('account is too small')) &&
+      sellSmallView.verdict.plainSentence ===
+        'A SELL setup exists, but your account is too small to take it at your risk setting.' &&
+      sellSmallView.orderTicket.canCopyOrder === false &&
+      sellSmallView.orderTicket.copyOrderText === null &&
+      sellSmallView.orderTicket.cannotCopyReason === "Can't copy: lot size is below your broker's minimum" &&
+      sellSmallView.moreDetails.accountSizingWarning === undefined &&
+      buySmallView?.kind === 'MT5' &&
+      buySmallView.verdict.plainSentence ===
+        'A BUY setup exists, but your account is too small to take it at your risk setting.' &&
+      buySmallView.orderTicket.canCopyOrder === false &&
+      buySmallView.orderTicket.copyOrderText === null &&
+      validLotView?.kind === 'MT5' &&
+      validLotView.accountTooSmallWarning === null &&
+      validLotView.orderTicket.canCopyOrder === true &&
+      Boolean(validLotView.orderTicket.copyOrderText?.includes('Lots 0.25')),
+    'MT5 lotSize=0 shows prominent top accountTooSmallWarning, custom BUY/SELL sentence, removes Copy order button, and never emits copyOrderText with 0 lots'
+  );
+
+  // 21b. Why bullets: structured <= 90-char templates with zero "…" truncation, zero repeated ticket numbers, zero trade-management advice
+  const binaryPutSample: BinarySignalOutput = {
+    engine: 'binary_v1',
+    profile: 'BINARY_QUICK',
+    platform: 'deriv',
+    asset: 'EUR/USD',
+    symbol: 'frxEURUSD',
+    direction: 'PUT',
+    strength: 'High',
+    rawScore: -84,
+    expiry: '3m',
+    expirySeconds: 180,
+    enterWithinSeconds: 6,
+    entryPrice: 1.0852,
+    payoutPct: 85,
+    breakEvenWinRatePct: 54.05,
+    breakEvenMessage: 'Break-even win rate at 85% payout: 54.05%',
+    reasons: [
+      'Extremely long narrative explanation well past ninety characters that would otherwise get chopped off with a trailing ellipsis marker in old code',
+      'Another verbose bullet with entry price 1.08520 and stop loss ideas',
+      'Third verbose narrative bullet',
+    ],
+    createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+    generatedAt: PRIME_FX_NOW_MS,
+    validUntil: new Date(PRIME_FX_NOW_MS + 180_000).toISOString(),
+    feedSource: 'wss://api.derivws.com/trading/v1/options/ws/public',
+    inputsSnapshot: {
+      m5: { bias: 'BEARISH' },
+      m15: { bias: 'BEARISH' },
+      microTicks60s: { momentumBuyPct: 15, momentumSellPct: 85 },
+    },
+  };
+
+  const binaryMixedCallSample: BinarySignalOutput = {
+    ...binaryPutSample,
+    direction: 'CALL',
+    expiry: '2m',
+    inputsSnapshot: {
+      m5: { bias: 'BULLISH' },
+      m15: { bias: 'NEUTRAL' },
+      microTicks60s: { momentumBuyPct: 72, momentumSellPct: 28 },
+    },
+  };
+
+  const binaryPutView = buildResultView(binaryPutSample, 'BINARY_QUICK', {
+    nowMs: PRIME_FX_NOW_MS,
+    minActionableStrength: 'Medium',
+  });
+  const binaryCallView = buildResultView(binaryMixedCallSample, 'BINARY_QUICK', {
+    nowMs: PRIME_FX_NOW_MS,
+    minActionableStrength: 'Medium',
+  });
+
+  assert(
+    binaryPutView?.kind === 'BINARY' &&
+      binaryPutView.whyBullets.length === 3 &&
+      binaryPutView.whyBullets.every((b) => b.length > 0 && b.length <= 90 && !b.includes('\u2026') && !b.includes('...')) &&
+      binaryPutView.whyBullets[0] === 'M5 and M15 point down' &&
+      binaryPutView.whyBullets[1] === 'In the last 60 seconds, 85% of tick moves were down' &&
+      binaryPutView.whyBullets[2] === 'Volatility suits a 3-minute trade' &&
+      binaryCallView?.kind === 'BINARY' &&
+      binaryCallView.whyBullets[0] === 'M5 points up; M15 is neutral' &&
+      binaryCallView.whyBullets.every((b) => b.length <= 90 && !b.includes('\u2026')),
+    'Binary whyBullets use structured <= 90-char templates with zero ellipsis truncation'
+  );
+
+  const mt5LondonView = buildResultView(
+    {
+      ...baseMt5Small,
+      lotSize: 0.45,
+      sessionNote: 'London session active liquidity.',
+      inputsSnapshot: {
+        d1Bias: { bias: 'BEARISH' },
+        h4Bias: { bias: 'BEARISH' },
+        h1Bias: { bias: 'BEARISH' },
+        session: { sessionName: 'London Session', sessionQuality: 'PRIME' },
+      },
+    },
+    'MT5',
+    { nowMs: PRIME_FX_NOW_MS, minActionableStrength: 'Medium' }
+  );
+  const mt5AsianView = buildResultView(
+    {
+      ...baseMt5Small,
+      lotSize: 0.45,
+      sessionNote: 'Asian session lighter liquidity.',
+      inputsSnapshot: {
+        d1Bias: { bias: 'NEUTRAL' },
+        h4Bias: { bias: 'BEARISH' },
+        h1Bias: { bias: 'BEARISH' },
+        session: { sessionName: 'Asian Session', sessionQuality: 'CAUTION' },
+      },
+    },
+    'MT5',
+    { nowMs: PRIME_FX_NOW_MS, minActionableStrength: 'Medium' }
+  );
+
+  const mt5BulletsAllClean =
+    validLotView?.kind === 'MT5' &&
+    validLotView.whyBullets.length === 3 &&
+    validLotView.whyBullets.every(
+      (b) =>
+        b.length > 0 &&
+        b.length <= 90 &&
+        !b.includes('\u2026') &&
+        !b.includes('...') &&
+        !b.includes('1.085') &&
+        !b.includes('1.087') &&
+        !b.includes('0.25') &&
+        !b.includes('25') &&
+        !/break-even|partial profit/i.test(b)
+    );
+
+  assert(
+    mt5BulletsAllClean &&
+      validLotView?.kind === 'MT5' &&
+      validLotView.whyBullets[0] === 'D1 and H4 point down; H1 agrees' &&
+      validLotView.whyBullets[1] === 'Stop sits beyond the H1 swing high; TP1 is 1.5x the risk' &&
+      validLotView.whyBullets[2] === 'London/NY overlap: best liquidity' &&
+      mt5LondonView?.kind === 'MT5' &&
+      mt5LondonView.whyBullets[2] === 'London session: active liquidity' &&
+      mt5AsianView?.kind === 'MT5' &&
+      mt5AsianView.whyBullets[2] === 'Asian session: lighter liquidity',
+    'MT5 whyBullets use structured <= 90-char templates with zero ellipsis, zero ticket numbers, and zero trade-management advice'
+  );
+
+  // 21c. Minimum actionable strength matrix (Low/Medium/High signal vs Low/Medium/High min)
+  const levels = ['Low', 'Medium', 'High'] as const;
+  let matrixPass = true;
+  for (const sigStrength of levels) {
+    for (const minStrength of levels) {
+      const expectWait = getStrengthRank(sigStrength) < getStrengthRank(minStrength);
+      const binRes = buildResultView(
+        { ...binaryPutSample, strength: sigStrength },
+        'BINARY_QUICK',
+        { nowMs: PRIME_FX_NOW_MS, minActionableStrength: minStrength }
+      );
+      const mt5Res = buildResultView(
+        { ...baseMt5Small, lotSize: 0.25, strength: sigStrength },
+        'MT5',
+        { nowMs: PRIME_FX_NOW_MS, minActionableStrength: minStrength }
+      );
+      if (expectWait) {
+        if (
+          binRes?.kind !== 'WAIT' ||
+          binRes.reason !== MIN_STRENGTH_WAIT_REASON ||
+          binRes.strengthChip !== null ||
+          mt5Res?.kind !== 'WAIT' ||
+          mt5Res.reason !== MIN_STRENGTH_WAIT_REASON ||
+          mt5Res.strengthChip !== null
+        ) {
+          matrixPass = false;
+        }
+      } else {
+        if (binRes?.kind !== 'BINARY' || mt5Res?.kind !== 'MT5') {
+          matrixPass = false;
+        }
+      }
+    }
+  }
+  const explicitWaitLowMin = buildResultView(
+    {
+      ...binaryPutSample,
+      direction: 'WAIT',
+      strength: 'Low',
+      whyNotTrade: 'Spread is too wide right now.',
+    },
+    'BINARY_QUICK',
+    { nowMs: PRIME_FX_NOW_MS, minActionableStrength: 'Low' }
+  );
+  assert(
+    matrixPass &&
+      isStrengthBelowMinimum('Low', 'Medium') &&
+      !isStrengthBelowMinimum('Medium', 'Medium') &&
+      !isStrengthBelowMinimum('High', 'Medium') &&
+      explicitWaitLowMin?.kind === 'WAIT' &&
+      explicitWaitLowMin.reason === 'Spread is too wide right now.',
+    'min_actionable_strength enforces full 3x3 Low/Medium/High matrix across Binary & MT5 and emits exact WAIT reason'
+  );
+
+  // 21d. Client helpers (normalize/save/fetch) + server validation + UI/migration contracts
+  assert(
+    DEFAULT_MIN_ACTIONABLE_STRENGTH === 'Medium' &&
+      normalizeMinActionableStrength('Low') === 'Low' &&
+      normalizeMinActionableStrength('high') === 'High' &&
+      normalizeMinActionableStrength('invalid_level') === 'Medium' &&
+      normalizeMinActionableStrength(null) === 'Medium',
+    'normalizeMinActionableStrength enforces Low/Medium/High and defaults to Medium'
+  );
+
+  const origFetch = globalThis.fetch;
+  const origLocalStorage = (globalThis as any).localStorage;
+  const origSessionStorage = (globalThis as any).sessionStorage;
+  const origWindow = (globalThis as any).window;
+  const origCustomEvent = (globalThis as any).CustomEvent;
+
+  const store = new Map<string, string>();
+  const dispatched: Array<{ type: string; detail: unknown }> = [];
+  const lsMock = {
+    get length() {
+      return store.size;
+    },
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+  };
+  (globalThis as any).localStorage = lsMock;
+  (globalThis as any).sessionStorage = lsMock;
+  (globalThis as any).window = {
+    dispatchEvent: (ev: { type: string; detail?: unknown }) => {
+      dispatched.push({ type: ev.type, detail: ev.detail });
+      return true;
+    },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  };
+  (globalThis as any).CustomEvent = class MockCustomEvent {
+    type: string;
+    detail: unknown;
+    constructor(type: string, init?: { detail?: unknown }) {
+      this.type = type;
+      this.detail = init?.detail;
+    }
+  };
+
+  try {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ ok: false, error: 'Forbidden' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      })) as typeof fetch;
+    const failSave = await saveMinActionableStrength('High');
+    assert(
+      !failSave.ok && store.size === 0 && dispatched.length === 0,
+      'saveMinActionableStrength fails closed on 403 without touching localStorage or dispatching event'
+    );
+
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({ ok: true, settings: { min_actionable_strength: 'High' } }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const okSave = await saveMinActionableStrength('High');
+    const fetchedRemote = await fetchRemoteMinActionableStrength();
+    assert(
+      okSave.ok &&
+        okSave.value === 'High' &&
+        getMinActionableStrength() === 'High' &&
+        fetchedRemote === 'High' &&
+        dispatched.some((e) => e.type === 'pulsetrade_min_strength_changed' && e.detail === 'High'),
+      'saveMinActionableStrength persists to server/localStorage and fetchRemoteMinActionableStrength reads back High'
+    );
+  } finally {
+    globalThis.fetch = origFetch;
+    (globalThis as any).localStorage = origLocalStorage;
+    (globalThis as any).sessionStorage = origSessionStorage;
+    (globalThis as any).window = origWindow;
+    (globalThis as any).CustomEvent = origCustomEvent;
+  }
+
+  // Verify migration 011, api/admin/settings.ts, AdminCenter.tsx, and SignalEngine.tsx Stage 4I wiring
+  const rootDir = resolve(process.cwd());
+  const mig011 = readFileSync(resolve(rootDir, 'supabase/migrations/011_min_actionable_strength.sql'), 'utf8');
+  const settingsApi = readFileSync(resolve(rootDir, 'api/admin/settings.ts'), 'utf8');
+  const adminUi = readFileSync(resolve(rootDir, 'src/components/AdminCenter.tsx'), 'utf8');
+  const signalUi = readFileSync(resolve(rootDir, 'src/components/SignalEngine.tsx'), 'utf8');
+
+  assert(
+    mig011.includes("'min_actionable_strength'") &&
+      mig011.includes("to_jsonb('Medium'::text)") &&
+      mig011.includes('app_settings_public_select') &&
+      settingsApi.includes("'min_actionable_strength'") &&
+      settingsApi.includes("cleanKey === 'min_actionable_strength'") &&
+      settingsApi.includes("status(400)"),
+    'Migration 011 & api/admin/settings.ts expose min_actionable_strength safely and validate Low/Medium/High'
+  );
+
+  const mt5CardStart = signalUi.indexOf('data-testid="mt5-result-card"');
+  const mt5TopWarningIdx = signalUi.indexOf('data-testid="mt5-account-too-small-warning"', mt5CardStart);
+  const mt5VerdictBadgeIdx = signalUi.indexOf('{resultView.verdict.badge}', mt5CardStart);
+
+  assert(
+    adminUi.includes('Minimum actionable setup strength') &&
+      adminUi.includes('Setups weaker than this are shown as WAIT') &&
+      mt5TopWarningIdx > mt5CardStart &&
+      mt5TopWarningIdx < mt5VerdictBadgeIdx &&
+      signalUi.includes('resultView.orderTicket.canCopyOrder') &&
+      signalUi.includes('data-testid="mt5-copy-disabled-note"') &&
+      signalUi.includes('binaryBelowMinStrength') &&
+      signalUi.includes('mt5BelowMinStrength') &&
+      signalUi.includes('onSignalOutput?.(binaryBelowMinStrength ? null : binaryRes)') &&
+      signalUi.includes('onSignalOutput?.(mt5BelowMinStrength ? null : mt5Res)'),
+    'AdminCenter renders strength threshold setting and SignalEngine renders top lot=0 warning, copy guard, and WAIT downgrade without credits/overlay'
+  );
+}
+
 runSignalLogValidationTests()
   .then(() => runHistoryRefreshGuards())
   .then(() => runStage4GReferralAndRadarTests())
   .then(() => runStage4HBrandingTests())
+  .then(() => runStage4IResultFixesTests())
   .then(() => {
     runMt5Tests();
     runStage4EHorizonTests();
     runStage4FPipBrandWordingTests();
     runStage4HSimplifiedUiTests();
     console.log('\n------------------------------------------------------------');
-    console.log(`Combined Binary + MT5 + Stage 4A-4H Results: ${passed}/${total} tests passed`);
+    console.log(`Combined Binary + MT5 + Stage 4A-4I Results: ${passed}/${total} tests passed`);
     console.log('------------------------------------------------------------\n');
 
     process.exit(passed === total ? 0 : 1);

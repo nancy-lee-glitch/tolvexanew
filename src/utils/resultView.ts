@@ -97,7 +97,9 @@ export interface MT5OrderTicket {
   rewardRiskTp1: number;
   rewardRiskTp2: number;
   primaryButtonLabel: 'Copy order';
-  copyOrderText: string;
+  copyOrderText: string | null;
+  canCopyOrder: boolean;
+  cannotCopyReason: string | null;
 }
 
 export interface MT5ResultView {
@@ -106,6 +108,7 @@ export interface MT5ResultView {
   direction: 'BUY' | 'SELL';
   orderKind: 'MARKET' | 'LIMIT';
   sections: ResultSectionType[];
+  accountTooSmallWarning: string | null;
   verdict: {
     badge: string;
     plainSentence: string;
@@ -164,12 +167,30 @@ export interface BuildResultViewOptions {
   nowMs?: number;
   decimals?: number;
   distanceUnit?: DistanceUnit;
+  minActionableStrength?: SignalStrength;
 }
 
 export interface MarketContextThreeLineSummary {
   trendLine: string;
   volatilityLine: string;
   levelsLine: string;
+}
+
+export const MIN_STRENGTH_WAIT_REASON =
+  'A setup was found but it is not strong enough to act on.';
+
+export function getStrengthRank(strength: SignalStrength | string | undefined): number {
+  const norm = String(strength || '').trim().toLowerCase();
+  if (norm === 'high') return 3;
+  if (norm === 'medium') return 2;
+  return 1;
+}
+
+export function isStrengthBelowMinimum(
+  strength: SignalStrength | string | undefined,
+  minStrength: SignalStrength | string | undefined = 'Medium'
+): boolean {
+  return getStrengthRank(strength) < getStrengthRank(minStrength);
 }
 
 export function normalizeAnalysisProfile(
@@ -221,6 +242,15 @@ function formatExpiryDurationPhrase(expiryRaw: string): string {
   return norm || 'next expiry';
 }
 
+function formatExpiryHyphenDuration(expiryRaw: string): string {
+  const norm = expiryRaw.toLowerCase();
+  if (norm === '1m') return '1-minute';
+  if (norm === '2m') return '2-minute';
+  if (norm === '3m') return '3-minute';
+  if (norm === '5m') return '5-minute';
+  return norm || 'short-expiry';
+}
+
 function formatExpiryTileLabel(expiryRaw: string): string {
   const norm = expiryRaw.toLowerCase();
   if (norm === '1m') return '1 MIN';
@@ -230,60 +260,166 @@ function formatExpiryTileLabel(expiryRaw: string): string {
   return norm.toUpperCase();
 }
 
-function normalizeWhyBullets(
-  rawReasons: readonly string[] | undefined,
-  fallbacks: [string, string, string],
-  maxLen = 90
-): [string, string, string] {
-  const cleaned = (rawReasons || [])
-    .map((r) => truncateBullet(r, maxLen))
-    .filter(Boolean);
+type BiasVal = 'BULLISH' | 'BEARISH' | 'NEUTRAL';
 
-  const out: string[] = [];
-  for (const item of cleaned) {
-    if (out.length >= 3) break;
-    if (!out.includes(item)) out.push(item);
+function extractBiasValue(raw: unknown): BiasVal | null {
+  if (typeof raw === 'string') {
+    const up = raw.toUpperCase();
+    if (up === 'BULLISH' || up === 'BEARISH' || up === 'NEUTRAL') return up;
+    return null;
   }
-  for (const fb of fallbacks) {
-    if (out.length >= 3) break;
-    const t = truncateBullet(fb, maxLen);
-    if (t && !out.includes(t)) out.push(t);
+  if (raw && typeof raw === 'object' && 'bias' in raw) {
+    return extractBiasValue((raw as { bias?: unknown }).bias);
   }
-  while (out.length < 3) {
-    out.push(truncateBullet(fallbacks[out.length % fallbacks.length], maxLen));
-  }
-  return [out[0], out[1], out[2]];
+  return null;
 }
 
-function hasHigherTimeframeBiasMention(text: string): boolean {
-  return /\b(d1|h4|daily|4-hour|higher[- ]timeframe|htf|bias)\b/i.test(text);
+function extractNumber(raw: unknown): number | null {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
+}
+
+function clampShortBullet(sentence: string, fallback: string): string {
+  const clean = sentence.replace(/\s+/g, ' ').trim();
+  if (clean.length > 0 && clean.length <= 90) return clean;
+  return fallback.slice(0, 90);
+}
+
+function buildBinaryWhyBullets(
+  signal: ResultSignalInput,
+  direction: 'CALL' | 'PUT',
+  expiryRaw: string
+): [string, string, string] {
+  const snap = (signal.inputsSnapshot || {}) as Record<string, unknown>;
+  const targetBias: BiasVal = direction === 'CALL' ? 'BULLISH' : 'BEARISH';
+  const dirWord = direction === 'CALL' ? 'up' : 'down';
+
+  const m5Bias = extractBiasValue(snap.m5) ?? extractBiasValue(snap.m5Bias);
+  const m15Bias = extractBiasValue(snap.m15) ?? extractBiasValue(snap.m15Bias);
+
+  // (1) Trend context
+  let trendBullet: string;
+  if (m5Bias === targetBias && m15Bias === targetBias) {
+    trendBullet = `M5 and M15 point ${dirWord}`;
+  } else if (m5Bias === targetBias && m15Bias === 'NEUTRAL') {
+    trendBullet = `M5 points ${dirWord}; M15 is neutral`;
+  } else if (m5Bias === targetBias) {
+    trendBullet = `M5 points ${dirWord}; M15 holds steady`;
+  } else if (m15Bias === targetBias && m5Bias === 'NEUTRAL') {
+    trendBullet = `M15 points ${dirWord}; M5 is neutral`;
+  } else if (m15Bias === targetBias) {
+    trendBullet = `M15 points ${dirWord}; M5 is consolidating`;
+  } else {
+    trendBullet = `M5 and M15 point ${dirWord}`;
+  }
+
+  // (2) 60s Momentum
+  const micro = (snap.microTicks60s && typeof snap.microTicks60s === 'object'
+    ? (snap.microTicks60s as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const buyPct = extractNumber(micro.momentumBuyPct) ?? extractNumber(snap.momentumBuyPct);
+  const sellPct = extractNumber(micro.momentumSellPct) ?? extractNumber(snap.momentumSellPct);
+  const domPct = direction === 'CALL' ? buyPct : sellPct;
+
+  const momentumBullet =
+    domPct !== null && domPct > 0
+      ? `In the last 60 seconds, ${Math.round(domPct)}% of tick moves were ${dirWord}`
+      : `Recent tick momentum moves ${dirWord}`;
+
+  // (3) Volatility fit
+  const volFitBullet = `Volatility suits a ${formatExpiryHyphenDuration(expiryRaw)} trade`;
+
+  return [
+    clampShortBullet(trendBullet, `M5 and M15 point ${dirWord}`),
+    clampShortBullet(momentumBullet, `Recent tick momentum moves ${dirWord}`),
+    clampShortBullet(volFitBullet, 'Volatility fits short-expiry entry'),
+  ];
 }
 
 function buildMt5WhyBullets(
   signal: ResultSignalInput,
-  direction: 'BUY' | 'SELL'
+  direction: 'BUY' | 'SELL',
+  tfUpper: string,
+  rrTp1: number
 ): [string, string, string] {
-  const rawReasons = Array.isArray(signal.reasons) ? signal.reasons.filter(Boolean) : [];
+  const sigAsData = signal as SignalData;
+  const rawMt5 = signal as MT5SignalOutput;
   const snap = (signal.inputsSnapshot || {}) as Record<string, unknown>;
-  const d1Bias = typeof snap.d1Bias === 'string' ? snap.d1Bias : null;
-  const h4Bias = typeof snap.h4Bias === 'string' ? snap.h4Bias : null;
-  const biasWord = direction === 'BUY' ? 'bullish' : 'bearish';
+  const targetBias: BiasVal = direction === 'BUY' ? 'BULLISH' : 'BEARISH';
+  const dirWord = direction === 'BUY' ? 'up' : 'down';
+  const swingSide = direction === 'BUY' ? 'low' : 'high';
 
-  const htfFallback =
-    d1Bias && h4Bias
-      ? `Higher-timeframe bias: D1 ${d1Bias} & H4 ${h4Bias} favor ${direction}.`
-      : `Higher-timeframe D1/H4 bias aligns ${biasWord} for this ${direction} setup.`;
+  const d1 = extractBiasValue(snap.d1Bias);
+  const h4 = extractBiasValue(snap.h4Bias);
+  const structBias =
+    tfUpper === 'M15' ? extractBiasValue(snap.m15Bias) : extractBiasValue(snap.h1Bias);
 
-  const rawTf = ('timeframe' in signal && signal.timeframe) ? signal.timeframe : 'H1';
-  const fallbacks: [string, string, string] = [
-    htfFallback,
-    `${String(rawTf).toUpperCase()} structure confirms a clean entry with defined stop.`,
-    `Opposing key levels allow >= 1.5R reward:risk to TP1.`,
+  // (1) Higher-timeframe bias (D1 / H4 / structure)
+  let biasBullet: string;
+  if (d1 === targetBias && h4 === targetBias) {
+    biasBullet = `D1 and H4 point ${dirWord}; ${tfUpper} agrees`;
+  } else if (h4 === targetBias && d1 === 'NEUTRAL') {
+    biasBullet = `D1 neutral, H4 points ${dirWord}; ${tfUpper} agrees`;
+  } else if (d1 === targetBias && h4 === 'NEUTRAL') {
+    biasBullet = `D1 points ${dirWord}, H4 neutral; ${tfUpper} agrees`;
+  } else if (structBias === targetBias) {
+    biasBullet = `D1 and H4 favor ${direction}; ${tfUpper} agrees`;
+  } else {
+    biasBullet = `D1 and H4 point ${dirWord}; ${tfUpper} agrees`;
+  }
+
+  // (2) Structure & Reward:Risk (never repeating ticket prices, lots, or pips)
+  const rrSafe = Number.isFinite(rrTp1) && rrTp1 > 0 ? rrTp1 : 1.5;
+  const rrFormatted =
+    Math.abs(rrSafe * 10 - Math.round(rrSafe * 10)) < 0.01
+      ? rrSafe.toFixed(1)
+      : rrSafe.toFixed(2);
+  const structureBullet = `Stop sits beyond the ${tfUpper} swing ${swingSide}; TP1 is ${rrFormatted}x the risk`;
+
+  // (3) Session / liquidity context (never trade management advice)
+  const sessionObj = (snap.session && typeof snap.session === 'object'
+    ? (snap.session as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+  const sessionNameLower = String(sessionObj.sessionName || '').toLowerCase();
+  const sessionQual = String(
+    sessionObj.sessionQuality || sigAsData.sessionQuality || rawMt5.sessionQuality || ''
+  ).toUpperCase();
+  const noteLower = String(
+    sessionObj.note || sigAsData.sessionNote || rawMt5.sessionNote || ''
+  ).toLowerCase();
+  const assetLower = String(signal.asset || '').toLowerCase();
+
+  let sessionBullet: string;
+  if (sessionNameLower.includes('synthetic') || assetLower.includes('volatility')) {
+    sessionBullet = '24/7 synthetic index; practice conditions only';
+  } else if (sessionNameLower.includes('crypto')) {
+    sessionBullet = '24/7 crypto liquidity; no blocking macro news';
+  } else if (sessionNameLower.includes('overlap')) {
+    sessionBullet = 'London/NY overlap: best liquidity';
+  } else if (sessionNameLower.includes('london')) {
+    sessionBullet = 'London session: active liquidity';
+  } else if (sessionNameLower.includes('new york') || sessionNameLower.includes('ny afternoon')) {
+    sessionBullet = 'NY session: moderate liquidity';
+  } else if (sessionNameLower.includes('asian')) {
+    sessionBullet = 'Asian session: lighter liquidity';
+  } else if (sessionNameLower.includes('rollover')) {
+    sessionBullet = 'Rollover window: thinner liquidity';
+  } else if (noteLower.includes('overlap')) {
+    sessionBullet = 'London/NY overlap: best liquidity';
+  } else if (noteLower.includes('european')) {
+    sessionBullet = 'London session: active liquidity';
+  } else if (sessionQual === 'PRIME') {
+    sessionBullet = 'Prime session liquidity; no blocking news';
+  } else if (sessionQual === 'CAUTION' || sessionQual === 'THIN') {
+    sessionBullet = 'Lighter session liquidity; check spread first';
+  } else {
+    sessionBullet = 'Standard session liquidity; no blocking news';
+  }
+
+  return [
+    clampShortBullet(biasBullet, `D1 and H4 point ${dirWord}; ${tfUpper} agrees`),
+    clampShortBullet(structureBullet, `Stop sits beyond the ${tfUpper} swing ${swingSide}`),
+    clampShortBullet(sessionBullet, 'Standard session liquidity'),
   ];
-
-  const hasHtf = rawReasons.some((r) => hasHigherTimeframeBiasMention(r));
-  const merged = hasHtf ? rawReasons : [htfFallback, ...rawReasons];
-  return normalizeWhyBullets(merged, fallbacks, 90);
 }
 
 export function buildResultView(
@@ -296,6 +432,7 @@ export function buildResultView(
   const profile = normalizeAnalysisProfile(platformProfile);
   const nowMs = options.nowMs ?? Date.now();
   const decimals = options.decimals ?? 5;
+  const minStrength = options.minActionableStrength ?? 'Medium';
   const sigAsData = signal as SignalData;
 
   if (sigAsData.status === 'ANALYSIS_BLOCKED') {
@@ -312,18 +449,23 @@ export function buildResultView(
     };
   }
 
-  // WAIT (identical Steve Krug simplicity across both Binary and MT5)
-  if (signal.direction === 'WAIT') {
+  const belowMinimumStrength =
+    signal.direction !== 'WAIT' &&
+    isStrengthBelowMinimum(signal.strength || 'Low', minStrength);
+
+  // WAIT (explicit engine WAIT or downgraded below minimum actionable strength)
+  if (signal.direction === 'WAIT' || belowMinimumStrength) {
     const tf =
       ('expiry' in signal && signal.expiry) ||
       ('timeframe' in signal && signal.timeframe) ||
       (profile === 'MT5' ? 'H1' : '3m');
     const mins = computeNextCandleCloseMinutes(String(tf), nowMs);
-    const reason =
-      (signal.whyNotTrade ||
-        sigAsData.plainLanguageReason ||
-        signal.reasons?.[0] ||
-        'Market structure is unclear right now. Stand aside and wait for confirmation.').trim();
+    const reason = belowMinimumStrength
+      ? MIN_STRENGTH_WAIT_REASON
+      : (signal.whyNotTrade ||
+          sigAsData.plainLanguageReason ||
+          signal.reasons?.[0] ||
+          'Market structure is unclear right now. Stand aside and wait for confirmation.').trim();
 
     return {
       kind: 'WAIT',
@@ -369,15 +511,7 @@ export function buildResultView(
         : undefined) ?? 6
     );
 
-    const whyBullets = normalizeWhyBullets(
-      signal.reasons,
-      [
-        `${expiryRaw.toUpperCase()} candle momentum favors ${dir === 'CALL' ? 'upward' : 'downward'} continuation.`,
-        `M5 and M15 structure aligns with the ${dir} direction.`,
-        `No high-impact news or wide volatility spike blocking entry.`,
-      ],
-      90
-    );
+    const whyBullets = buildBinaryWhyBullets(signal, dir, expiryRaw);
 
     return {
       kind: 'BINARY',
@@ -470,7 +604,14 @@ export function buildResultView(
   const rrSafe = rewardRiskTp1 > 0 ? rewardRiskTp1 : 1.5;
   const minWinRatePct = (1 / (1 + rrSafe)) * 100;
 
-  const copyOrderText =
+  const isAccountTooSmall = !Number.isFinite(lotSize) || lotSize <= 0;
+  const rawSizingWarning =
+    mt5Nested?.accountSizingWarning || rawMt5.accountSizingWarning || sigAsData.accountSizingWarning;
+  const accountTooSmallWarning = isAccountTooSmall
+    ? rawSizingWarning || 'Your account is too small to take this trade at your chosen risk.'
+    : null;
+
+  const rawCopyText =
     mt5Nested?.formattedText ||
     rawMt5.copyOrderText ||
     `${signal.asset} ${dir} ${orderKind} @ ${entryPrice.toFixed(decimals)} | SL ${stopLoss.toFixed(decimals)} | TP1 ${tp1.toFixed(decimals)} | TP2 ${tp2.toFixed(decimals)} | Lots ${lotSize}`;
@@ -480,18 +621,22 @@ export function buildResultView(
       ? `${entryZone.min.toFixed(decimals)} – ${entryZone.max.toFixed(decimals)}`
       : entryPrice.toFixed(decimals);
 
+  const plainSentence = isAccountTooSmall
+    ? `A ${dir} setup exists, but your account is too small to take it at your risk setting.`
+    : orderKind === 'LIMIT'
+    ? `Price bias favors a ${dir} limit pullback on the ${tfUpper} chart.`
+    : `Price bias favors a ${dir} setup on the ${tfUpper} chart.`;
+
   return {
     kind: 'MT5',
     profile: 'MT5',
     direction: dir,
     orderKind,
     sections: ['verdict', 'order_ticket', 'validity', 'why', 'strength', 'more_details'],
+    accountTooSmallWarning,
     verdict: {
       badge: `${dir} ${orderKind === 'LIMIT' ? '(LIMIT)' : '(MARKET)'}`,
-      plainSentence:
-        orderKind === 'LIMIT'
-          ? `Price bias favors a ${dir} limit pullback on the ${tfUpper} chart.`
-          : `Price bias favors a ${dir} setup on the ${tfUpper} chart.`,
+      plainSentence,
     },
     orderTicket: {
       orderType: dir,
@@ -509,7 +654,7 @@ export function buildResultView(
       tp2Price: tp2,
       tp2DistanceText: fmtDist(tp2Pips, '+'),
       lotSize,
-      lotSizeText: lotSize > 0 ? `${lotSize} lots` : '0 lots (below min)',
+      lotSizeText: !isAccountTooSmall ? `${lotSize} lots` : '0 lots (below min)',
       riskMoney,
       accountCurrency,
       riskMoneyText: `${accountCurrency} ${riskMoney.toFixed(2)}`,
@@ -517,11 +662,15 @@ export function buildResultView(
       rewardRiskTp1,
       rewardRiskTp2,
       primaryButtonLabel: 'Copy order',
-      copyOrderText,
+      copyOrderText: isAccountTooSmall ? null : rawCopyText,
+      canCopyOrder: !isAccountTooSmall,
+      cannotCopyReason: isAccountTooSmall
+        ? "Can't copy: lot size is below your broker's minimum"
+        : null,
     },
     validityLine,
     validityMinutesLeft,
-    whyBullets: buildMt5WhyBullets(signal, dir),
+    whyBullets: buildMt5WhyBullets(signal, dir, tfUpper, rrSafe),
     strengthChip: {
       label: 'Setup strength (not a win probability)',
       strength: signal.strength || 'Low',
@@ -544,7 +693,7 @@ export function buildResultView(
         sigAsData.invalidationReason ||
         rawMt5.invalidationRule ||
         `Cancel setup if price crosses ${invDisplay}.`,
-      accountSizingWarning: sigAsData.accountSizingWarning || mt5Nested?.accountSizingWarning,
+      accountSizingWarning: isAccountTooSmall ? undefined : rawSizingWarning || undefined,
     },
   };
 }

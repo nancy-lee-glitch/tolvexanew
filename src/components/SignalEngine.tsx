@@ -12,6 +12,7 @@ import type {
   ConfluenceFactorItem,
   MultiWindowConfirmation,
   HistoryLearningContext,
+  SignalStrength,
 } from '../types.ts';
 import { playCallAudioChime, playPutAudioChime } from '../utils/audio.ts';
 import {
@@ -49,12 +50,21 @@ import {
   type BrokerAssetMeta,
   type MarketEventRow,
 } from '../utils/supabaseClient.ts';
-import { getBrokerPlatforms, resolveBrokerDestinationUrl } from '../utils/siteConfigManager.ts';
+import {
+  fetchRemoteMinActionableStrength,
+  getBrokerPlatforms,
+  getMinActionableStrength,
+  resolveBrokerDestinationUrl,
+} from '../utils/siteConfigManager.ts';
 import { useBrand } from '../utils/brand.ts';
 import { isSyntheticAsset, SYNTHETIC_INDICES_NOTICE } from '../services/symbolMap.ts';
 import { SignalHistory } from './SignalHistory.tsx';
 import type { EngineChartSignal } from '../utils/chartOverlays.ts';
-import { buildResultView } from '../utils/resultView.ts';
+import {
+  MIN_STRENGTH_WAIT_REASON,
+  buildResultView,
+  isStrengthBelowMinimum,
+} from '../utils/resultView.ts';
 
 interface SignalEngineProps {
   activeAsset: AssetConfig;
@@ -264,6 +274,33 @@ export function SignalEngine({
   const [freshnessSec, setFreshnessSec] = useState<number>(6.0);
   const [isExpired, setIsExpired] = useState<boolean>(false);
   const [creditNotice, setCreditNotice] = useState<string | null>(null);
+  const [minActionableStrength, setMinActionableStrength] = useState<SignalStrength>(() =>
+    getMinActionableStrength()
+  );
+  const minStrengthRef = useRef<SignalStrength>(minActionableStrength);
+  useEffect(() => {
+    minStrengthRef.current = minActionableStrength;
+  }, [minActionableStrength]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRemoteMinActionableStrength()
+      .then((lvl) => {
+        if (!cancelled) setMinActionableStrength(lvl);
+      })
+      .catch(() => {});
+    const onMinStrengthChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<SignalStrength>)?.detail;
+      if (detail === 'Low' || detail === 'Medium' || detail === 'High') {
+        setMinActionableStrength(detail);
+      }
+    };
+    window.addEventListener('pulsetrade_min_strength_changed', onMinStrengthChanged);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('pulsetrade_min_strength_changed', onMinStrengthChanged);
+    };
+  }, []);
 
   useEffect(() => {
     setSignal(null);
@@ -720,6 +757,10 @@ export function SignalEngine({
           preferredExpiry: binaryHorizon,
         });
 
+        const binaryBelowMinStrength =
+          (binaryRes.direction === 'CALL' || binaryRes.direction === 'PUT') &&
+          isStrengthBelowMinimum(binaryRes.strength, minStrengthRef.current);
+
         const mappedSignal: SignalData = {
           engine: binaryRes.engine,
           profile: 'BINARY_QUICK',
@@ -732,26 +773,34 @@ export function SignalEngine({
           timeframe: binaryRes.expiry,
           expiry: binaryRes.expiry,
           expirySeconds: binaryRes.expirySeconds,
-          direction: binaryRes.direction,
+          direction: binaryBelowMinStrength ? 'WAIT' : binaryRes.direction,
           strength: binaryRes.strength,
           rawScore: binaryRes.rawScore,
-          trend: binaryRes.direction === 'CALL' ? 'Bullish' : binaryRes.direction === 'PUT' ? 'Bearish' : 'Neutral',
+          trend: binaryBelowMinStrength
+            ? 'Neutral'
+            : binaryRes.direction === 'CALL'
+            ? 'Bullish'
+            : binaryRes.direction === 'PUT'
+            ? 'Bearish'
+            : 'Neutral',
           velocity: feedHealthStatus === 'LIVE' ? 'Live Feed' : feedHealthStatus,
           generatedAt: Date.now(),
           createdAt: binaryRes.createdAt,
           validUntil: binaryRes.validUntil,
           enterWithinSeconds: binaryRes.enterWithinSeconds,
-          reasons: binaryRes.reasons,
-          whyNotTrade: binaryRes.whyNotTrade,
+          reasons: binaryBelowMinStrength ? [MIN_STRENGTH_WAIT_REASON] : binaryRes.reasons,
+          whyNotTrade: binaryBelowMinStrength ? MIN_STRENGTH_WAIT_REASON : binaryRes.whyNotTrade,
           payoutPct: binaryRes.payoutPct,
           breakEvenWinRatePct: binaryRes.breakEvenWinRatePct,
           breakEvenMessage: binaryRes.breakEvenMessage,
           feedSource: binaryRes.feedSource,
           inputsSnapshot: binaryRes.inputsSnapshot,
           entryPrice: binaryRes.entryPrice ?? (currentPrice || 0),
-          plainLanguageReason: binaryRes.whyNotTrade || binaryRes.reasons.join(' '),
+          plainLanguageReason: binaryBelowMinStrength
+            ? MIN_STRENGTH_WAIT_REASON
+            : binaryRes.whyNotTrade || binaryRes.reasons.join(' '),
           riskNote: 'Trading binary contracts carries full stake risk. algorithmic signals are educational and not financial advice.',
-          gatePassed: binaryRes.direction !== 'WAIT',
+          gatePassed: !binaryBelowMinStrength && binaryRes.direction !== 'WAIT',
           status: 'READY',
         };
 
@@ -763,7 +812,7 @@ export function SignalEngine({
 
         setIsMoreDetailsOpen(false);
         setSignal(mappedSignal);
-        onSignalOutput?.(binaryRes);
+        onSignalOutput?.(binaryBelowMinStrength ? null : binaryRes);
         setIsRechecking(false);
 
         contextCandlesPromise
@@ -787,7 +836,10 @@ export function SignalEngine({
             }
           });
 
-        const isActionable = binaryRes.direction === 'CALL' || binaryRes.direction === 'PUT';
+        const isActionable = mappedSignal.direction === 'CALL' || mappedSignal.direction === 'PUT';
+        if (binaryBelowMinStrength) {
+          logSignalToSupabase(mappedSignal);
+        }
         if (isActionable) {
           if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
           setAutoScanSecondsRemaining(0);
@@ -951,7 +1003,11 @@ export function SignalEngine({
         mt5Res.timeframe
       );
 
-      const isActionable = mt5Res.direction === 'BUY' || mt5Res.direction === 'SELL';
+      const engineActionable = mt5Res.direction === 'BUY' || mt5Res.direction === 'SELL';
+      const mt5BelowMinStrength =
+        engineActionable && isStrengthBelowMinimum(mt5Res.strength, minStrengthRef.current);
+      const isActionable = engineActionable && !mt5BelowMinStrength;
+
       const generatedSignal: SignalData = {
         engine: mt5Res.engine,
         profile: 'MT5',
@@ -962,30 +1018,38 @@ export function SignalEngine({
         platform: currentPlatform.name,
         platformName: currentPlatform.name,
         timeframe: mt5Res.timeframe,
-        direction: mt5Res.direction,
+        direction: mt5BelowMinStrength ? 'WAIT' : mt5Res.direction,
         orderKind: mt5Res.orderKind,
         strength: mt5Res.strength,
         rawScore: mt5Res.rawScore,
-        trend: mt5Res.direction === 'BUY' ? 'Bullish' : mt5Res.direction === 'SELL' ? 'Bearish' : 'Neutral',
+        trend: mt5BelowMinStrength
+          ? 'Neutral'
+          : mt5Res.direction === 'BUY'
+          ? 'Bullish'
+          : mt5Res.direction === 'SELL'
+          ? 'Bearish'
+          : 'Neutral',
         velocity: feedHealthStatus === 'DELAYED' ? 'Candle Sync (Delayed Ticks)' : 'Candle Structure',
         generatedAt: mt5Res.generatedAt,
         createdAt: mt5Res.createdAt,
         validUntil: mt5Res.validUntil,
         validityWindowDesc: mt5Res.validityWindowDesc,
-        reasons: mt5Res.reasons,
-        whyNotTrade: mt5Res.whyNotTrade,
+        reasons: mt5BelowMinStrength ? [MIN_STRENGTH_WAIT_REASON] : mt5Res.reasons,
+        whyNotTrade: mt5BelowMinStrength ? MIN_STRENGTH_WAIT_REASON : mt5Res.whyNotTrade,
         feedSource: mt5Res.feedSource,
         inputsSnapshot: mt5Res.inputsSnapshot,
         entryPrice: mt5Res.entryPrice,
-        targetPrice: mt5Res.takeProfit1 ?? undefined,
-        entryZone: mt5Res.entryZone ?? undefined,
-        invalidationLevel: mt5Res.invalidationLevel ?? undefined,
+        targetPrice: isActionable ? (mt5Res.takeProfit1 ?? undefined) : undefined,
+        entryZone: isActionable ? (mt5Res.entryZone ?? undefined) : undefined,
+        invalidationLevel: isActionable ? (mt5Res.invalidationLevel ?? undefined) : undefined,
         invalidationReason: mt5Res.invalidationRule,
         sessionNote: mt5Res.sessionNote,
         sessionQuality: mt5Res.sessionQuality,
         tradeManagementNote: mt5Res.tradeManagementNote,
         accountSizingWarning: mt5Res.accountSizingWarning || mt5Res.riskWarning,
-        plainLanguageReason: mt5Res.whyNotTrade || mt5Res.reasons.join(' '),
+        plainLanguageReason: mt5BelowMinStrength
+          ? MIN_STRENGTH_WAIT_REASON
+          : mt5Res.whyNotTrade || mt5Res.reasons.join(' '),
         riskNote:
           mt5Res.riskWarning ||
           `${mt5Res.tradeManagementNote} Algorithmic setups are educational and not financial advice.`,
@@ -1019,7 +1083,7 @@ export function SignalEngine({
                 invalidationRule: mt5Res.invalidationRule,
                 sessionNote: mt5Res.sessionNote,
                 tradeManagementNote: mt5Res.tradeManagementNote,
-                formattedText: mt5Res.copyOrderText,
+                formattedText: mt5Res.lotSize > 0 ? mt5Res.copyOrderText : '',
                 accountSizingWarning: mt5Res.accountSizingWarning,
               }
             : undefined,
@@ -1043,10 +1107,14 @@ export function SignalEngine({
       setIsMoreDetailsOpen(false);
       setSignal(generatedSignal);
       setMarketContext(mt5Ctx);
-      onSignalOutput?.(mt5Res);
+      onSignalOutput?.(mt5BelowMinStrength ? null : mt5Res);
       onMarketContextUpdate?.(mt5Ctx);
       setIsLoadingContext(false);
       setIsRechecking(false);
+
+      if (mt5BelowMinStrength) {
+        logSignalToSupabase(generatedSignal);
+      }
 
       if (isActionable) {
         const spark = m5Candles.slice(-10).map((c) => c.close);
@@ -1216,9 +1284,9 @@ export function SignalEngine({
     onSignalOutput?.(null);
   };
 
-  // Copy MT5 Trade Setup
+  // Copy MT5 Trade Setup (never offered when lotSize <= 0)
   const handleCopyMt5Setup = () => {
-    if (!signal?.mt5?.formattedText) return;
+    if (!signal?.mt5?.formattedText || (signal.mt5.recommendedLot ?? 0) <= 0) return;
     navigator.clipboard.writeText(signal.mt5.formattedText);
     setCopiedMt5Text(true);
     setTimeout(() => setCopiedMt5Text(false), 2000);
@@ -1242,6 +1310,7 @@ export function SignalEngine({
         nowMs: mt5NowMs,
         decimals: assetPipSpec.decimals,
         distanceUnit: assetPipSpec.distanceUnit,
+        minActionableStrength,
       }),
     [
       signal,
@@ -1252,6 +1321,7 @@ export function SignalEngine({
       mt5NowMs,
       assetPipSpec.decimals,
       assetPipSpec.distanceUnit,
+      minActionableStrength,
     ]
   );
 
@@ -1919,6 +1989,17 @@ export function SignalEngine({
         ) : (
           /* MT5 ("Trade Plan") ACTIONABLE RESULT */
           <div data-testid="mt5-result-card" className="space-y-3">
+            {/* Prominent Small Account Warning Box at TOP (when lotSize === 0) */}
+            {resultView.accountTooSmallWarning && (
+              <div
+                data-testid="mt5-account-too-small-warning"
+                className="p-3 rounded-xl bg-amber-950/50 border-2 border-amber-500/60 text-amber-200 font-mono text-xs flex items-start gap-2.5 shadow-lg"
+              >
+                <span className="text-base shrink-0">⚠️</span>
+                <span className="font-bold leading-snug">{resultView.accountTooSmallWarning}</span>
+              </div>
+            )}
+
             {/* 1. Verdict Block */}
             <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
@@ -1980,13 +2061,22 @@ export function SignalEngine({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleCopyMt5Setup}
-                className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-500/20 transition flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
-              >
-                {copiedMt5Text ? <span>✓ Copied order</span> : <span>{resultView.orderTicket.primaryButtonLabel}</span>}
-              </button>
+              {resultView.orderTicket.canCopyOrder ? (
+                <button
+                  type="button"
+                  onClick={handleCopyMt5Setup}
+                  className="w-full py-2.5 px-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-md shadow-blue-500/20 transition flex items-center justify-center gap-1.5 active:scale-98 cursor-pointer"
+                >
+                  {copiedMt5Text ? <span>✓ Copied order</span> : <span>{resultView.orderTicket.primaryButtonLabel}</span>}
+                </button>
+              ) : (
+                <div
+                  data-testid="mt5-copy-disabled-note"
+                  className="w-full py-2.5 px-3 bg-slate-900 border border-slate-700 text-slate-400 font-mono font-semibold text-xs rounded-xl text-center"
+                >
+                  {resultView.orderTicket.cannotCopyReason || "Can't copy: lot size is below your broker's minimum"}
+                </div>
+              )}
             </div>
 
             {/* 3. One Validity Line */}

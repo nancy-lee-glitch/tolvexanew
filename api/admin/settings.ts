@@ -5,7 +5,7 @@ import { logAdminAudit } from '../_lib/audit.js';
 export default async function handler(req: any, res: any) {
   const supabase = getSupabaseAdmin();
 
-  // GET: Public returns only safe keys ('site_branding', 'external_broker').
+  // GET: Public returns only safe keys ('site_branding', 'external_broker', 'min_actionable_strength').
   // If caller is verified admin, can return all settings.
   if (req.method === 'GET') {
     const auth = await authenticateRequest(req);
@@ -13,7 +13,7 @@ export default async function handler(req: any, res: any) {
 
     let dbQuery = supabase.from('app_settings').select('key, value, updated_at');
     if (!isAdmin) {
-      dbQuery = dbQuery.in('key', ['site_branding', 'external_broker']);
+      dbQuery = dbQuery.in('key', ['site_branding', 'external_broker', 'min_actionable_strength']);
     }
 
     const { data: rows, error } = await dbQuery;
@@ -24,6 +24,13 @@ export default async function handler(req: any, res: any) {
     const settingsMap: Record<string, any> = {};
     for (const row of rows || []) {
       settingsMap[row.key] = row.value;
+    }
+    if (
+      settingsMap.min_actionable_strength !== 'Low' &&
+      settingsMap.min_actionable_strength !== 'Medium' &&
+      settingsMap.min_actionable_strength !== 'High'
+    ) {
+      settingsMap.min_actionable_strength = 'Medium';
     }
 
     return res.json({
@@ -43,6 +50,15 @@ export default async function handler(req: any, res: any) {
     }
 
     const cleanKey = key.trim();
+
+    if (cleanKey === 'min_actionable_strength') {
+      if (value !== 'Low' && value !== 'Medium' && value !== 'High') {
+        return res.status(400).json({
+          ok: false,
+          error: "min_actionable_strength must be 'Low', 'Medium', or 'High'.",
+        });
+      }
+    }
 
     const { data: updated, error } = await supabase
       .from('app_settings')

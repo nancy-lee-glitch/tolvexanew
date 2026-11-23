@@ -11,6 +11,7 @@ import type {
   BrokersSettings,
   DirectWalletOrder,
   BrokerPlatformItem,
+  SignalStrength,
 } from '../types.ts';
 import {
   DEFAULT_SITE_SETTINGS,
@@ -48,6 +49,9 @@ import {
   approveDirectWalletOrder,
   rejectDirectWalletOrder,
   getAuthHeaders,
+  getMinActionableStrength,
+  fetchRemoteMinActionableStrength,
+  saveMinActionableStrength,
 } from '../utils/siteConfigManager.ts';
 
 export interface AdminCenterProps {
@@ -651,6 +655,37 @@ export function AdminCenter({
     }
   };
 
+  // Minimum actionable setup strength (Low / Medium / High)
+  const [minActionableStrength, setMinActionableStrength] = useState<SignalStrength>(() =>
+    getMinActionableStrength()
+  );
+  const [minStrengthSaving, setMinStrengthSaving] = useState(false);
+  const [minStrengthStatus, setMinStrengthStatus] = useState<{
+    type: 'saved' | 'error';
+    text: string;
+  } | null>(null);
+
+  const handleSaveMinActionableStrength = async () => {
+    setMinStrengthSaving(true);
+    setMinStrengthStatus(null);
+    try {
+      const res = await saveMinActionableStrength(minActionableStrength);
+      if (!res.ok) {
+        const msg = res.error || 'Failed to save minimum actionable setup strength.';
+        showToast(msg, 'error');
+        setMinStrengthStatus({ type: 'error', text: msg });
+        return;
+      }
+      showToast(`Minimum actionable setup strength set to ${minActionableStrength}.`, 'success');
+      setMinStrengthStatus({
+        type: 'saved',
+        text: `Saved: ${minActionableStrength}. Setups weaker than ${minActionableStrength} are shown as WAIT.`,
+      });
+    } finally {
+      setMinStrengthSaving(false);
+    }
+  };
+
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -855,6 +890,7 @@ export function AdminCenter({
   // Initial Data Bootstrap
   useEffect(() => {
     fetchRemoteSiteSettings().then((s) => setSiteSettings(s));
+    fetchRemoteMinActionableStrength().then((lvl) => setMinActionableStrength(lvl));
     fetchRemoteNowPaymentsConfig().then((c) => setNowConfig(c));
     loadUsers();
     loadVipCodes();
@@ -3008,6 +3044,55 @@ export function AdminCenter({
                 }`}
               >
                 {settingsStatus.text}
+              </div>
+            )}
+          </div>
+
+          {/* Minimum Actionable Setup Strength Setting */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3 mt-4">
+            <div className="space-y-1">
+              <label
+                htmlFor="admin-min-actionable-strength"
+                className="text-xs font-black text-white uppercase tracking-wider block"
+              >
+                Minimum actionable setup strength
+              </label>
+              <p className="text-[11px] text-slate-400 font-sans">
+                Setups weaker than this are shown as WAIT
+              </p>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+              <select
+                id="admin-min-actionable-strength"
+                value={minActionableStrength}
+                onChange={(e) => setMinActionableStrength(e.target.value as SignalStrength)}
+                className="bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white font-bold focus:border-amber-500 focus:outline-none sm:w-56"
+              >
+                <option value="Low">Low (allow Low, Medium, High)</option>
+                <option value="Medium">Medium (default — allow Medium, High)</option>
+                <option value="High">High (allow High only)</option>
+              </select>
+
+              <button
+                type="button"
+                onClick={handleSaveMinActionableStrength}
+                disabled={minStrengthSaving}
+                className="py-2 px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl transition shadow disabled:opacity-50 cursor-pointer"
+              >
+                {minStrengthSaving ? 'Saving...' : 'Save Strength Threshold'}
+              </button>
+            </div>
+
+            {minStrengthStatus && (
+              <div
+                className={`text-xs font-bold px-3 py-2 rounded-xl border ${
+                  minStrengthStatus.type === 'saved'
+                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                {minStrengthStatus.text}
               </div>
             )}
           </div>

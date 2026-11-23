@@ -11,6 +11,7 @@ import type {
   ReferralBonusConfig,
   BrokerPlatformItem,
   DirectWalletOrder,
+  SignalStrength,
 } from '../types.ts';
 import { getSupabaseClient } from './supabaseClient.ts';
 
@@ -407,6 +408,130 @@ export async function saveSiteSettings(newSettings: SiteSettings): Promise<SaveS
     mismatch,
     settings: merged,
   };
+}
+
+// =========================================================================
+// MINIMUM ACTIONABLE SETUP STRENGTH SETTING (Low | Medium | High)
+// =========================================================================
+export const MIN_ACTIONABLE_STRENGTH_KEY = 'min_actionable_strength';
+export const DEFAULT_MIN_ACTIONABLE_STRENGTH: SignalStrength = 'Medium';
+const STORAGE_KEY_MIN_STRENGTH = 'pulsetrade_min_actionable_strength';
+
+export function normalizeMinActionableStrength(raw: unknown): SignalStrength {
+  if (raw === 'Low' || raw === 'Medium' || raw === 'High') {
+    return raw;
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim().toLowerCase();
+    if (trimmed === 'low') return 'Low';
+    if (trimmed === 'high') return 'High';
+    if (trimmed === 'medium') return 'Medium';
+  }
+  return DEFAULT_MIN_ACTIONABLE_STRENGTH;
+}
+
+function broadcastMinStrengthChanged(level: SignalStrength) {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('pulsetrade_min_strength_changed', { detail: level }));
+  }
+}
+
+export function getMinActionableStrength(): SignalStrength {
+  if (typeof localStorage === 'undefined') return DEFAULT_MIN_ACTIONABLE_STRENGTH;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_MIN_STRENGTH);
+    if (raw) {
+      return normalizeMinActionableStrength(raw);
+    }
+  } catch {}
+  return DEFAULT_MIN_ACTIONABLE_STRENGTH;
+}
+
+export async function fetchRemoteMinActionableStrength(): Promise<SignalStrength> {
+  let resolved = getMinActionableStrength();
+
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', MIN_ACTIONABLE_STRENGTH_KEY)
+        .maybeSingle();
+
+      if (!error && data?.value != null) {
+        resolved = normalizeMinActionableStrength(data.value);
+        if (typeof localStorage !== 'undefined') {
+          try {
+            localStorage.setItem(STORAGE_KEY_MIN_STRENGTH, resolved);
+          } catch {}
+        }
+        broadcastMinStrengthChanged(resolved);
+        return resolved;
+      }
+    } catch {}
+  }
+
+  try {
+    const res = await fetch('/api/admin/settings');
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data?.settings && MIN_ACTIONABLE_STRENGTH_KEY in data.settings) {
+        resolved = normalizeMinActionableStrength(data.settings[MIN_ACTIONABLE_STRENGTH_KEY]);
+        if (typeof localStorage !== 'undefined') {
+          try {
+            localStorage.setItem(STORAGE_KEY_MIN_STRENGTH, resolved);
+          } catch {}
+        }
+        broadcastMinStrengthChanged(resolved);
+        return resolved;
+      }
+    }
+  } catch {}
+
+  return resolved;
+}
+
+export async function saveMinActionableStrength(
+  level: SignalStrength
+): Promise<{ ok: boolean; status?: number; value?: SignalStrength; error?: string }> {
+  if (level !== 'Low' && level !== 'Medium' && level !== 'High') {
+    return { ok: false, status: 400, error: "min_actionable_strength must be 'Low', 'Medium', or 'High'." };
+  }
+
+  let postStatus: number | undefined;
+  try {
+    const res = await fetch('/api/admin/settings', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ key: MIN_ACTIONABLE_STRENGTH_KEY, value: level }),
+    });
+    postStatus = res.status;
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.ok === false) {
+      const errorMsg =
+        (data && typeof data.error === 'string' && data.error) ||
+        (res.status === 401 || res.status === 403
+          ? 'You are not signed in as an admin. Sign in again.'
+          : `Server returned HTTP ${res.status}`);
+      return { ok: false, status: res.status, error: errorMsg };
+    }
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: postStatus,
+      error: err?.message || 'Network error saving minimum actionable strength.',
+    };
+  }
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEY_MIN_STRENGTH, level);
+    } catch {}
+  }
+  broadcastMinStrengthChanged(level);
+
+  return { ok: true, status: postStatus ?? 200, value: level };
 }
 
 /**
