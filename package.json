@@ -11,9 +11,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts && tsx src/services/liveFeed.test.ts",
+    "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts && tsx src/services/liveFeed.test.ts && tsx scripts/research/research.test.ts",
     "stress": "tsx scripts/stress-binary.ts",
     "backtest:real": "tsx scripts/backtest-real.ts",
+    "research": "tsx scripts/research/index.ts",
     "verify:security": "node scripts/verify-security.mjs"
   },
   "dependencies": {
