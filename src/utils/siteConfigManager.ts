@@ -14,6 +14,16 @@ import type {
   SignalStrength,
 } from '../types.ts';
 import { getSupabaseClient } from './supabaseClient.ts';
+import {
+  CONDITIONS_CONFIG_KEY,
+  DEFAULT_CONDITIONS_CONFIG,
+  normalizeConditionsConfig,
+  validateConditionsConfig,
+  type ConditionsConfig,
+} from './conditions.ts';
+
+export { CONDITIONS_CONFIG_KEY, DEFAULT_CONDITIONS_CONFIG };
+export type { ConditionsConfig };
 
 export function getAuthHeaders(): Record<string, string> {
   let token = '';
@@ -532,6 +542,162 @@ export async function saveMinActionableStrength(
   broadcastMinStrengthChanged(level);
 
   return { ok: true, status: postStatus ?? 200, value: level };
+}
+
+// =========================================================================
+// TRADING CONDITIONS GATE THRESHOLDS (conditions_config)
+// =========================================================================
+const STORAGE_KEY_CONDITIONS_CONFIG = 'pulsetrade_conditions_config';
+const STORAGE_KEY_DAILY_LOSS_LIMIT = 'pulsetrade_daily_loss_limit';
+
+function broadcastConditionsConfigChanged(config: ConditionsConfig) {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('pulsetrade_conditions_config_changed', { detail: config }));
+  }
+}
+
+export function getConditionsConfig(): ConditionsConfig {
+  if (typeof localStorage === 'undefined') return { ...DEFAULT_CONDITIONS_CONFIG };
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_CONDITIONS_CONFIG);
+    if (raw) {
+      return normalizeConditionsConfig(JSON.parse(raw));
+    }
+  } catch {}
+  return { ...DEFAULT_CONDITIONS_CONFIG };
+}
+
+export async function fetchRemoteConditionsConfig(): Promise<ConditionsConfig> {
+  let resolved = getConditionsConfig();
+
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('app_settings')
+        .select('value')
+        .eq('key', CONDITIONS_CONFIG_KEY)
+        .maybeSingle();
+
+      if (!error && data?.value != null) {
+        resolved = normalizeConditionsConfig(data.value);
+        if (typeof localStorage !== 'undefined') {
+          try {
+            localStorage.setItem(STORAGE_KEY_CONDITIONS_CONFIG, JSON.stringify(resolved));
+          } catch {}
+        }
+        broadcastConditionsConfigChanged(resolved);
+        return resolved;
+      }
+    } catch {}
+  }
+
+  try {
+    const res = await fetch('/api/admin/settings');
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data?.settings && CONDITIONS_CONFIG_KEY in data.settings) {
+        resolved = normalizeConditionsConfig(data.settings[CONDITIONS_CONFIG_KEY]);
+        if (typeof localStorage !== 'undefined') {
+          try {
+            localStorage.setItem(STORAGE_KEY_CONDITIONS_CONFIG, JSON.stringify(resolved));
+          } catch {}
+        }
+        broadcastConditionsConfigChanged(resolved);
+        return resolved;
+      }
+    }
+  } catch {}
+
+  return resolved;
+}
+
+export async function saveConditionsConfig(
+  rawConfig: Partial<ConditionsConfig>
+): Promise<{ ok: boolean; status?: number; value?: ConditionsConfig; error?: string }> {
+  const check = validateConditionsConfig(rawConfig);
+  if (!check.ok || !check.value) {
+    return {
+      ok: false,
+      status: 400,
+      error: check.error || 'Invalid conditions_config thresholds.',
+    };
+  }
+
+  const normalized = check.value;
+  let postStatus: number | undefined;
+  try {
+    const res = await fetch('/api/admin/settings', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ key: CONDITIONS_CONFIG_KEY, value: normalized }),
+    });
+    postStatus = res.status;
+    const data = await res.json().catch(() => null);
+    if (!res.ok || data?.ok === false) {
+      const errorMsg =
+        (data && typeof data.error === 'string' && data.error) ||
+        (res.status === 401 || res.status === 403
+          ? 'You are not signed in as an admin. Sign in again.'
+          : `Server returned HTTP ${res.status}`);
+      return { ok: false, status: res.status, error: errorMsg };
+    }
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: postStatus,
+      error: err?.message || 'Network error saving conditions configuration.',
+    };
+  }
+
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEY_CONDITIONS_CONFIG, JSON.stringify(normalized));
+    } catch {}
+  }
+  broadcastConditionsConfigChanged(normalized);
+
+  return { ok: true, status: postStatus ?? 200, value: normalized };
+}
+
+export async function resetConditionsConfig(): Promise<{
+  ok: boolean;
+  status?: number;
+  value?: ConditionsConfig;
+  error?: string;
+}> {
+  return saveConditionsConfig({ ...DEFAULT_CONDITIONS_CONFIG });
+}
+
+export function getUserDailyLossLimitCount(): number | null {
+  if (typeof localStorage === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DAILY_LOSS_LIMIT);
+    if (!raw) return null;
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0 && n <= 100) return n;
+  } catch {}
+  return null;
+}
+
+export function saveUserDailyLossLimitCount(limit: number | null): number | null {
+  const valid =
+    typeof limit === 'number' && Number.isFinite(limit) && limit >= 1
+      ? Math.min(100, Math.round(limit))
+      : null;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      if (valid === null) {
+        localStorage.removeItem(STORAGE_KEY_DAILY_LOSS_LIMIT);
+      } else {
+        localStorage.setItem(STORAGE_KEY_DAILY_LOSS_LIMIT, String(valid));
+      }
+    } catch {}
+  }
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('pulsetrade_daily_loss_limit_changed', { detail: valid }));
+  }
+  return valid;
 }
 
 /**

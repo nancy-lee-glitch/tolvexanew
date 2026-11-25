@@ -6,40 +6,57 @@ import {
   type FeedDiagnosticsSnapshot,
 } from '../services/feedSingleton.ts';
 import { subscribeAssetRegistry, getAssetRegistryInfo } from '../services/assetRegistry.ts';
+import {
+  formatChartDiagnosticsLines,
+  formatChartLastUpdateTime,
+  getChartDiagnosticsSnapshot,
+  subscribeChartDiagnostics,
+  type ChartDiagnosticsSnapshot,
+} from '../utils/chartDiagnostics.ts';
 import { useBrand } from '../utils/brand.ts';
 
 export function DebugDiagnosticsPanel() {
   const { siteName } = useBrand();
   const [diag, setDiag] = useState<FeedDiagnosticsSnapshot>(() => getFeedDiagnostics());
+  const [chartDiag, setChartDiag] = useState<ChartDiagnosticsSnapshot>(() =>
+    getChartDiagnosticsSnapshot()
+  );
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     getLiveFeed();
     setDiag(getFeedDiagnostics());
+    setChartDiag(getChartDiagnosticsSnapshot());
 
     const unsubDiag = subscribeDiagnostics((next) => setDiag(next));
     const unsubReg = subscribeAssetRegistry(() => {
       setDiag(getFeedDiagnostics());
     });
+    const unsubChart = subscribeChartDiagnostics((next) => setChartDiag(next));
     const timer = setInterval(() => {
       setDiag(getFeedDiagnostics());
+      setChartDiag(getChartDiagnosticsSnapshot());
     }, 1000);
 
     return () => {
       unsubDiag();
       unsubReg();
+      unsubChart();
       clearInterval(timer);
     };
   }, []);
 
   const registryInfo = diag.registry || getAssetRegistryInfo();
   const counts = registryInfo.categoryCounts;
+  const liveChartDiag = getChartDiagnosticsSnapshot();
+  const displayChart = chartDiag.activeSymbol ? chartDiag : liveChartDiag;
 
   const isFeedProblem = diag.status === 'OFFLINE' || diag.status === 'RECONNECTING';
   const statusDisplay = diag.status === 'IDLE' ? 'Idle — pick an asset' : diag.status;
 
   const formatPlainReport = (): string => {
     const ageLabel = diag.tickAgeSec !== null ? `${diag.tickAgeSec}s` : 'N/A';
+    const latestChart = getChartDiagnosticsSnapshot();
     return [
       `${siteName.toUpperCase()} FEED DIAGNOSTICS`,
       `Timestamp: ${new Date().toISOString()}`,
@@ -51,6 +68,7 @@ export function DebugDiagnosticsPanel() {
       `Registry Assets Total: ${registryInfo.total}`,
       `Categories: Forex=${counts.Forex}, Stocks=${counts.Stocks}, Indices=${counts.Indices}, Commodities=${counts.Commodities}, Crypto=${counts.Crypto}, Synthetics=${counts.Synthetics}`,
       `Last Feed Error: ${diag.lastError || 'None'}`,
+      ...formatChartDiagnosticsLines(latestChart),
     ].join('\n');
   };
 
@@ -132,6 +150,39 @@ export function DebugDiagnosticsPanel() {
               {registryInfo.source}
             </span>{' '}
             <span className="text-slate-400 font-normal">({registryInfo.reason})</span>
+          </div>
+        </div>
+      </div>
+
+      <div
+        data-testid="debug-chart-section"
+        className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 text-[11px] space-y-1.5"
+      >
+        <div className="text-cyan-300 font-bold uppercase tracking-wider">Chart</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-slate-200">
+          <div>
+            Buffer ticks ({displayChart.activeSymbol || 'none'}):{' '}
+            <strong className="text-white">{displayChart.bufferTickCount}</strong>
+          </div>
+          <div>
+            Series points:{' '}
+            <strong className="text-white">{displayChart.seriesPointCount}</strong>
+          </div>
+          <div>
+            wsConnected:{' '}
+            <strong className={displayChart.wsConnected ? 'text-emerald-400' : 'text-amber-300'}>
+              {String(displayChart.wsConnected)}
+            </strong>
+          </div>
+          <div>
+            Interval:{' '}
+            <strong className="text-white">{displayChart.selectedInterval || 'tick'}</strong>
+          </div>
+          <div className="sm:col-span-2">
+            Last chart update:{' '}
+            <strong className="text-slate-300">
+              {formatChartLastUpdateTime(displayChart.lastUpdateAtMs)}
+            </strong>
           </div>
         </div>
       </div>

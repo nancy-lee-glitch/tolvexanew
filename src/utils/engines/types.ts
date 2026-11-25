@@ -44,6 +44,8 @@ export interface BinaryEngineInput {
   payoutPct?: number;
   isOtc?: boolean;
   marketEvents?: MarketEventItem[];
+  instrumentSpec?: Partial<import('../../types.ts').InstrumentSpec>;
+  contractSizeOverride?: number;
   preferredExpiry?: BinaryExpiryChoice;
   nowMs?: number;
 }

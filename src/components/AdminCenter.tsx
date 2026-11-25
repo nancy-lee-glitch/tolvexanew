@@ -52,7 +52,16 @@ import {
   getMinActionableStrength,
   fetchRemoteMinActionableStrength,
   saveMinActionableStrength,
+  DEFAULT_CONDITIONS_CONFIG,
+  getConditionsConfig,
+  fetchRemoteConditionsConfig,
+  saveConditionsConfig,
+  resetConditionsConfig,
 } from '../utils/siteConfigManager.ts';
+import {
+  CONDITIONS_CONFIG_BOUNDS,
+  type ConditionsConfig,
+} from '../utils/conditions.ts';
 
 export interface AdminCenterProps {
   user?: UserProfile | null;
@@ -686,6 +695,70 @@ export function AdminCenter({
     }
   };
 
+  // Trading Conditions Gate thresholds (app_settings key: conditions_config)
+  const [conditionsConfig, setConditionsConfig] = useState<ConditionsConfig>(() =>
+    getConditionsConfig()
+  );
+  const [conditionsSaving, setConditionsSaving] = useState(false);
+  const [conditionsStatus, setConditionsStatus] = useState<{
+    type: 'saved' | 'error';
+    text: string;
+  } | null>(null);
+
+  const handleConditionFieldChange = (key: keyof ConditionsConfig, rawValue: string) => {
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    setConditionsConfig((prev) => ({
+      ...prev,
+      [key]: CONDITIONS_CONFIG_BOUNDS[key].integer ? Math.round(parsed) : parsed,
+    }));
+  };
+
+  const handleSaveConditionsConfig = async () => {
+    setConditionsSaving(true);
+    setConditionsStatus(null);
+    try {
+      const res = await saveConditionsConfig(conditionsConfig);
+      if (!res.ok) {
+        const msg = res.error || 'Failed to save conditions settings.';
+        showToast(msg, 'error');
+        setConditionsStatus({ type: 'error', text: msg });
+        return;
+      }
+      if (res.value) setConditionsConfig(res.value);
+      showToast('Trading conditions thresholds saved.', 'success');
+      setConditionsStatus({
+        type: 'saved',
+        text: 'Saved conditions_config thresholds across active sessions.',
+      });
+    } finally {
+      setConditionsSaving(false);
+    }
+  };
+
+  const handleResetConditionsConfig = async () => {
+    setConditionsSaving(true);
+    setConditionsStatus(null);
+    setConditionsConfig({ ...DEFAULT_CONDITIONS_CONFIG });
+    try {
+      const res = await resetConditionsConfig();
+      if (!res.ok) {
+        const msg = res.error || 'Reset local defaults, but server save failed.';
+        showToast(msg, 'error');
+        setConditionsStatus({ type: 'error', text: msg });
+        return;
+      }
+      if (res.value) setConditionsConfig(res.value);
+      showToast('Conditions settings reset to defaults.', 'success');
+      setConditionsStatus({
+        type: 'saved',
+        text: 'Reset to default thresholds and saved.',
+      });
+    } finally {
+      setConditionsSaving(false);
+    }
+  };
+
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -891,6 +964,7 @@ export function AdminCenter({
   useEffect(() => {
     fetchRemoteSiteSettings().then((s) => setSiteSettings(s));
     fetchRemoteMinActionableStrength().then((lvl) => setMinActionableStrength(lvl));
+    fetchRemoteConditionsConfig().then((cfg) => setConditionsConfig(cfg));
     fetchRemoteNowPaymentsConfig().then((c) => setNowConfig(c));
     loadUsers();
     loadVipCodes();
@@ -3093,6 +3167,80 @@ export function AdminCenter({
                 }`}
               >
                 {minStrengthStatus.text}
+              </div>
+            )}
+          </div>
+
+          {/* Trading Conditions Gate Thresholds (conditions_config) */}
+          <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 space-y-3 mt-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="space-y-0.5">
+                <h4 className="text-xs font-black text-white uppercase tracking-wider">
+                  Conditions settings
+                </h4>
+                <p className="text-[11px] text-slate-400 font-sans">
+                  Configure thresholds for the cockpit OK / CAUTION / NOT ADVISED risk gate (app_settings: conditions_config).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleResetConditionsConfig}
+                disabled={conditionsSaving}
+                className="py-1.5 px-3 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 font-bold text-xs rounded-lg transition cursor-pointer shrink-0 disabled:opacity-50"
+              >
+                Reset to defaults
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {(Object.keys(CONDITIONS_CONFIG_BOUNDS) as Array<keyof ConditionsConfig>).map((key) => {
+                const meta = CONDITIONS_CONFIG_BOUNDS[key];
+                return (
+                  <div key={key} className="space-y-1">
+                    <label
+                      htmlFor={`admin-cond-${key}`}
+                      className="text-[10px] text-slate-300 font-bold block"
+                    >
+                      {meta.label}
+                    </label>
+                    <input
+                      id={`admin-cond-${key}`}
+                      type="number"
+                      min={meta.min}
+                      max={meta.max}
+                      step={meta.integer ? 1 : 0.05}
+                      value={conditionsConfig[key]}
+                      onChange={(e) => handleConditionFieldChange(key, e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg py-1.5 px-2.5 text-xs text-white font-mono focus:border-amber-500 focus:outline-none"
+                    />
+                    <span className="text-[9px] text-slate-500 block">
+                      Range: {meta.min}–{meta.max} (default {DEFAULT_CONDITIONS_CONFIG[key]})
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={handleSaveConditionsConfig}
+                disabled={conditionsSaving}
+                className="py-2 px-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl transition shadow disabled:opacity-50 cursor-pointer"
+              >
+                {conditionsSaving ? 'Saving...' : 'Save Conditions Settings'}
+              </button>
+            </div>
+
+            {conditionsStatus && (
+              <div
+                className={`text-xs font-bold px-3 py-2 rounded-xl border ${
+                  conditionsStatus.type === 'saved'
+                    ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-300'
+                    : 'bg-rose-950/30 border-rose-500/40 text-rose-300'
+                }`}
+              >
+                {conditionsStatus.text}
               </div>
             )}
           </div>

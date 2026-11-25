@@ -13,6 +13,7 @@
     "lint": "tsc --noEmit",
     "test": "tsx scripts/test-indicators.ts && tsx scripts/test-engines.ts && tsx scripts/test-registry-load.ts && tsx src/services/liveFeed.test.ts",
     "stress": "tsx scripts/stress-binary.ts",
+    "backtest:real": "tsx scripts/backtest-real.ts",
     "verify:security": "node scripts/verify-security.mjs"
   },
   "dependencies": {

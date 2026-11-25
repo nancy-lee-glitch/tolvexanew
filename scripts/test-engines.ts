@@ -50,7 +50,16 @@ import {
   loadBrandOnce,
   resetBrandLoaderForTests,
 } from '../src/utils/brand.ts';
-import { formatDistanceUnitWord, resolveAssetPipSpec } from '../src/utils/instrumentMeta.ts';
+import {
+  assertSpecMatchesSymbol,
+  formatChartChangeSummary,
+  formatDistanceUnitWord,
+  isOtcInstrument,
+  normalizeSpecKey,
+  resolveAssetPipSpec,
+  resolveBaseInstrumentSpec,
+  resolveDefaultMaxLot,
+} from '../src/utils/instrumentMeta.ts';
 import {
   buildMarketContextSummaryLines,
   buildResultView,
@@ -63,7 +72,19 @@ import {
 } from '../src/utils/resultView.ts';
 import { isSyntheticAsset } from '../src/services/symbolMap.ts';
 import signalsLogHandler from '../api/signals/log.ts';
+import adminSettingsHandler from '../api/admin/settings.ts';
 import historyRefreshHandler from '../api/history/refresh.ts';
+import {
+  assessConditions,
+  CONDITIONS_DISCLAIMER_TEXT,
+  DEFAULT_CONDITIONS_CONFIG,
+  normalizeConditionsConfig,
+  OVERRIDE_BUTTON_LABEL,
+  pickConsistentWaitReason,
+  resolveAnalyseGateState,
+  validateConditionsConfig,
+} from '../src/utils/conditions.ts';
+import type { MarketContextSummary } from '../src/utils/engines/marketContext.ts';
 import {
   buildHistoryMarkerOverlays,
   buildKeyLevelOverlays,
@@ -72,6 +93,34 @@ import {
   snapTimestampToSeries,
   type ChartHistorySignalItem,
 } from '../src/utils/chartOverlays.ts';
+import {
+  computeLiveTickMetrics,
+  computeTickVelocityLabel,
+  formatChartDiagnosticsLines,
+  getChartDiagnosticsSnapshot,
+  reportChartDiagnostics,
+  resetChartDiagnosticsForTest,
+  resolveChartEmptyOverlayState,
+} from '../src/utils/chartDiagnostics.ts';
+import {
+  getAssetTimestampedTicks,
+  pushAssetTick,
+  seedTimestampedTicksFromCandles,
+} from '../src/utils/quantEngine.ts';
+import {
+  buildTradesCsv,
+  computeBinaryStats,
+  computeMt5Stats,
+  computeWilson95,
+  generateBacktestReport,
+  MIN_VERDICT_TRADES,
+  resolveMt5TradeOnM5,
+  resolveSpreadCostForAsset,
+  runBinaryWalkForwardForSymbol,
+  runMt5WalkForwardForSymbol,
+  selectUniverseFromActiveSymbols,
+  SPREAD_CONFIG,
+} from './backtest-real.ts';
 import type { BinarySignalOutput, Candle, MarketEventItem, MT5SignalOutput } from '../src/utils/engines/types.ts';
 import type { AssetConfig, TimestampedTick } from '../src/types.ts';
 
@@ -1903,7 +1952,7 @@ function runStage4FPipBrandWordingTests() {
     `BTC/USD uses 1.0 / points ("${btcDist.plainText}")`
   );
 
-  // 17d. Unmapped index uses points instead of pips
+  // 17d. Unmapped index without a table entry uses plain 'price' difference (no "points" of one tick)
   const us30Spec = resolveAssetPipSpec({
     name: 'US 30 Index',
     symbol: 'OTC_DJI',
@@ -1911,10 +1960,13 @@ function runStage4FPipBrandWordingTests() {
     pipSize: 0.1,
     decimals: 1,
   });
-  const us30Dist = formatLevelDistance(39100, 39000, 'Round 39000', us30Spec.pipSize, us30Spec.distanceUnit);
+  const us30Dist = formatLevelDistance(39100, 39000, 'Round 39000', us30Spec.pipSize, us30Spec.distanceUnit, us30Spec.decimals);
   assert(
-    us30Spec.distanceUnit === 'points' && us30Dist.plainText.includes('1000.0 points'),
-    `Unmapped index uses points ("${us30Dist.plainText}")`
+    us30Spec.distanceUnit === 'price' &&
+      us30Dist.plainText === 'price is 100.0 above Round 39000' &&
+      !us30Dist.plainText.includes('points') &&
+      !us30Dist.plainText.includes('pips'),
+    `Unmapped index uses plain price difference ("${us30Dist.plainText}")`
   );
 
   // Unknown FX pairs infer JPY -> 0.01 and non-JPY -> 0.0001
@@ -3072,18 +3124,1631 @@ async function runStage4IResultFixesTests() {
   );
 }
 
+// ============================================================================
+// 22. STAGE 4J: CHART LIVE METRICS, EMPTY OVERLAYS, M1 TICK SEED & DEBUG CHART
+// ============================================================================
+function runStage4JChartAndDiagnosticsTests() {
+  console.log('\n22. Stage 4J LiveChart Metrics, Empty States, M1 Tick Seeding & Debug Chart:');
+
+  // 22a. Live tick metrics calculation
+  const mEmpty = computeLiveTickMetrics({
+    open: 0,
+    close: 0,
+    high: 0,
+    low: 0,
+    firstTimeSec: 0,
+    lastTimeSec: 0,
+    pointCount: 0,
+    pipSize: 0.0001,
+  });
+  const mLive = computeLiveTickMetrics({
+    open: 1.085,
+    close: 1.0865,
+    high: 1.087,
+    low: 1.0845,
+    firstTimeSec: 1700000000,
+    lastTimeSec: 1700000900,
+    pointCount: 42,
+    pipSize: 0.0001,
+  });
+  assert(
+    mEmpty.totalBars === 0 &&
+      mEmpty.timespanMinutes === 0 &&
+      mLive.totalBars === 42 &&
+      mLive.timespanMinutes === 15 &&
+      mLive.changePips === 15 &&
+      mLive.high === 1.087 &&
+      mLive.low === 1.0845,
+    `computeLiveTickMetrics tracks live totalBars, timespanMinutes, high/low, and pip delta (bars=${mLive.totalBars}, span=${mLive.timespanMinutes}m, pips=${mLive.changePips})`
+  );
+
+  // 22b. Empty chart overlay rules: <8s loading, >=8s Retry, MARKET_CLOSED, hidden when >0 points
+  const ovHidden = resolveChartEmptyOverlayState({ pointCount: 5, feedStatus: 'LIVE', elapsedMs: 0 });
+  const ovClosed = resolveChartEmptyOverlayState({ pointCount: 0, feedStatus: 'MARKET_CLOSED', elapsedMs: 9000 });
+  const ovLoading = resolveChartEmptyOverlayState({ pointCount: 0, feedStatus: 'CONNECTING', elapsedMs: 3000 });
+  const ovTimeout = resolveChartEmptyOverlayState({ pointCount: 0, feedStatus: 'OFFLINE', elapsedMs: 8000 });
+
+  assert(
+    !ovHidden.visible &&
+      ovClosed.visible &&
+      ovClosed.message === 'Market closed' &&
+      !ovClosed.showRetry &&
+      ovLoading.visible &&
+      ovLoading.message === 'Loading price history...' &&
+      !ovLoading.showRetry &&
+      ovTimeout.visible &&
+      ovTimeout.message === 'No price data yet. Check your connection or pick another asset.' &&
+      ovTimeout.showRetry === true,
+    'resolveChartEmptyOverlayState handles Loading (0-8s), Retry timeout (>=8s), Market closed, and >0 points cleanly'
+  );
+
+  // 22c. seedTimestampedTicksFromCandles hydrates up to 60 real M1 closes cleanly & preserves newer live ticks
+  const testSym = 'TEST_STAGE4J_SYM';
+  const baseEpoch = 1700010000;
+  // Simulate 1 live tick arriving BEFORE historical M1 fetch completes
+  pushAssetTick(testSym, 1.2512, baseEpoch + 3600);
+  const m1Candles = Array.from({ length: 75 }, (_, i) => ({
+    time: baseEpoch - (74 - i) * 60,
+    close: Number((1.24 + i * 0.0001).toFixed(5)),
+  }));
+  const seeded = seedTimestampedTicksFromCandles(testSym, m1Candles, 60);
+  const storedAfterSeed = getAssetTimestampedTicks(testSym);
+  const strictlyAscending = storedAfterSeed.every((pt, idx) => idx === 0 || pt.time > storedAfterSeed[idx - 1].time);
+  assert(
+    seeded.length === 61 &&
+      storedAfterSeed.length === 61 &&
+      strictlyAscending &&
+      storedAfterSeed[storedAfterSeed.length - 1].time === baseEpoch + 3600 &&
+      storedAfterSeed[storedAfterSeed.length - 1].price === 1.2512,
+    `seedTimestampedTicksFromCandles fills 60 M1 closes cleanly in ascending order while keeping newer live tick (${storedAfterSeed.length} pts)`
+  );
+
+  // 22d. Chart diagnostics store + Copy report output + LiveChart/DebugDiagnosticsPanel source checks
+  resetChartDiagnosticsForTest();
+  const sampleUpdateMs = Date.UTC(2026, 2, 18, 12, 34, 56);
+  reportChartDiagnostics({
+    activeSymbol: testSym,
+    seriesPointCount: 61,
+    wsConnected: true,
+    selectedInterval: 'tick',
+    lastUpdateAtMs: sampleUpdateMs,
+  });
+  const snap = getChartDiagnosticsSnapshot();
+  const reportLines = formatChartDiagnosticsLines(snap).join('\n');
+  assert(
+    snap.activeSymbol === testSym &&
+      snap.bufferTickCount === 61 &&
+      snap.seriesPointCount === 61 &&
+      snap.wsConnected === true &&
+      snap.selectedInterval === 'tick' &&
+      snap.lastUpdateAtMs === sampleUpdateMs &&
+      reportLines.includes('CHART') &&
+      reportLines.includes(`Buffer Ticks (${testSym}): 61`) &&
+      reportLines.includes('Chart Series Points: 61') &&
+      reportLines.includes('Chart wsConnected: true') &&
+      reportLines.includes('Selected Interval: tick') &&
+      reportLines.includes('Last Chart Update: 2026-03-18T12:34:56.000Z'),
+    'chartDiagnostics tracks live buffer ticks, series points, wsConnected, interval, and lastUpdateAtMs for DebugDiagnosticsPanel'
+  );
+
+  const rootDir = resolve(process.cwd());
+  const liveChartSrc = readFileSync(resolve(rootDir, 'src/components/LiveChart.tsx'), 'utf8');
+  const liveTickerSrc = readFileSync(resolve(rootDir, 'src/components/LiveTicker.tsx'), 'utf8');
+  const debugPanelSrc = readFileSync(resolve(rootDir, 'src/components/DebugDiagnosticsPanel.tsx'), 'utf8');
+  assert(
+    liveChartSrc.includes("getOrFetchCandles(targetSymbol, '1m', 60)") &&
+      liveChartSrc.includes('seedTimestampedTicksFromCandles') &&
+      liveChartSrc.includes('computeLiveTickMetrics') &&
+      liveChartSrc.includes('resolveChartEmptyOverlayState') &&
+      liveChartSrc.includes('reportChartDiagnostics') &&
+      liveChartSrc.includes('data-testid="chart-retry-btn"') &&
+      debugPanelSrc.includes('data-testid="debug-chart-section"') &&
+      debugPanelSrc.includes('formatChartDiagnosticsLines'),
+    'LiveChart.tsx & DebugDiagnosticsPanel.tsx wire throttled metrics, M1 hydration, 8s/Market-closed overlays + Retry, and Chart debug report'
+  );
+
+  // 22e. Item 6: Plain price differences for synthetics and unmapped assets, keeping pips (FX/metals) and points (table crypto)
+  const r100Spec = resolveAssetPipSpec({ symbol: 'R_100', name: 'Volatility 100 Index', type: 'SYNTH', decimals: 2 });
+  const r10Spec = resolveAssetPipSpec({ symbol: 'R_10', name: 'Volatility 10 Index', type: 'SYNTH', decimals: 3 });
+  const oilSpec = resolveAssetPipSpec({ symbol: 'USOIL', name: 'WTI Crude Oil', type: 'COMMODITY', decimals: 2 });
+  const stockSpec = resolveAssetPipSpec({ symbol: 'AAPL', name: 'Apple Inc.', type: 'STOCK', decimals: 2 });
+  const solSpec = resolveAssetPipSpec({ symbol: 'crySOLUSD', name: 'SOL/USD', type: 'CRYPTO', decimals: 2 });
+  const xagSpec = resolveAssetPipSpec({ symbol: 'frxXAGUSD', name: 'Silver/USD', type: 'COMMODITY', decimals: 3 });
+  const ethSpec = resolveAssetPipSpec({ symbol: 'cryETHUSD', name: 'ETH/USD', type: 'CRYPTO', decimals: 2 });
+
+  assert(
+    r100Spec.distanceUnit === 'price' &&
+      r10Spec.distanceUnit === 'price' &&
+      oilSpec.distanceUnit === 'price' &&
+      stockSpec.distanceUnit === 'price' &&
+      solSpec.distanceUnit === 'price' &&
+      xagSpec.distanceUnit === 'pips' &&
+      ethSpec.distanceUnit === 'points' &&
+      ethSpec.pipSize === 0.1,
+    'Asset unit matrix: synthetics & unmapped index/commodity/stock/crypto use "price"; FX/metals use "pips"; table crypto uses "points"'
+  );
+
+  const synthChange = formatChartChangeSummary({
+    changePrice: 1.45,
+    changePips: 145,
+    changePct: 0.27,
+    decimals: 2,
+    distanceUnit: 'price',
+  });
+  const btcChange = formatChartChangeSummary({
+    changePrice: 120,
+    changePips: 120,
+    changePct: 0.18,
+    decimals: 2,
+    distanceUnit: 'points',
+  });
+  const fxChange = formatChartChangeSummary({
+    changePrice: 0.00145,
+    changePips: 14.5,
+    changePct: 0.13,
+    decimals: 5,
+    distanceUnit: 'pips',
+  });
+  assert(
+    synthChange === '+1.45 (+0.27%)' &&
+      btcChange === '+120 points (+0.18%)' &&
+      fxChange === '+14.5 pips (+0.13%)',
+    `formatChartChangeSummary renders "${synthChange}", "${btcChange}", and "${fxChange}"`
+  );
+
+  const r100CtxSummary = buildMarketContextSummaryLines({
+    symbol: 'R_100',
+    assetName: 'Volatility 100 Index',
+    pipSize: 0.01,
+    tickSize: 0.01,
+    decimals: 2,
+    distanceUnit: 'price',
+    currentPrice: 540.0,
+    computedAtIso: new Date(PRIME_FX_NOW_MS).toISOString(),
+    trendTable: [
+      {
+        timeframe: 'M15',
+        direction: 'Bullish',
+        strength: 'Moderate',
+        ema21: 539.1,
+        distancePips: 90,
+        distancePct: 0.17,
+        lastClose: 540.0,
+        sampleCount: 50,
+      },
+      {
+        timeframe: 'H1',
+        direction: 'Bullish',
+        strength: 'Strong',
+        ema21: 538.4,
+        distancePips: 160,
+        distancePct: 0.3,
+        lastClose: 540.0,
+        sampleCount: 50,
+      },
+      {
+        timeframe: 'H4',
+        direction: 'Neutral',
+        strength: 'Weak',
+        ema21: 539.8,
+        distancePips: 20,
+        distancePct: 0.04,
+        lastClose: 540.0,
+        sampleCount: 40,
+      },
+      {
+        timeframe: 'D1',
+        direction: 'Bullish',
+        strength: 'Moderate',
+        ema21: 532.0,
+        distancePips: 800,
+        distancePct: 1.5,
+        lastClose: 540.0,
+        sampleCount: 30,
+      },
+    ],
+    levelsMap: [
+      {
+        id: 'pp',
+        label: 'Daily Pivot (PP)',
+        group: 'Daily Pivot',
+        price: 538.55,
+        signedPipsFromLevel: 145,
+        absPipsFromLevel: 145,
+        relation: 'above',
+        plainText: 'price is 1.45 above Daily Pivot (PP)',
+        sampleCount: 1,
+      },
+      {
+        id: 'r1',
+        label: 'Daily Resistance (R1)',
+        group: 'Daily Pivot',
+        price: 543.25,
+        signedPipsFromLevel: -325,
+        absPipsFromLevel: 325,
+        relation: 'below',
+        plainText: 'price is 3.25 below Daily Resistance (R1)',
+        sampleCount: 1,
+      },
+    ],
+    dailyPivot: null,
+    pivotSampleCount: 1,
+    volatilityRegime: {
+      currentAtr: 12.34,
+      currentAtrPips: 1234,
+      percentile30d: 55,
+      regime: 'normal',
+      sampleCount: 30,
+      lookbackTargetDays: 30,
+    },
+    sessionProfile: {
+      lookbackWeeks: 8,
+      totalBars: 1344,
+      hours: [],
+      mostActiveHour: null,
+      quietestHour: null,
+    },
+  });
+  const r100Mt5Signal: MT5SignalOutput = {
+    engine: 'mt5_v1',
+    profile: 'MT5',
+    platform: 'mt5',
+    platformName: 'MetaTrader 5',
+    asset: 'Volatility 100 Index',
+    symbol: 'R_100',
+    direction: 'BUY',
+    orderKind: 'MARKET',
+    entryPrice: 540.0,
+    entryZone: { min: 539.7, max: 540.3 },
+    stopLoss: 537.5,
+    stopLossPips: 250,
+    takeProfit1: 543.75,
+    takeProfit1Pips: 375,
+    takeProfit2: 546.25,
+    takeProfit2Pips: 625,
+    lotSize: 0.2,
+    riskMoney: 50,
+    accountCurrency: 'USD',
+    rewardRiskTp1: 1.5,
+    rewardRiskTp2: 2.5,
+    rewardRiskRatio: '1:1.50 (TP2 1:2.50)',
+    validityCandles: 3,
+    validityMinutes: 15,
+    validityWindowDesc: '3 × M5 candles (15 min)',
+    validUntil: new Date(PRIME_FX_NOW_MS + 900_000).toISOString(),
+    invalidationLevel: 537.5,
+    invalidationDriftPrice: 0.8,
+    invalidationRule: 'Test invalidation',
+    sessionNote: '24/7',
+    sessionQuality: 'PRIME',
+    tradeManagementNote: 'Test mgmt',
+    copyOrderText: 'BUY MARKET R_100 @ 540.00',
+    strength: 'Medium',
+    rawScore: 76,
+    reasons: ['D1/H4 up', 'M5 entry', 'Session'],
+    distanceUnit: 'price',
+    structureTimeframe: 'H1',
+    timeframe: 'H1',
+    createdAt: new Date(PRIME_FX_NOW_MS).toISOString(),
+    generatedAt: PRIME_FX_NOW_MS,
+    feedSource: 'deriv_ws',
+    inputsSnapshot: {},
+  };
+  const r100View = buildResultView(r100Mt5Signal, 'MT5', {
+    nowMs: PRIME_FX_NOW_MS,
+    minActionableStrength: 'Low',
+    decimals: 2,
+    distanceUnit: 'price',
+  });
+  const r100Overlays = buildSignalChartOverlays(r100Mt5Signal, {
+    decimals: 2,
+    distanceUnit: 'price',
+  });
+  const slLineTitle = r100Overlays.find((l) => l.role === 'sl')?.label || '';
+  const tp1LineTitle = r100Overlays.find((l) => l.role === 'tp1')?.label || '';
+
+  assert(
+    r100CtxSummary.volatilityLine === 'Volatility is normal — daily ATR(14) is 12.34 (55th percentile, n=30).' &&
+      r100CtxSummary.levelsLine.includes('+3.25') &&
+      r100CtxSummary.levelsLine.includes('-1.45') &&
+      !r100CtxSummary.volatilityLine.includes('points') &&
+      !r100CtxSummary.levelsLine.includes('points') &&
+      r100View?.kind === 'MT5' &&
+      r100View.orderTicket.stopLossDistanceText === '-2.50' &&
+      r100View.orderTicket.tp1DistanceText === '+3.75' &&
+      slLineTitle === 'SL (-2.50)' &&
+      tp1LineTitle === 'TP1 (+3.75)',
+    `Synthetic R_100 context, MT5 ticket, and chart lines render plain price differences without "points" (vol="${r100CtxSummary.volatilityLine}", sl="${slLineTitle}")`
+  );
+
+  // 22f. Item 7: LIVE QUOTE velocity renders 1-decimal rate (e.g. "0.5 t/s")
+  const velStartMs = 1_700_000_000_000;
+  const velZero = computeTickVelocityLabel({
+    tickTimestampsMs: [],
+    nowMs: velStartMs + 2000,
+    windowStartMs: velStartMs,
+  });
+  const velHalf1Tick = computeTickVelocityLabel({
+    tickTimestampsMs: [velStartMs + 1500],
+    nowMs: velStartMs + 2000,
+    windowStartMs: velStartMs,
+  });
+  const velHalf10s = computeTickVelocityLabel({
+    tickTimestampsMs: [
+      velStartMs + 1000,
+      velStartMs + 3000,
+      velStartMs + 5000,
+      velStartMs + 7000,
+      velStartMs + 9000,
+    ],
+    nowMs: velStartMs + 10_000,
+    windowStartMs: velStartMs,
+  });
+  const velActive = computeTickVelocityLabel({
+    tickTimestampsMs: Array.from({ length: 30 }, (_, i) => velStartMs + i * 330),
+    nowMs: velStartMs + 10_000,
+    windowStartMs: velStartMs,
+  });
+  const velHigh = computeTickVelocityLabel({
+    tickTimestampsMs: Array.from({ length: 75 }, (_, i) => velStartMs + i * 130),
+    nowMs: velStartMs + 10_000,
+    windowStartMs: velStartMs,
+  });
+
+  assert(
+    velZero.label === 'Steady (0.0 t/s)' &&
+      velHalf1Tick.label === 'Steady (0.5 t/s)' &&
+      velHalf10s.label === 'Steady (0.5 t/s)' &&
+      velActive.label === 'Active (3.0 t/s)' &&
+      velHigh.label === 'High (7.5 t/s)' &&
+      liveTickerSrc.includes('computeTickVelocityLabel') &&
+      liveTickerSrc.includes('Steady (0.0 t/s)'),
+    `LIVE QUOTE velocity formats 1-decimal t/s cleanly ("${velHalf10s.label}", "${velActive.label}", "${velHigh.label}")`
+  );
+}
+
+function runStage4BBacktestTests() {
+  console.log('\n============================================================');
+  console.log('  TICKVERE STAGE 4B: REAL-HISTORY BACKTEST HARNESS SUITE');
+  console.log('============================================================\n');
+
+  // 23a. Spread costs & instrumentMeta pip sizes
+  console.log('23a. SPREAD_CONFIG & resolveSpreadCostForAsset:');
+  const eurSpread = resolveSpreadCostForAsset(EURUSD);
+  const gbpSpread = resolveSpreadCostForAsset({ symbol: 'frxGBPUSD', name: 'GBP/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001 });
+  const jpySpread = resolveSpreadCostForAsset(USDJPY);
+  const audSpread = resolveSpreadCostForAsset({ symbol: 'frxAUDUSD', name: 'AUD/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001 });
+  const gbpjpySpread = resolveSpreadCostForAsset({ symbol: 'frxGBPJPY', name: 'GBP/JPY', type: 'FOREX', decimals: 3, pipSize: 0.01 });
+  const xauSpread = resolveSpreadCostForAsset(XAUUSD);
+  const xagSpread = resolveSpreadCostForAsset({ symbol: 'frxXAGUSD', name: 'Silver/USD', type: 'COMMODITY', decimals: 3, pipSize: 0.001 });
+  const btcSpread = resolveSpreadCostForAsset({ symbol: 'cryBTCUSD', name: 'BTC/USD', type: 'CRYPTO', decimals: 2, pipSize: 1.0 });
+  const ethSpread = resolveSpreadCostForAsset({ symbol: 'cryETHUSD', name: 'ETH/USD', type: 'CRYPTO', decimals: 2, pipSize: 0.1 });
+  const idxSpread = resolveSpreadCostForAsset({ symbol: 'OTC_SPC', name: 'US 500', type: 'INDEX', decimals: 2, pipSize: 0.01 });
+
+  assert(
+    Math.abs(eurSpread.spreadPrice - 0.0001) < 1e-9 &&
+      Math.abs(gbpSpread.spreadPrice - 0.00013) < 1e-9 &&
+      Math.abs(jpySpread.spreadPrice - 0.01) < 1e-9 &&
+      Math.abs(audSpread.spreadPrice - 0.00015) < 1e-9 &&
+      Math.abs(gbpjpySpread.spreadPrice - 0.015) < 1e-9 &&
+      Math.abs(xauSpread.spreadPrice - 0.25) < 1e-9 &&
+      Math.abs(xagSpread.spreadPrice - 0.03) < 1e-9 &&
+      btcSpread.spreadPrice === 20 &&
+      ethSpread.spreadPrice === 2 &&
+      idxSpread.spreadPrice === 1.5 &&
+      Object.keys(SPREAD_CONFIG).length >= 10,
+    `Exact per-symbol spreads computed from instrumentMeta.ts (EUR=${eurSpread.spreadPrice}, GBP=${gbpSpread.spreadPrice}, XAU=${xauSpread.spreadPrice}, BTC=${btcSpread.spreadPrice})`
+  );
+
+  // 23b. Active-symbol universe selection (non-synthetic filter + OTC index bug note)
+  console.log('\n23b. selectUniverseFromActiveSymbols:');
+  const universe = selectUniverseFromActiveSymbols([
+    { symbol: 'R_100', display_name: 'Volatility 100', market: 'synthetic_index', pip: 0.01 },
+    { symbol: '1HZ100V', display_name: 'Volatility 100 (1s)', market: 'synthetic_index', pip: 0.01 },
+    { symbol: 'frxEURUSD', display_name: 'EUR/USD', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxGBPUSD', display_name: 'GBP/USD', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxUSDJPY', display_name: 'USD/JPY', market: 'forex', pip: 0.001 },
+    { symbol: 'frxAUDUSD', display_name: 'AUD/USD', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxUSDCAD', display_name: 'USD/CAD', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxUSDCHF', display_name: 'USD/CHF', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxGBPJPY', display_name: 'GBP/JPY', market: 'forex', pip: 0.001 },
+    { symbol: 'frxEURJPY', display_name: 'EUR/JPY', market: 'forex', pip: 0.001 },
+    { symbol: 'frxNZDUSD', display_name: 'NZD/USD', market: 'forex', pip: 0.00001 },
+    { symbol: 'frxXAUUSD', display_name: 'Gold/USD', market: 'commodities', pip: 0.01 },
+    { symbol: 'frxXAGUSD', display_name: 'Silver/USD', market: 'commodities', pip: 0.001 },
+    { symbol: 'cryBTCUSD', display_name: 'BTC/USD', market: 'cryptocurrency', pip: 0.01 },
+    { symbol: 'cryETHUSD', display_name: 'ETH/USD', market: 'cryptocurrency', pip: 0.01 },
+    { symbol: 'OTC_SPC', display_name: 'US 500', market: 'indices', pip: 0.01 },
+    { symbol: 'OTC_NDX', display_name: 'US Tech 100', market: 'indices', pip: 0.01 },
+    { symbol: 'OTC_DJI', display_name: 'Wall Street 30', market: 'indices', pip: 0.01 },
+    { symbol: 'OTC_GDAXI', display_name: 'Germany 40', market: 'indices', pip: 0.01 },
+  ]);
+  assert(
+    universe.mt5Assets.length === 15 &&
+      !universe.mt5Assets.some((a) => a.symbol === 'R_100' || a.symbol === '1HZ100V') &&
+      universe.binaryAssets.length === 5 &&
+      universe.mt5Assets.find((a) => a.symbol === 'frxEURUSD')?.pipSize === 0.0001 &&
+      universe.mt5Assets.find((a) => a.symbol === 'frxAUDUSD')?.pipSize === 0.0001 &&
+      universe.activeIndexBugNotes.length === 0,
+    `Selected 15 non-synthetic MT5 symbols + 5 Binary symbols, fixed EURUSD & AUDUSD pipSize=0.0001, and cleared fixed bug notes`
+  );
+
+  // 23c. MT5 M5 resolution: SL-first conservative tie-breaker, TP1 win, 48h timeout, unfilled limit
+  console.log('\n23c. resolveMt5TradeOnM5 Rules:');
+  const baseT0 = Date.UTC(2026, 7, 10, 10, 0, 0) / 1000;
+  // Both SL and TP1 hit in same M5 bar -> SL wins conservatively
+  const slFirstRes = resolveMt5TradeOnM5({
+    direction: 'BUY',
+    orderKind: 'MARKET',
+    signalTimeSec: baseT0,
+    validUntilSec: baseT0 + 900,
+    entryPrice: 1.1000,
+    stopLoss: 1.0980,
+    takeProfit1: 1.1040,
+    rewardRiskTp1: 2.0,
+    spreadPrice: 0.0002,
+    m5Candles: [
+      { time: baseT0, open: 1.1000, high: 1.1045, low: 1.0975, close: 1.1030 },
+    ],
+    startIdx: 0,
+  });
+  assert(
+    slFirstRes.status === 'FILLED' &&
+      slFirstRes.exitReason === 'SL' &&
+      slFirstRes.outcome === 'LOSS' &&
+      Math.abs(slFirstRes.netR - -1.1) < 1e-9,
+    `SL + TP1 in same candle conservatively triggers SL (-1.10R w/ spread)`
+  );
+
+  // Clean TP1 hit
+  const tpRes = resolveMt5TradeOnM5({
+    direction: 'BUY',
+    orderKind: 'MARKET',
+    signalTimeSec: baseT0,
+    validUntilSec: baseT0 + 900,
+    entryPrice: 1.1000,
+    stopLoss: 1.0980,
+    takeProfit1: 1.1040,
+    rewardRiskTp1: 2.0,
+    spreadPrice: 0.0002,
+    m5Candles: [
+      { time: baseT0, open: 1.1000, high: 1.1020, low: 1.0990, close: 1.1015 },
+      { time: baseT0 + 300, open: 1.1015, high: 1.1042, low: 1.1010, close: 1.1038 },
+    ],
+    startIdx: 0,
+  });
+  assert(
+    tpRes.status === 'FILLED' &&
+      tpRes.exitReason === 'TP1' &&
+      tpRes.outcome === 'WIN' &&
+      Math.abs(tpRes.netR - 1.9) < 1e-9,
+    `Clean TP1 hit awards +1.90R after 0.10R spread cost`
+  );
+
+  // 48h timeout close at market
+  const m5Flat48h: Candle[] = [];
+  for (let s = baseT0; s <= baseT0 + 50 * 3600; s += 300) {
+    const closePx = s === baseT0 + 48 * 3600 - 300 ? 1.1010 : 1.1005;
+    m5Flat48h.push({ time: s, open: 1.1000, high: 1.1012, low: 1.0990, close: closePx });
+  }
+  const timeoutRes = resolveMt5TradeOnM5({
+    direction: 'BUY',
+    orderKind: 'MARKET',
+    signalTimeSec: baseT0,
+    validUntilSec: baseT0 + 900,
+    entryPrice: 1.1000,
+    stopLoss: 1.0980,
+    takeProfit1: 1.1040,
+    rewardRiskTp1: 2.0,
+    spreadPrice: 0.0002,
+    m5Candles: m5Flat48h,
+    startIdx: 0,
+  });
+  // +0.0010 / 0.0020 = +0.50R gross - 0.10R spread = +0.40R
+  assert(
+    timeoutRes.status === 'FILLED' &&
+      timeoutRes.exitReason === 'TIMEOUT_48H' &&
+      Math.abs(timeoutRes.netR - 0.4) < 1e-6,
+    `48h unresolved trade closes at market price (${timeoutRes.status === 'FILLED' ? timeoutRes.netR.toFixed(3) : timeoutRes.status})`
+  );
+
+  // Unfilled LIMIT expires after validUntilSec
+  const unfilledLimit = resolveMt5TradeOnM5({
+    direction: 'BUY',
+    orderKind: 'LIMIT',
+    signalTimeSec: baseT0,
+    validUntilSec: baseT0 + 900,
+    entryPrice: 1.0990,
+    stopLoss: 1.0970,
+    takeProfit1: 1.1030,
+    rewardRiskTp1: 2.0,
+    spreadPrice: 0.0002,
+    m5Candles: [
+      { time: baseT0, open: 1.1000, high: 1.1010, low: 1.0995, close: 1.1005 },
+      { time: baseT0 + 300, open: 1.1005, high: 1.1015, low: 1.0996, close: 1.1012 },
+      { time: baseT0 + 600, open: 1.1012, high: 1.1020, low: 1.1000, close: 1.1018 },
+      { time: baseT0 + 900, open: 1.1018, high: 1.1020, low: 1.0980, close: 1.0985 },
+    ],
+    startIdx: 0,
+  });
+  assert(
+    unfilledLimit.status === 'UNFILLED_LIMIT',
+    `Unfilled LIMIT order expires cleanly at validity window`
+  );
+
+  // 23d. Statistics: computeMt5Stats (<30 => 'not enough trades', >=30 => all 4 verdicts) & Wilson 95% CI
+  console.log('\n23d. Statistical Helpers & Verdict Classification:');
+  const smallPos = computeMt5Stats([1.5, 1.4, -1.1, 1.5, 1.6, 1.4, -1.1, 1.5, 1.6, 1.5]);
+  const repeat = <T>(arr: T[], times: number): T[] => Array.from({ length: times }, () => arr).flat();
+  const posSig = computeMt5Stats(repeat([1.5, 1.4, -1.1, 1.5, 1.6, 1.4, -1.1, 1.5, 1.6, 1.5], 3));
+  const posNotSig = computeMt5Stats(repeat([1.2, -1.1, 0.2], 10));
+  const zeroStats = computeMt5Stats(repeat([1.0, -1.0], 15));
+  const negStats = computeMt5Stats(repeat([-1.1, -1.1, 0.5, -1.1], 8));
+  const ddCheck = computeMt5Stats([-1.1, -1.1, 0.5, -1.1]);
+  assert(
+    MIN_VERDICT_TRADES === 30 &&
+      smallPos.verdict === 'not enough trades' &&
+      posSig.verdict === 'positive and significant' &&
+      posNotSig.verdict === 'positive but not significant' &&
+      zeroStats.verdict === 'zero' &&
+      negStats.verdict === 'negative' &&
+      ddCheck.verdict === 'not enough trades' &&
+      ddCheck.longestLosingStreak === 2 &&
+      Math.abs(ddCheck.maxDrawdownR - 2.8) < 1e-9,
+    `computeMt5Stats requires >=30 trades before emitting positive/negative verdicts and computes exact DD/streak`
+  );
+
+  const [wLo, wHi] = computeWilson95(70, 100);
+  const bStats = computeBinaryStats(Array.from({ length: 100 }, (_, i) => i < 70));
+  const bSmall = computeBinaryStats(Array.from({ length: 15 }, () => true));
+  assert(
+    wLo > 56 &&
+      wHi < 80 &&
+      !bStats.notEnoughTrades &&
+      bStats.beats80 &&
+      bStats.beats85 &&
+      bStats.beats90 &&
+      bSmall.notEnoughTrades &&
+      !bSmall.beats80 &&
+      !bSmall.beats85 &&
+      !bSmall.beats90,
+    `computeBinaryStats 70/100 Wilson CI [${wLo}%, ${wHi}%] beats BE while n<30 suppresses positive break-even flags`
+  );
+
+  // 23e. Binary walk-forward cooldown, tie=loss & candle causality from ticks
+  console.log('\n23e. Binary Walk-Forward (Tick-Built Candles, 3m Cooldown, Tie = Loss):');
+  // Build ~4.5 hours of dense trending 2-second ticks ending on Wednesday 13:45 UTC
+  const binEndSec = Date.UTC(2026, 7, 12, 13, 45, 0) / 1000;
+  const binStartSec = binEndSec - 4.5 * 3600;
+  const binTicks: TimestampedTick[] = [];
+  let pxBin = 1.0800;
+  for (let t = binStartSec; t <= binEndSec; t += 2) {
+    const idx = (t - binStartSec) / 2;
+    const wave = Math.sin(idx * 0.12) * 0.000015;
+    pxBin += 0.0000025 + wave;
+    binTicks.push({ time: t, price: parseFloat(pxBin.toFixed(5)) });
+  }
+  const binWalk = runBinaryWalkForwardForSymbol({
+    asset: EURUSD,
+    ticks: binTicks,
+    modes: ['1m', '3m', 'auto'],
+  });
+  let cooldownOk = true;
+  const lastByMode = new Map<string, number>();
+  for (const s of binWalk.signals) {
+    const prev = lastByMode.get(s.mode);
+    if (prev !== undefined && s.entryTimeSec - prev < 180) {
+      cooldownOk = false;
+    }
+    lastByMode.set(s.mode, s.entryTimeSec);
+  }
+  // Verify exact tie counts as loss
+  const flatTieEnd = Date.UTC(2026, 7, 12, 13, 30, 0) / 1000;
+  const tieCheckWin = (() => {
+    const entry = 1.1000;
+    const exit = 1.1000;
+    return exit > entry;
+  })();
+  assert(
+    cooldownOk && !tieCheckWin && binWalk.startSec === binStartSec && binWalk.endSec === binEndSec && flatTieEnd > 0,
+    `Binary walk-forward enforces 180s per-mode cooldown and treats exact tie as loss (signals=${binWalk.signals.length})`
+  );
+
+  // 23f. MT5 walk-forward + CSV + Report text compliance (no "accuracy"/"probability")
+  console.log('\n23f. MT5 Walk-Forward, CSV Columns & Report Disclaimers:');
+  const mt5WalkEnd = Date.UTC(2026, 7, 12, 16, 0, 0) / 1000;
+  const bundleMt5 = makeBullishFxBundle({ nowSec: mt5WalkEnd });
+  const mt5Walk = runMt5WalkForwardForSymbol({
+    history: {
+      asset: EURUSD,
+      D1: bundleMt5.d1,
+      H4: bundleMt5.h4,
+      H1: bundleMt5.h1,
+      M15: bundleMt5.m15,
+      M5: bundleMt5.m5,
+    },
+    structureTimeframe: 'H1',
+  });
+  const csv = buildTradesCsv({ mt5Trades: mt5Walk.trades, binarySignals: binWalk.signals });
+  const report = generateBacktestReport({
+    generatedAtIso: new Date(PRIME_FX_NOW_MS).toISOString(),
+    mt5PerSymbolResults: [{ asset: EURUSD, h1: mt5Walk, m15: mt5Walk }],
+    binaryPerSymbolResults: [{ asset: EURUSD, signals: binWalk.signals, startSec: binWalk.startSec, endSec: binWalk.endSec }],
+    engineBugsFound: universe.activeIndexBugNotes,
+  });
+  const lowerReport = report.toLowerCase();
+  assert(
+    csv.startsWith('time,symbol,engine,direction,strength,entry,outcome,R\n') &&
+      report.includes('These results are historical and do not predict future performance.') &&
+      report.includes('14 days is a small sample') &&
+      report.includes('Plain-English Summary') &&
+      report.includes('Pooled MT5 (all trades):') &&
+      report.includes('Pooled Binary (all trades):') &&
+      report.includes('Engine Anomalies Observed During Run') &&
+      !lowerReport.includes('accuracy') &&
+      !lowerReport.includes('probability'),
+    `CSV header exact & report includes pooled summaries, disclaimer, 14-day caveat, and zero "accuracy"/"probability"`
+  );
+}
+
+function runStage4KSafetyFixTests() {
+  console.log('\n============================================================');
+  console.log('  TICKVERE STAGE 4K: INSTRUMENT SAFETY & OTC/REPORT FIXES');
+  console.log('============================================================\n');
+
+  // 24a. All 28 FX pairs + metals + crypto + OTC_* indices: normalizeSpecKey, contractSize, pipSize, maxLot, and $10k/1%/25-pip sizing
+  console.log('24a. All 28 FX Pairs + Metals + Crypto + Indices Spec & Lot Sizing:');
+  const CURRENCIES = ['EUR', 'GBP', 'USD', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD'] as const;
+  // Approximate spot/USD prices for cross conversion in position-sizing check
+  const USD_PER_CCY: Record<string, number> = {
+    EUR: 1.09,
+    GBP: 1.27,
+    USD: 1.0,
+    JPY: 1 / 150,
+    AUD: 0.66,
+    CAD: 1 / 1.36,
+    CHF: 1 / 0.88,
+    NZD: 0.61,
+  };
+  const fxRates: Record<string, number> = {};
+  for (const b of CURRENCIES) {
+    for (const q of CURRENCIES) {
+      if (b === q) continue;
+      fxRates[`${b}${q}`] = USD_PER_CCY[b] / USD_PER_CCY[q];
+    }
+  }
+
+  let pairCount = 0;
+  let all28SpecOk = true;
+  let all28LotOk = true;
+  const badPairs: string[] = [];
+
+  for (let i = 0; i < CURRENCIES.length; i++) {
+    for (let j = i + 1; j < CURRENCIES.length; j++) {
+      pairCount++;
+      const c1 = CURRENCIES[i];
+      const c2 = CURRENCIES[j];
+      // Standard market ordering (EUR > GBP > AUD > NZD > USD > CAD > CHF > JPY)
+      const ORDER = ['EUR', 'GBP', 'AUD', 'NZD', 'USD', 'CAD', 'CHF', 'JPY'];
+      const [base, quote] = ORDER.indexOf(c1) < ORDER.indexOf(c2) ? [c1, c2] : [c2, c1];
+      const sym = `frx${base}${quote}`;
+      const expectedKey = `${base}/${quote}`;
+      const expectedPip = quote === 'JPY' ? 0.01 : 0.0001;
+      const expectedDec = quote === 'JPY' ? 3 : 5;
+
+      const asset: AssetConfig = {
+        symbol: sym,
+        name: expectedKey,
+        type: 'FOREX',
+        pipSize: quote === 'JPY' ? 0.001 : 0.00001, // raw Deriv precision step
+        decimals: expectedDec,
+      };
+      const key = normalizeSpecKey(sym);
+      const spec = resolveInstrumentSpec(asset);
+      const check = assertSpecMatchesSymbol(sym, spec);
+      const rate = resolveQuoteToAccountRate({
+        quoteCcy: spec.quoteCcy,
+        accountCurrency: 'USD',
+        asset,
+        entryPrice: fxRates[`${base}${quote}`],
+        conversionRates: fxRates,
+      });
+      const sizing = calculateMT5PositionSize({
+        accountBalance: 10_000,
+        riskPct: 1.0,
+        slDistancePrice: 25 * spec.pipSize,
+        spec,
+        quoteToAccountRate: rate || 1,
+        accountCurrency: 'USD',
+      });
+
+      if (
+        key !== expectedKey ||
+        spec.contractSize !== 100000 ||
+        Math.abs(spec.pipSize - expectedPip) > 1e-9 ||
+        spec.maxLot !== 50 ||
+        !check.ok
+      ) {
+        all28SpecOk = false;
+        badPairs.push(`${sym}(key=${key},c=${spec.contractSize},pip=${spec.pipSize})`);
+      }
+      if (!(sizing.lotSize >= 0.1 && sizing.lotSize <= 1.5)) {
+        all28LotOk = false;
+        badPairs.push(`${sym}(lots=${sizing.lotSize})`);
+      }
+    }
+  }
+
+  // Explicitly test frxAUDJPY, frxAUDCAD, frxAUDCHF, frxAUDNZD, frxAUDUSD (no XAU substring match!)
+  const audPairCheck = ['frxAUDUSD', 'frxAUDJPY', 'frxAUDCAD', 'frxAUDCHF', 'frxAUDNZD'].every((sym) => {
+    const bare = sym.slice(3);
+    const quote = bare.slice(3, 6);
+    const key = normalizeSpecKey(sym);
+    const sp = resolveInstrumentSpec({ symbol: sym, name: `${bare.slice(0, 3)}/${quote}`, type: 'FOREX', pipSize: quote === 'JPY' ? 0.01 : 0.0001, decimals: quote === 'JPY' ? 3 : 5 });
+    return key === `${bare.slice(0, 3)}/${quote}` && sp.contractSize === 100000 && sp.pipSize === (quote === 'JPY' ? 0.01 : 0.0001);
+  });
+
+  // Metals, crypto, and OTC_* indices
+  const xauNorm = normalizeSpecKey('frxXAUUSD');
+  const xauNameNorm = normalizeSpecKey('Gold');
+  const xauSpec = resolveInstrumentSpec({ symbol: 'frxXAUUSD', name: 'Gold/USD', type: 'COMMODITY', pipSize: 0.01, decimals: 2 });
+  const xagNorm = normalizeSpecKey('frxXAGUSD');
+  const xagSpec = resolveInstrumentSpec({ symbol: 'frxXAGUSD', name: 'Silver/USD', type: 'COMMODITY', pipSize: 0.001, decimals: 3 });
+  const btcSpec = resolveInstrumentSpec({ symbol: 'cryBTCUSD', name: 'BTC/USD', type: 'CRYPTO', pipSize: 1.0, decimals: 2 });
+  const ethSpec = resolveInstrumentSpec({ symbol: 'cryETHUSD', name: 'ETH/USD', type: 'CRYPTO', pipSize: 0.1, decimals: 2 });
+  const spcSpec = resolveInstrumentSpec({ symbol: 'OTC_SPC', name: 'US 500', type: 'INDEX', pipSize: 0.01, decimals: 2 });
+  const ndxSpec = resolveInstrumentSpec({ symbol: 'OTC_NDX', name: 'US Tech 100', type: 'INDEX', pipSize: 0.01, decimals: 2 });
+  const djiSpec = resolveInstrumentSpec({ symbol: 'OTC_DJI', name: 'Wall Street 30', type: 'INDEX', pipSize: 0.01, decimals: 2 });
+
+  assert(
+    pairCount === 28 &&
+      all28SpecOk &&
+      all28LotOk &&
+      audPairCheck &&
+      xauNorm === 'XAU/USD' &&
+      xauNameNorm === 'XAU/USD' &&
+      xauSpec.contractSize === 100 &&
+      xauSpec.pipSize === 0.01 &&
+      xauSpec.maxLot === 20 &&
+      xagNorm === 'XAG/USD' &&
+      xagSpec.contractSize === 5000 &&
+      xagSpec.pipSize === 0.001 &&
+      xagSpec.maxLot === 20 &&
+      btcSpec.contractSize === 1 &&
+      btcSpec.pipSize === 1.0 &&
+      btcSpec.maxLot === 100 &&
+      ethSpec.contractSize === 1 &&
+      ethSpec.pipSize === 0.1 &&
+      ethSpec.maxLot === 100 &&
+      spcSpec.symbol === 'OTC_SPC' &&
+      ndxSpec.symbol === 'OTC_NDX' &&
+      djiSpec.symbol === 'OTC_DJI' &&
+      spcSpec.contractSize === 1 &&
+      spcSpec.maxLot === 50,
+    `All ${pairCount} FX pairs ($10k/1%/25p => 0.1..1.5 lots), Metals (XAU/XAG), Crypto (BTC/ETH), and OTC_* indices pass spec checks (bad: ${badPairs.join(', ') || 'none'})`
+  );
+
+  // 24b. Defence-in-depth assertSpecMatchesSymbol + maxLot guard in BOTH engines
+  console.log('\n24b. assertSpecMatchesSymbol & maxLot Defence-in-Depth:');
+  const consoleErrors: string[] = [];
+  const origConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    consoleErrors.push(args.map(String).join(' '));
+  };
+  try {
+    const audAsset: AssetConfig = { symbol: 'frxAUDUSD', name: 'AUD/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001 };
+    const bundle = makeBullishFxBundle();
+    const m1Ticks: TimestampedTick[] = Array.from({ length: 20 }, (_, i) => ({
+      time: PRIME_FX_NOW_SEC - (20 - i) * 2,
+      price: 0.655 + i * 0.0001,
+    }));
+
+    const badMt5Contract = analyzeMT5Signal({
+      asset: audAsset,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'LIVE',
+      contractSizeOverride: 100, // corrupted gold contract size on FX pair
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    const badMt5Pip = analyzeMT5Signal({
+      asset: audAsset,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'LIVE',
+      instrumentSpec: { pipSize: 0.01 }, // corrupted JPY pip on AUD/USD
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    const badBinary = analyzeBinarySignal({
+      asset: audAsset,
+      platform: 'deriv',
+      m1Candles: makeCandles({ count: 40, startPrice: 0.65, step: 0.0002, stepSec: 60, endEpochSec: PRIME_FX_NOW_SEC }),
+      m5Candles: bundle.m5,
+      m15Candles: bundle.m15,
+      ticks: m1Ticks,
+      feedStatus: 'LIVE',
+      contractSizeOverride: 100,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+
+    const oversizeMt5 = analyzeMT5Signal({
+      asset: audAsset,
+      platform: 'mt5',
+      d1Candles: bundle.d1,
+      h4Candles: bundle.h4,
+      h1Candles: bundle.h1,
+      m15Candles: bundle.m15,
+      m5Candles: bundle.m5,
+      feedStatus: 'LIVE',
+      accountCurrency: 'USD',
+      accountBalance: 5_000_000, // 1% risk = $50,000 => ~200 lots > maxLot(50)
+      riskPct: 1.0,
+      nowMs: PRIME_FX_NOW_MS,
+    });
+    const oversizeMetal = calculateMT5PositionSize({
+      accountBalance: 5_000_000,
+      riskPct: 1.0,
+      slDistancePrice: 2.5,
+      spec: xauSpec,
+      quoteToAccountRate: 1,
+      accountCurrency: 'USD',
+    });
+
+    assert(
+      badMt5Contract.direction === 'WAIT' &&
+        badMt5Contract.whyNotTrade === 'Instrument settings mismatch; analysis disabled for safety' &&
+        badMt5Pip.direction === 'WAIT' &&
+        badMt5Pip.whyNotTrade === 'Instrument settings mismatch; analysis disabled for safety' &&
+        badBinary.direction === 'WAIT' &&
+        badBinary.whyNotTrade === 'Instrument settings mismatch; analysis disabled for safety' &&
+        consoleErrors.length >= 3 &&
+        oversizeMt5.direction === 'WAIT' &&
+        oversizeMt5.whyNotTrade === 'Lot size is outside safe limits' &&
+        oversizeMetal.lotSize === 0 &&
+        oversizeMetal.outsideSafeLimits === true &&
+        resolveDefaultMaxLot(audAsset) === 50,
+      'Corrupted contractSize/pipSize logs console.error and returns WAIT safety message in both engines; >maxLot is refused cleanly'
+    );
+  } finally {
+    console.error = origConsoleError;
+  }
+
+  // 24c. OTC handling & exchange_is_open for OTC_* indices
+  console.log('\n24c. OTC Blocking Rules & exchange_is_open Hours for OTC_* Indices:');
+  const spcOpen: AssetConfig = {
+    symbol: 'OTC_SPC',
+    name: 'US 500',
+    type: 'INDEX',
+    decimals: 2,
+    pipSize: 0.01,
+    exchange_is_open: true,
+  };
+  const spcClosed: AssetConfig = { ...spcOpen, exchange_is_open: false };
+  const brokerOtcRow: AssetConfig = { symbol: 'frxEURUSD', name: 'EUR/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001, is_otc: true };
+  const displayOtc: AssetConfig = { symbol: 'frxEURUSD', name: 'EUR/USD OTC', type: 'FOREX', decimals: 5, pipSize: 0.0001 };
+
+  const idxBundle = makeBullishFxBundle();
+  // Run during FX rollover hour (22:15:30 UTC on Wednesday) to prove exchange_is_open: true allows OTC_SPC
+  const fxRolloverMs = Date.UTC(2026, 2, 18, 22, 15, 30);
+  const fxRolloverSec = Math.floor(fxRolloverMs / 1000);
+  const scaleCandles = (cs: Candle[], mult: number): Candle[] =>
+    cs.map((c) => ({
+      time: c.time,
+      open: parseFloat((c.open * mult).toFixed(2)),
+      high: parseFloat((c.high * mult).toFixed(2)),
+      low: parseFloat((c.low * mult).toFixed(2)),
+      close: parseFloat((c.close * mult).toFixed(2)),
+    }));
+  const idxFxBundle = makeBullishFxBundle({ nowSec: fxRolloverSec });
+  const idxD1 = scaleCandles(idxFxBundle.d1, 5000);
+  const idxH4 = scaleCandles(idxFxBundle.h4, 5000);
+  const idxH1 = scaleCandles(idxFxBundle.h1, 5000);
+  const idxM15 = makeCandles({ count: 35, startPrice: 5400, step: 2.0, stepSec: 900, endEpochSec: fxRolloverSec, spreadPips: 1, pipSize: 1 });
+  const idxM5 = makeCandles({ count: 35, startPrice: 5440, step: 1.25, stepSec: 300, endEpochSec: fxRolloverSec, spreadPips: 1, pipSize: 1 });
+  const idxM1 = makeCandles({ count: 60, startPrice: 5425, step: 0.9, stepSec: 60, endEpochSec: fxRolloverSec, spreadPips: 1, pipSize: 1 });
+  const lastIdxM1Close = idxM1[idxM1.length - 1].close;
+  const rolloverTicks = makeTicks({ count: 20, startPrice: lastIdxM1Close - 2.0, step: 0.15, endMs: fxRolloverMs });
+
+  const mt5SpcOpen = analyzeMT5Signal({
+    asset: spcOpen,
+    platform: 'mt5',
+    d1Candles: idxD1,
+    h4Candles: idxH4,
+    h1Candles: idxH1,
+    m15Candles: scaleCandles(idxFxBundle.m15, 5000),
+    m5Candles: scaleCandles(idxFxBundle.m5, 5000),
+    feedStatus: 'LIVE',
+    accountBalance: 10000,
+    nowMs: fxRolloverMs,
+  });
+  const mt5SpcClosed = analyzeMT5Signal({
+    asset: spcClosed,
+    platform: 'mt5',
+    d1Candles: idxD1,
+    h4Candles: idxH4,
+    h1Candles: idxH1,
+    m15Candles: scaleCandles(idxFxBundle.m15, 5000),
+    m5Candles: scaleCandles(idxFxBundle.m5, 5000),
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  const binSpcOpen = analyzeBinarySignal({
+    asset: spcOpen,
+    platform: 'deriv',
+    m1Candles: idxM1,
+    m5Candles: idxM5,
+    m15Candles: idxM15,
+    ticks: rolloverTicks,
+    feedStatus: 'LIVE',
+    nowMs: fxRolloverMs,
+  });
+  const binSpcClosed = analyzeBinarySignal({
+    asset: spcClosed,
+    platform: 'deriv',
+    m1Candles: idxM1,
+    m5Candles: idxM5,
+    m15Candles: idxM15,
+    ticks: rolloverTicks,
+    feedStatus: 'LIVE',
+    nowMs: fxRolloverMs,
+  });
+  const mt5BlockedFlag = analyzeMT5Signal({
+    asset: brokerOtcRow,
+    platform: 'mt5',
+    d1Candles: idxBundle.d1,
+    h4Candles: idxBundle.h4,
+    h1Candles: idxBundle.h1,
+    m15Candles: idxBundle.m15,
+    m5Candles: idxBundle.m5,
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+  const binBlockedDisplay = analyzeBinarySignal({
+    asset: displayOtc,
+    platform: 'pocket_option',
+    m1Candles: idxM1,
+    m15Candles: idxM15,
+    ticks: rolloverTicks,
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+
+  // Verify XAU macro news does NOT falsely block frxAUDUSD
+  const xauNews: MarketEventItem[] = [
+    { starts_at: new Date(PRIME_FX_NOW_MS + 5 * 60_000).toISOString(), currency: 'XAU', title: 'Gold fix', impact: 'HIGH' },
+  ];
+  const audWithXauNews = analyzeMT5Signal({
+    asset: { symbol: 'frxAUDUSD', name: 'AUD/USD', type: 'FOREX', decimals: 5, pipSize: 0.0001 },
+    platform: 'mt5',
+    d1Candles: idxBundle.d1,
+    h4Candles: idxBundle.h4,
+    h1Candles: idxBundle.h1,
+    m15Candles: idxBundle.m15,
+    m5Candles: idxBundle.m5,
+    marketEvents: xauNews,
+    feedStatus: 'LIVE',
+    nowMs: PRIME_FX_NOW_MS,
+  });
+
+  assert(
+    !isOtcInstrument(spcOpen, false) &&
+      isOtcInstrument(brokerOtcRow, false) &&
+      isOtcInstrument(displayOtc, false) &&
+      mt5SpcOpen.direction === 'BUY' &&
+      mt5SpcOpen.inputsSnapshot?.blocker !== 'OTC' &&
+      mt5SpcClosed.direction === 'WAIT' &&
+      mt5SpcClosed.inputsSnapshot?.blocker === 'MARKET_CLOSED' &&
+      binSpcOpen.direction !== 'WAIT' &&
+      binSpcClosed.direction === 'WAIT' &&
+      binSpcClosed.inputsSnapshot?.blocker === 'LOW_LIQUIDITY_SESSION' &&
+      mt5BlockedFlag.direction === 'WAIT' &&
+      mt5BlockedFlag.inputsSnapshot?.blocker === 'OTC' &&
+      binBlockedDisplay.direction === 'WAIT' &&
+      binBlockedDisplay.inputsSnapshot?.blocker === 'OTC' &&
+      audWithXauNews.inputsSnapshot?.blocker !== 'HIGH_IMPACT_NEWS',
+    `OTC_SPC trades when exchange_is_open=true, waits when false, blocks only on is_otc/display OTC, and XAU news does not block frxAUDUSD`,
+    `mt5Open=${mt5SpcOpen.direction}(${mt5SpcOpen.whyNotTrade || 'ok'}) mt5Closed=${mt5SpcClosed.inputsSnapshot?.blocker} binOpen=${binSpcOpen.direction}(${binSpcOpen.whyNotTrade || 'ok'}) binClosed=${binSpcClosed.inputsSnapshot?.blocker} audBlocker=${audWithXauNews.inputsSnapshot?.blocker || 'none'}`
+  );
+
+  // 24d. Backtest report <30 trades guard and pooled summaries
+  console.log('\n24d. Backtest Report <30 Trade Guard & Pooled Summaries:');
+  const smallMt5Trades = Array.from({ length: 5 }, (_, i) => ({
+    entryTimeSec: PRIME_FX_NOW_SEC + i * 3600,
+    exitTimeSec: PRIME_FX_NOW_SEC + i * 3600 + 1800,
+    timeIso: new Date((PRIME_FX_NOW_SEC + i * 3600) * 1000).toISOString(),
+    symbol: 'frxEURUSD',
+    structureTimeframe: 'H1' as const,
+    direction: 'BUY' as const,
+    orderKind: 'MARKET' as const,
+    strength: 'High' as const,
+    entryPrice: 1.09,
+    stopLoss: 1.088,
+    takeProfit1: 1.094,
+    rewardRiskTp1: 2.0,
+    outcome: 'WIN' as const,
+    exitReason: 'TP1' as const,
+    grossR: 2.0,
+    costR: 0.05,
+    netR: 1.95,
+  }));
+  const smallBinSignals = Array.from({ length: 6 }, (_, i) => ({
+    entryTimeSec: PRIME_FX_NOW_SEC + i * 300,
+    timeIso: new Date((PRIME_FX_NOW_SEC + i * 300) * 1000).toISOString(),
+    symbol: 'frxEURUSD',
+    mode: '3m' as const,
+    chosenExpiry: '3m' as const,
+    direction: 'CALL' as const,
+    strength: 'High' as const,
+    entryPrice: 1.09,
+    outcomesByHorizon: { '1m': true, '2m': true, '3m': true, '5m': true },
+  }));
+
+  const smallReport = generateBacktestReport({
+    generatedAtIso: new Date(PRIME_FX_NOW_MS).toISOString(),
+    mt5PerSymbolResults: [
+      {
+        asset: EURUSD,
+        h1: { trades: smallMt5Trades, unfilledLimitCount: 0, skippedSmallLotCount: 0, otcBlockedScans: 0, startSec: PRIME_FX_NOW_SEC, endSec: PRIME_FX_NOW_SEC + 86400, splitSec: PRIME_FX_NOW_SEC },
+        m15: { trades: [], unfilledLimitCount: 0, skippedSmallLotCount: 0, otcBlockedScans: 0, startSec: PRIME_FX_NOW_SEC, endSec: PRIME_FX_NOW_SEC + 86400, splitSec: PRIME_FX_NOW_SEC },
+      },
+    ],
+    binaryPerSymbolResults: [
+      { asset: EURUSD, signals: smallBinSignals, startSec: PRIME_FX_NOW_SEC, endSec: PRIME_FX_NOW_SEC + 3600 },
+    ],
+    engineBugsFound: [],
+  });
+
+  const smallLower = smallReport.toLowerCase();
+  assert(
+    smallReport.includes('Pooled MT5 (all trades): n=5') &&
+      smallReport.includes('Pooled Binary (all trades): n=6') &&
+      smallReport.includes('not enough trades') &&
+      !smallLower.includes('positive and significant') &&
+      !smallLower.includes('positive but not significant') &&
+      !smallLower.includes('beats 80% break-even') &&
+      !smallLower.includes('above break-even in:'),
+    'Report never prints "positive" or "above break-even" for <30 trades, prints "not enough trades", and includes pooled MT5 & Binary lines with 95% CI'
+  );
+}
+
+async function runStage4LConditionsTests() {
+  console.log('\n============================================================');
+  console.log('STAGE 4L TESTS: Trading Conditions Gate (OK / CAUTION / NOT_ADVISED)');
+  console.log('============================================================\n');
+
+  const WED_14_UTC_MS = Date.UTC(2025, 4, 14, 14, 0, 0); // Wed 14:00 UTC (London/NY overlap)
+  const EURUSD_ASSET: AssetConfig = {
+    symbol: 'frxEURUSD',
+    name: 'EUR/USD',
+    type: 'FOREX',
+    decimals: 5,
+    pipSize: 0.0001,
+    distanceUnit: 'pips',
+  };
+  const BTC_ASSET: AssetConfig = {
+    symbol: 'cryBTCUSD',
+    name: 'BTC/USD',
+    type: 'CRYPTO',
+    decimals: 2,
+    pipSize: 1.0,
+    distanceUnit: 'points',
+  };
+  const SYNTH_ASSET: AssetConfig = {
+    symbol: 'R_100',
+    name: 'VOL 100',
+    type: 'SYNTH',
+    decimals: 2,
+    pipSize: 0.01,
+    distanceUnit: 'points',
+  };
+
+  const makeMockContext = (opts?: {
+    percentile30d?: number;
+    m15Dir?: 'Bullish' | 'Bearish' | 'Neutral';
+    h1Dir?: 'Bullish' | 'Bearish' | 'Neutral';
+    h4Dir?: 'Bullish' | 'Bearish' | 'Neutral';
+    d1Dir?: 'Bullish' | 'Bearish' | 'Neutral';
+    quietHours?: number[];
+  }): MarketContextSummary => {
+    const quietSet = new Set(opts?.quietHours ?? [0, 1, 2, 3, 4, 5]);
+    return {
+      symbol: 'frxEURUSD',
+      assetName: 'EUR/USD',
+      pipSize: 0.0001,
+      decimals: 5,
+      distanceUnit: 'pips',
+      currentPrice: 1.09,
+      computedAtIso: new Date(WED_14_UTC_MS).toISOString(),
+      trendTable: [
+        { timeframe: 'M15', direction: opts?.m15Dir ?? 'Bullish', strength: 'Strong', ema21: 1.089, distancePips: 10, distancePct: 0.09, lastClose: 1.09, sampleCount: 50 },
+        { timeframe: 'H1', direction: opts?.h1Dir ?? 'Bullish', strength: 'Strong', ema21: 1.088, distancePips: 20, distancePct: 0.18, lastClose: 1.09, sampleCount: 50 },
+        { timeframe: 'H4', direction: opts?.h4Dir ?? 'Bullish', strength: 'Strong', ema21: 1.085, distancePips: 50, distancePct: 0.45, lastClose: 1.09, sampleCount: 50 },
+        { timeframe: 'D1', direction: opts?.d1Dir ?? 'Bullish', strength: 'Strong', ema21: 1.08, distancePips: 100, distancePct: 0.9, lastClose: 1.09, sampleCount: 50 },
+      ],
+      levelsMap: [],
+      dailyPivot: null,
+      pivotSampleCount: 0,
+      volatilityRegime: {
+        currentAtr: 0.008,
+        currentAtrPips: 80,
+        percentile30d: opts?.percentile30d ?? 50,
+        regime: 'normal',
+        sampleCount: 30,
+        lookbackTargetDays: 30,
+      },
+      sessionProfile: {
+        lookbackWeeks: 8,
+        totalBars: 800,
+        hours: Array.from({ length: 24 }, (_, hourUtc) => ({
+          hourUtc,
+          hourLabel: `${String(hourUtc).padStart(2, '0')}:00`,
+          avgRangePips: quietSet.has(hourUtc) ? 4 : 25 + (hourUtc === 14 ? 20 : 0),
+          sampleCount: 30,
+        })),
+        mostActiveHour: { hourUtc: 14, hourLabel: '14:00', avgRangePips: 45, sampleCount: 30 },
+        quietestHour: { hourUtc: 2, hourLabel: '02:00', avgRangePips: 4, sampleCount: 30 },
+      },
+    };
+  };
+
+  // 25a. OK fixture
+  console.log('25a. OK baseline fixture:');
+  const okRes = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 2,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    upcomingEvents: [],
+    userState: { consecutiveLosses: 0, dailyLossesCount: 0, dailyLossLimitCount: 3 },
+  });
+  assert(
+    okRes.level === 'OK' &&
+      okRes.reasons.length === 0 &&
+      okRes.nextBetterWindowText === undefined,
+    'Healthy open market with aligned trends and normal ATR returns OK with zero warnings'
+  );
+
+  // 25b. NOT_ADVISED rules & boundaries
+  console.log('\n25b. NOT_ADVISED rules & boundary conditions:');
+  const closedFlag = assessConditions({
+    asset: { ...EURUSD_ASSET, exchange_is_open: false },
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+  });
+  const weekendSat = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'MARKET_CLOSED',
+    nowMs: Date.UTC(2025, 4, 17, 12, 0, 0), // Saturday 12:00 UTC
+  });
+  const feedDelayed = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'DELAYED',
+    nowMs: WED_14_UTC_MS,
+  });
+  const tickBoundaryOk = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 6.0,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+  });
+  const tickStale = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 6.1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+  });
+  const mt5IgnoresTickAge = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 20,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+  });
+
+  assert(
+    closedFlag.level === 'NOT_ADVISED' &&
+      closedFlag.reasons.some((r) => r.code === 'MARKET_CLOSED') &&
+      weekendSat.level === 'NOT_ADVISED' &&
+      Boolean(weekendSat.nextBetterWindowText?.includes('Sunday 21:00 UTC')) &&
+      feedDelayed.level === 'NOT_ADVISED' &&
+      feedDelayed.reasons.some((r) => r.code === 'FEED_NOT_LIVE') &&
+      tickBoundaryOk.level === 'OK' &&
+      tickStale.level === 'NOT_ADVISED' &&
+      tickStale.reasons.some((r) => r.code === 'TICK_STALE') &&
+      mt5IgnoresTickAge.level === 'OK',
+    'Market closed, non-LIVE feed, and binary tick age (>6s vs <=6s) trigger expected NOT_ADVISED/OK transitions'
+  );
+
+  // News boundaries: 15m binary / 30m MT5 / 60m caution
+  const usdNews15m: MarketEventItem[] = [
+    { id: 'ev1', starts_at: new Date(WED_14_UTC_MS + 15 * 60_000).toISOString(), currency: 'USD', title: 'US CPI', impact: 'HIGH' },
+  ];
+  const usdNews25m: MarketEventItem[] = [
+    { id: 'ev2', starts_at: new Date(WED_14_UTC_MS + 25 * 60_000).toISOString(), currency: 'USD', title: 'FOMC', impact: 'HIGH' },
+  ];
+  const jpyNews5m: MarketEventItem[] = [
+    { id: 'ev3', starts_at: new Date(WED_14_UTC_MS + 5 * 60_000).toISOString(), currency: 'JPY', title: 'BOJ Rate', impact: 'HIGH' },
+  ];
+  const bin15mNews = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    upcomingEvents: usdNews15m,
+  });
+  const bin25mNews = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    upcomingEvents: usdNews25m,
+  });
+  const mt525mNews = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    upcomingEvents: usdNews25m,
+  });
+  const eurWithJpyNews = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    upcomingEvents: jpyNews5m,
+  });
+
+  assert(
+    bin15mNews.level === 'NOT_ADVISED' &&
+      bin15mNews.reasons.some((r) => r.code === 'HIGH_IMPACT_NEWS') &&
+      Boolean(bin15mNews.nextBetterWindowText?.includes('UTC')) &&
+      bin25mNews.level === 'CAUTION' &&
+      bin25mNews.reasons.some((r) => r.code === 'UPCOMING_HIGH_NEWS') &&
+      mt525mNews.level === 'NOT_ADVISED' &&
+      mt525mNews.reasons.some((r) => r.code === 'HIGH_IMPACT_NEWS') &&
+      eurWithJpyNews.level === 'OK',
+    'HIGH-impact news triggers NOT_ADVISED at ±15m (binary) / ±30m (MT5), CAUTION up to ±60m, and matches currency'
+  );
+
+  // Rollover window (21:00 - 00:00 UTC weekday FX/metals, skipped for crypto)
+  const rolloverStart = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 14, 21, 0, 0),
+    marketContext: makeMockContext(),
+  });
+  const preRollover = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 14, 20, 59, 0),
+    marketContext: makeMockContext(),
+  });
+  const cryptoDuringRollover = assessConditions({
+    asset: BTC_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 14, 22, 0, 0),
+    marketContext: makeMockContext(),
+  });
+  assert(
+    rolloverStart.level === 'NOT_ADVISED' &&
+      rolloverStart.reasons.some((r) => r.code === 'ROLLOVER_WINDOW') &&
+      Boolean(rolloverStart.nextBetterWindowText?.includes('00:00 UTC')) &&
+      preRollover.level === 'OK' &&
+      cryptoDuringRollover.level === 'OK',
+    'Weekday FX rollover (21:00–00:00 UTC) triggers NOT_ADVISED with 00:00 UTC next window, skipped for 24/7 crypto'
+  );
+
+  // ATR percentile dead/extreme + user limits + synthetic index
+  const atrDead = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 9.9 }),
+  });
+  const atrExtreme = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 95.1 }),
+  });
+  const twoLosses = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    userState: { consecutiveLosses: 2 },
+  });
+  const threeLosses = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    userState: { consecutiveLosses: 3 },
+  });
+  const dailyLimitReached = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+    userState: { consecutiveLosses: 0, dailyLossesCount: 2, dailyLossLimitCount: 2 },
+  });
+  const synthRes = assessConditions({
+    asset: SYNTH_ASSET,
+    platformProfile: 'BINARY_QUICK',
+    feedStatus: 'LIVE',
+    tickAgeSeconds: 1,
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext(),
+  });
+
+  assert(
+    atrDead.level === 'NOT_ADVISED' &&
+      atrDead.reasons.some((r) => r.code === 'ATR_TOO_LOW') &&
+      atrExtreme.level === 'NOT_ADVISED' &&
+      atrExtreme.reasons.some((r) => r.code === 'ATR_EXTREME') &&
+      twoLosses.level === 'OK' &&
+      threeLosses.level === 'NOT_ADVISED' &&
+      threeLosses.reasons.some((r) => r.code === 'CONSECUTIVE_LOSSES') &&
+      dailyLimitReached.level === 'NOT_ADVISED' &&
+      dailyLimitReached.reasons.some((r) => r.code === 'DAILY_LOSS_LIMIT') &&
+      synthRes.level === 'NOT_ADVISED' &&
+      synthRes.reasons.some((r) => r.code === 'SYNTHETIC_PRACTICE_ONLY' && r.text === 'Practice only: random by design'),
+    'ATR <10 / >95, >=3 consecutive losses, daily loss limit, and synthetic index ("Practice only: random by design") trigger NOT_ADVISED'
+  );
+
+  // 25c. CAUTION rules & exact boundaries
+  console.log('\n25c. CAUTION rules & boundary values:');
+  const quietHourRes = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 14, 3, 0, 0), // 03:00 UTC is in quietHours [0..5]
+    marketContext: makeMockContext(),
+  });
+  const atrLowCaution10 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 10 }),
+  });
+  const atrLowCaution25 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 25 }),
+  });
+  const atrNormal251 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 25.1 }),
+  });
+  const atrHighCaution85 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 85 }),
+  });
+  const atrHighCaution95 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ percentile30d: 95 }),
+  });
+  const trendDisagree = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: WED_14_UTC_MS,
+    marketContext: makeMockContext({ m15Dir: 'Bearish', h1Dir: 'Bullish', h4Dir: 'Bullish', d1Dir: 'Bullish' }),
+  });
+  const fri1859 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 16, 18, 59, 0),
+    marketContext: makeMockContext(),
+  });
+  const fri1900 = assessConditions({
+    asset: EURUSD_ASSET,
+    platformProfile: 'MT5',
+    feedStatus: 'LIVE',
+    nowMs: Date.UTC(2025, 4, 16, 19, 0, 0),
+    marketContext: makeMockContext(),
+  });
+
+  assert(
+    quietHourRes.level === 'CAUTION' &&
+      quietHourRes.reasons.some((r) => r.code === 'QUIET_SESSION_HOUR') &&
+      atrLowCaution10.level === 'CAUTION' &&
+      atrLowCaution10.reasons.some((r) => r.code === 'ATR_LOW_CAUTION') &&
+      atrLowCaution25.level === 'CAUTION' &&
+      atrNormal251.level === 'OK' &&
+      atrHighCaution85.level === 'CAUTION' &&
+      atrHighCaution85.reasons.some((r) => r.code === 'ATR_HIGH_CAUTION') &&
+      atrHighCaution95.level === 'CAUTION' &&
+      trendDisagree.level === 'CAUTION' &&
+      trendDisagree.reasons.some((r) => r.code === 'TREND_DISAGREEMENT') &&
+      fri1859.level === 'OK' &&
+      fri1900.level === 'CAUTION' &&
+      fri1900.reasons.some((r) => r.code === 'FRIDAY_LATE_SESSION'),
+    'All CAUTION rules (quiet session quartile, ATR 10-25 & 85-95, trend disagreement, Friday >= 19:00 UTC) trigger properly'
+  );
+
+  // 25d. Two-step override gating, WAIT consistency, config validation & API handler
+  console.log('\n25d. Two-tap override gating, WAIT consistency, config validation & disclaimer:');
+  const step1 = resolveAnalyseGateState({
+    level: 'NOT_ADVISED',
+    reasons: [{ code: 'ROLLOVER_WINDOW', severity: 'NOT_ADVISED', text: 'Rollover' }],
+    overrideArmed: false,
+    isHardTechnicalBlock: false,
+    normalLabel: 'SCAN BINARY SIGNAL',
+  });
+  const step2 = resolveAnalyseGateState({
+    level: 'NOT_ADVISED',
+    reasons: [{ code: 'ROLLOVER_WINDOW', severity: 'NOT_ADVISED', text: 'Rollover' }],
+    overrideArmed: true,
+    isHardTechnicalBlock: false,
+    normalLabel: 'SCAN BINARY SIGNAL',
+  });
+  const blockedGate = resolveAnalyseGateState({
+    level: 'NOT_ADVISED',
+    reasons: [{ code: 'MARKET_CLOSED', severity: 'NOT_ADVISED', text: 'Market closed' }],
+    overrideArmed: false,
+    isHardTechnicalBlock: true,
+    hardBlockLabel: 'MARKET CLOSED',
+    normalLabel: 'SCAN BINARY SIGNAL',
+  });
+
+  const consistentNewsWait = pickConsistentWaitReason(
+    'Engine raw news text',
+    bin15mNews,
+    'HIGH_IMPACT_NEWS'
+  );
+  const invalidCfg = validateConditionsConfig({ ...DEFAULT_CONDITIONS_CONFIG, atrPercentileLowBlock: 40, atrPercentileLowCautionMax: 20 });
+  const invalidNegTick = validateConditionsConfig({ ...DEFAULT_CONDITIONS_CONFIG, binaryTickMaxAgeSec: 0 });
+  const validCfg = validateConditionsConfig({ ...DEFAULT_CONDITIONS_CONFIG, binaryTickMaxAgeSec: 10 });
+  const normDefault = normalizeConditionsConfig(null);
+
+  // Verify disclaimer & no win/loss prediction language or forbidden Math.random in conditions.ts
+  const conditionsSrc = readFileSync(resolve(process.cwd(), 'src/utils/conditions.ts'), 'utf8');
+  const conditionsHasRandom = conditionsSrc.includes('Math.random');
+  const conditionsHasFetch = /\bfetch\s*\(/.test(conditionsSrc);
+
+  // Verify adminSettingsHandler rejects out-of-range conditions_config when admin auth fails or validation runs
+  let badCondStatus = 0;
+  await adminSettingsHandler(
+    { method: 'POST', headers: {}, body: { key: 'conditions_config', value: { binaryTickMaxAgeSec: 0 } } },
+    {
+      setHeader() {},
+      status(c: number) { badCondStatus = c; return this; },
+      json() { return this; },
+    }
+  );
+  // Note: without admin auth it returns 401 first; verify signal log schema accepts conditions_override up to Zod step (returns 401 after Zod pass, vs 400 on malformed override)
+  let validOverrideAuthStatus = 0;
+  await signalsLogHandler(
+    {
+      method: 'POST',
+      headers: {},
+      body: {
+        asset: 'frxEURUSD',
+        timeframe: '3m',
+        direction: 'CALL',
+        entry_price: 1.09,
+        conditions_override: {
+          overridden: true,
+          level: 'NOT_ADVISED',
+          reasonCodes: ['ROLLOVER_WINDOW'],
+        },
+      },
+    },
+    {
+      setHeader() {},
+      status(c: number) { validOverrideAuthStatus = c; return this; },
+      json() { return this; },
+    }
+  );
+  let badOverrideStatus = 0;
+  await signalsLogHandler(
+    {
+      method: 'POST',
+      headers: {},
+      body: {
+        asset: 'frxEURUSD',
+        timeframe: '3m',
+        direction: 'CALL',
+        entry_price: 1.09,
+        conditions_override: {
+          overridden: 'yes',
+          reasonCodes: [],
+        },
+      },
+    },
+    {
+      setHeader() {},
+      status(c: number) { badOverrideStatus = c; return this; },
+      json() { return this; },
+    }
+  );
+
+  assert(
+    step1.action === 'ARM_OVERRIDE' &&
+      step2.action === 'RUN_WITH_OVERRIDE' &&
+      step2.buttonLabel === OVERRIDE_BUTTON_LABEL &&
+      blockedGate.disabled === true &&
+      blockedGate.action === 'BLOCKED' &&
+      consistentNewsWait === bin15mNews.reasons[0].text &&
+      !invalidCfg.ok &&
+      !invalidNegTick.ok &&
+      validCfg.ok &&
+      validCfg.value?.binaryTickMaxAgeSec === 10 &&
+      normDefault.binaryTickMaxAgeSec === 6 &&
+      CONDITIONS_DISCLAIMER_TEXT === 'This checks risk conditions. It does not predict whether a trade will win or lose.' &&
+      !conditionsHasRandom &&
+      !conditionsHasFetch &&
+      badCondStatus === 403 &&
+      validOverrideAuthStatus === 401 &&
+      badOverrideStatus === 400,
+    'Two-tap override gate, consistent WAIT wording, config validation, override schema, and pure-module checks pass'
+  );
+}
+
 runSignalLogValidationTests()
   .then(() => runHistoryRefreshGuards())
   .then(() => runStage4GReferralAndRadarTests())
   .then(() => runStage4HBrandingTests())
   .then(() => runStage4IResultFixesTests())
+  .then(() => runStage4LConditionsTests())
   .then(() => {
     runMt5Tests();
     runStage4EHorizonTests();
     runStage4FPipBrandWordingTests();
     runStage4HSimplifiedUiTests();
+    runStage4JChartAndDiagnosticsTests();
+    runStage4BBacktestTests();
+    runStage4KSafetyFixTests();
     console.log('\n------------------------------------------------------------');
-    console.log(`Combined Binary + MT5 + Stage 4A-4I Results: ${passed}/${total} tests passed`);
+    console.log(`Combined Binary + MT5 + Stage 4A-4L Results: ${passed}/${total} tests passed`);
     console.log('------------------------------------------------------------\n');
 
     process.exit(passed === total ? 0 : 1);

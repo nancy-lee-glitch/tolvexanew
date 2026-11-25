@@ -926,6 +926,9 @@ export async function logSignalToSupabase(signal: any, _userId?: number | null):
         expiry: signal.expiry || signal.timeframe,
         strength: signal.strength,
         inputs_snapshot: signal.inputsSnapshot || {},
+        ...(signal.conditionsOverride
+          ? { conditions_override: signal.conditionsOverride }
+          : {}),
         feed_source: signal.feedSource || 'deriv_ws',
         valid_until: signal.validUntil || null,
       }),

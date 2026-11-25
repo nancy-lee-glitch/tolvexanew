@@ -22,7 +22,13 @@ import { LiveTicker, ASSETS } from './components/LiveTicker.tsx';
 import { getDefaultActiveAsset } from './services/symbolMap.ts';
 import { SignalEngine } from './components/SignalEngine.tsx';
 import { RiskAdvisor } from './components/RiskAdvisor.tsx';
+import { ConditionsBanner } from './components/ConditionsBanner.tsx';
+import {
+  assessConditions,
+  type ConditionsAssessment,
+} from './utils/conditions.ts';
 import { DebugDiagnosticsPanel } from './components/DebugDiagnosticsPanel.tsx';
+import { reportChartDiagnostics } from './utils/chartDiagnostics.ts';
 import { CryptoCheckout } from './components/CryptoCheckout.tsx';
 const AdminCenter = React.lazy(() =>
   import('./components/AdminCenter.tsx').then((m) => ({ default: m.AdminCenter }))
@@ -125,17 +131,21 @@ export default function App() {
   const [onlineUsers, setOnlineUsers] = useState<number>(1);
   const [isFeedActive, setIsFeedActive] = useState<boolean>(true);
   const [feedHealthStatus, setFeedHealthStatus] = useState<string>('CONNECTING');
+  const [tickAgeSeconds, setTickAgeSeconds] = useState<number | undefined>(undefined);
   const [activeChartSignal, setActiveChartSignal] = useState<EngineChartSignal | null>(null);
   const [activeMarketContext, setActiveMarketContext] = useState<MarketContextSummary | null>(null);
   const [activeAnalysisProfile, setActiveAnalysisProfile] = useState<AnalysisProfile>('BINARY_QUICK');
+  const [cockpitConditions, setCockpitConditions] = useState<ConditionsAssessment | null>(null);
+  const [conditionsExpanded, setConditionsExpanded] = useState<boolean>(true);
   const handleClearChartSignal = useCallback(() => {
     setActiveChartSignal(null);
   }, []);
 
-  // Clear chart signal & context when active asset changes
+  // Clear chart signal & context when active asset changes, and sync chart diagnostics symbol
   useEffect(() => {
     setActiveChartSignal(null);
     setActiveMarketContext(null);
+    reportChartDiagnostics({ activeSymbol: activeAsset.symbol });
   }, [activeAsset.symbol]);
 
   // Auto-clear chart signal when validity window expires or MT5 invalidation level triggers
@@ -642,11 +652,28 @@ export default function App() {
         )}
 
         {/* VIEW 2: TRADING COCKPIT (The Mobile-First Cockpit) */}
-        {currentPage === 'cockpit' && (
+        {currentPage === 'cockpit' && (() => {
+          const resolvedConditions: ConditionsAssessment =
+            cockpitConditions ||
+            assessConditions({
+              asset: activeAsset,
+              platformProfile: activeAnalysisProfile,
+              feedStatus: feedHealthStatus,
+              tickAgeSeconds,
+              marketContext: activeMarketContext,
+            });
+          const pillTone =
+            resolvedConditions.level === 'NOT_ADVISED'
+              ? 'bg-rose-500/20 text-rose-200 border-rose-500/50 hover:bg-rose-500/30'
+              : resolvedConditions.level === 'CAUTION'
+              ? 'bg-amber-500/20 text-amber-200 border-amber-500/50 hover:bg-amber-500/30'
+              : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30';
+
+          return (
           <ErrorBoundary fallbackTitle="Trading Cockpit Initializing...">
             <div className="max-w-xl mx-auto space-y-3.5 animate-in fade-in duration-200">
               {/* Quick Context Bar */}
-              <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-900 border border-slate-800 rounded-2xl px-4 py-2.5 font-mono text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
                   <span className={`w-2 h-2 rounded-full ${isFeedActive ? 'bg-emerald-400 animate-pulse' : feedHealthStatus === 'MARKET_CLOSED' ? 'bg-amber-400' : feedHealthStatus === 'IDLE' ? 'bg-slate-400' : 'bg-rose-500 animate-ping'}`} />
                   <span className="font-bold text-white">Execution Cockpit</span>
@@ -661,6 +688,20 @@ export default function App() {
                   }`}>
                     {isFeedActive ? 'LIVE' : feedHealthStatus === 'MARKET_CLOSED' ? 'WEEKEND CLOSED' : feedHealthStatus === 'IDLE' ? 'Idle — pick an asset' : feedHealthStatus}
                   </span>
+                  <button
+                    type="button"
+                    data-testid="cockpit-conditions-pill"
+                    data-condition-level={resolvedConditions.level}
+                    onClick={() => {
+                      setConditionsExpanded((prev) => (resolvedConditions.reasons.length > 0 ? !prev : true));
+                      const el = document.getElementById('cockpit-conditions-banner');
+                      el?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
+                    }}
+                    title="Tap to toggle trading conditions details"
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-black border cursor-pointer transition ${pillTone}`}
+                  >
+                    {resolvedConditions.level}
+                  </button>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-slate-400">Balance:</span>
@@ -679,6 +720,14 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Full-Width Trading Conditions Gate Banner at Top of Cockpit */}
+              <ConditionsBanner
+                assessment={resolvedConditions}
+                isExpanded={conditionsExpanded}
+                onToggleExpand={() => setConditionsExpanded((v) => !v)}
+                assetName={activeAsset.name}
+              />
+
               {/* Deriv WebSocket Ticker & Asset Switcher */}
               <LiveTicker
                 activeAsset={activeAsset}
@@ -687,9 +736,10 @@ export default function App() {
                 onTicksUpdate={setLiveTicks}
                 isVIP={isVIP || Boolean(user?.is_vip)}
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
-                onFeedStatusChange={(active, status) => {
+                onFeedStatusChange={(active, status, ageSec) => {
                   setIsFeedActive(active);
                   setFeedHealthStatus(status);
+                  if (typeof ageSec === 'number') setTickAgeSeconds(ageSec);
                 }}
                 user={user}
                 signal={activeChartSignal}
@@ -713,16 +763,19 @@ export default function App() {
                 onOpenVipRadar={() => setIsVipRadarOpen(true)}
                 isFeedActive={isFeedActive}
                 feedHealthStatus={feedHealthStatus}
+                tickAgeSeconds={tickAgeSeconds}
                 onSignalOutput={setActiveChartSignal}
                 onMarketContextUpdate={setActiveMarketContext}
                 onProfileChange={setActiveAnalysisProfile}
+                onConditionsChange={setCockpitConditions}
               />
 
               {/* Risk Advisor & 2% Stake Protection */}
               <RiskAdvisor />
             </div>
           </ErrorBoundary>
-        )}
+          );
+        })()}
 
         {/* VIEW 3: EDUCATIONAL BLOG & SEO ACADEMY */}
         {currentPage === 'blog' && (

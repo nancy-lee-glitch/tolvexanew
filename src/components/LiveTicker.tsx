@@ -2,7 +2,11 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import type { AnalysisProfile, AssetConfig, UserProfile } from '../types.ts';
 import type { MarketContextSummary } from '../utils/engines/marketContext.ts';
 import type { EngineChartSignal } from '../utils/chartOverlays.ts';
-import { pushAssetTick, getAssetTicks } from '../utils/quantEngine.ts';
+import {
+  pushAssetTick,
+  getAssetTicks,
+  seedTimestampedTicksFromCandles,
+} from '../utils/quantEngine.ts';
 import { LiveChart } from './LiveChart.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { ASSETS, getAssetConfigBySymbol } from '../services/symbolMap.ts';
@@ -15,6 +19,7 @@ import {
 } from '../services/derivFeed.ts';
 import { AssetPicker } from './AssetPicker.tsx';
 import { getRegisteredAssets, isSymbolMarketOpen, type DynamicAsset } from '../services/assetRegistry.ts';
+import { computeTickVelocityLabel } from '../utils/chartDiagnostics.ts';
 
 export type { FeedHealthStatus };
 export { ASSETS, getAssetConfigBySymbol };
@@ -26,7 +31,7 @@ interface LiveTickerProps {
   onTicksUpdate?: (ticks: number[]) => void;
   onOpenVipRadar?: () => void;
   isVIP?: boolean;
-  onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus) => void;
+  onFeedStatusChange?: (isLive: boolean, status: FeedHealthStatus, tickAgeSec?: number) => void;
   user?: UserProfile | null;
   signal?: EngineChartSignal | null;
   marketContext?: MarketContextSummary | null;
@@ -55,7 +60,7 @@ export function LiveTicker({
   const [feedStatus, setFeedStatus] = useState<FeedHealthStatus>('CONNECTING');
   const [lastTickAgeSec, setLastTickAgeSec] = useState<number>(0);
   const [activeEndpointUrl, setActiveEndpointUrl] = useState<string>('');
-  const [tickVelocity, setTickVelocity] = useState<string>('Steady');
+  const [tickVelocity, setTickVelocity] = useState<string>('Steady (0.0 t/s)');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | 'CRYPTO' | 'FOREX' | 'SYNTH'>('ALL');
   const [showAppIdNotice, setShowAppIdNotice] = useState<boolean>(false);
   const [showAssetPickerModal, setShowAssetPickerModal] = useState<boolean>(false);
@@ -69,7 +74,8 @@ export function LiveTicker({
   const [tokenSavedMsg, setTokenSavedMsg] = useState<string>('');
 
   const historyRef = useRef<number[]>([]);
-  const tickCountRef = useRef<number>(0);
+  const tickTimestampsRef = useRef<number[]>([]);
+  const velocityStartMsRef = useRef<number>(Date.now());
   const currentPriceRef = useRef<number | null>(null);
   const feedServiceRef = useRef<DerivFeedService | null>(null);
 
@@ -81,6 +87,10 @@ export function LiveTicker({
 
   // Sync initial price on activeAsset change
   useEffect(() => {
+    tickTimestampsRef.current = [];
+    velocityStartMsRef.current = Date.now();
+    setTickVelocity('Steady (0.0 t/s)');
+
     const existing = getAssetTicks(activeAsset.symbol);
     if (existing.length > 0) {
       const initialP = existing[existing.length - 1];
@@ -106,8 +116,13 @@ export function LiveTicker({
         return;
       }
 
-      tickCountRef.current += 1;
-      const nowSec = Math.floor(Date.now() / 1000);
+      const nowMs = Date.now();
+      tickTimestampsRef.current.push(nowMs);
+      if (tickTimestampsRef.current.length > 400) {
+        const cutoff = nowMs - 12_000;
+        tickTimestampsRef.current = tickTimestampsRef.current.filter((t) => t >= cutoff);
+      }
+      const nowSec = Math.floor(nowMs / 1000);
       pushAssetTick(symbol, newPrice, nowSec);
 
       const prev = currentPriceRef.current;
@@ -158,10 +173,18 @@ export function LiveTicker({
           setCurrentPrice(latest);
           onPriceUpdate?.(latest);
 
-          for (let i = 0; i < prices.length; i++) {
-            const t = times[i] || (Math.floor(Date.now() / 1000) - (prices.length - i));
-            pushAssetTick(historyEvent.symbol, prices[i], t);
-          }
+          const seedCount = Math.min(60, prices.length);
+          const seedSlice = prices.slice(-seedCount);
+          const timeSlice = times.slice(-seedCount);
+          const baseNowSec = Math.floor(Date.now() / 1000);
+          seedTimestampedTicksFromCandles(
+            historyEvent.symbol,
+            seedSlice.map((p, idx) => ({
+              time: timeSlice[idx] || baseNowSec - (seedSlice.length - idx) * 60,
+              close: p,
+            })),
+            60
+          );
         }
       },
       onStatusChange: (status, ageSec, endpoint) => {
@@ -169,7 +192,7 @@ export function LiveTicker({
         setLastTickAgeSec(ageSec);
         setActiveEndpointUrl(endpoint);
         const isLive = status === 'LIVE' && ageSec <= 6;
-        onFeedStatusChange?.(isLive, status);
+        onFeedStatusChange?.(isLive, status, ageSec);
       },
     });
 
@@ -188,18 +211,18 @@ export function LiveTicker({
     }
   };
 
-  // Tick Velocity tracking loop
+  // Tick Velocity tracking loop (10s rolling window, one-decimal t/s)
   useEffect(() => {
     const velInterval = setInterval(() => {
-      const count = tickCountRef.current;
-      tickCountRef.current = 0;
-      if (count > 6) {
-        setTickVelocity(`High (${count * 2} t/s)`);
-      } else if (count > 2) {
-        setTickVelocity(`Active (${count * 2} t/s)`);
-      } else {
-        setTickVelocity(`Steady (${count * 2} t/s)`);
-      }
+      const nowMs = Date.now();
+      const cutoff = nowMs - 10_000;
+      tickTimestampsRef.current = tickTimestampsRef.current.filter((t) => t >= cutoff);
+      const { label } = computeTickVelocityLabel({
+        tickTimestampsMs: tickTimestampsRef.current,
+        nowMs,
+        windowStartMs: velocityStartMsRef.current,
+      });
+      setTickVelocity(label);
     }, 1000);
     return () => clearInterval(velInterval);
   }, []);
@@ -603,6 +626,7 @@ export function LiveTicker({
             user={user}
             onClearSignal={onClearSignal}
             onAssetChange={onAssetChange}
+            onRetryConnection={handleManualRetry}
           />
         </ErrorBoundary>
       </div>

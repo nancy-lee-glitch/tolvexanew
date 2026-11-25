@@ -124,7 +124,8 @@ export function formatLevelDistance(
   levelPrice: number,
   levelLabel: string,
   pipSize: number,
-  unit: DistanceUnit = 'pips'
+  unit: DistanceUnit = 'pips',
+  decimals = 2
 ): {
   signedPips: number;
   absPips: number;
@@ -133,6 +134,28 @@ export function formatLevelDistance(
 } {
   const safePip = pipSize > 0 ? pipSize : 0.0001;
   const diff = currentPrice - levelPrice;
+
+  if (unit === 'price') {
+    const safeDec = Math.min(8, Math.max(0, decimals));
+    const absPrice = Math.abs(diff);
+    const threshold = Math.pow(10, -safeDec) * 0.5;
+    if (absPrice < threshold) {
+      return {
+        signedPips: 0,
+        absPips: 0,
+        relation: 'at',
+        plainText: `price is at ${levelLabel}`,
+      };
+    }
+    const relation = diff > 0 ? 'above' : 'below';
+    return {
+      signedPips: parseFloat(diff.toFixed(safeDec)),
+      absPips: parseFloat(absPrice.toFixed(safeDec)),
+      relation,
+      plainText: `price is ${absPrice.toFixed(safeDec)} ${relation} ${levelLabel}`,
+    };
+  }
+
   const signedRaw = diff / safePip;
   const absRaw = Math.abs(signedRaw);
   const signedPips = parseFloat(signedRaw.toFixed(1));
@@ -484,7 +507,7 @@ export function computeMarketContext(params: {
   const levelsMap: KeyLevelMapItem[] = levelsRaw
     .filter((lvl) => Number.isFinite(lvl.price) && lvl.price > 0)
     .map((lvl) => {
-      const dist = formatLevelDistance(currentPrice, lvl.price, lvl.label, pipSize, distanceUnit);
+      const dist = formatLevelDistance(currentPrice, lvl.price, lvl.label, pipSize, distanceUnit, decimals);
       return {
         id: lvl.id,
         label: lvl.label,

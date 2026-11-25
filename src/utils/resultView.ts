@@ -574,8 +574,15 @@ export function buildResultView(
     mt5Nested?.distanceUnit ||
     'pips';
 
-  const fmtDist = (v: number, sign: '+' | '-') => {
-    const abs = Math.abs(v);
+  const fmtDist = (pipsVal: number, levelPrice: number, sign: '+' | '-') => {
+    if (distanceUnit === 'price') {
+      const priceDiff =
+        entryPrice > 0 && levelPrice > 0
+          ? Math.abs(levelPrice - entryPrice)
+          : Math.abs(pipsVal);
+      return `${sign}${priceDiff.toFixed(decimals)}`;
+    }
+    const abs = Math.abs(pipsVal);
     const num = Number.isInteger(abs) ? String(abs) : abs.toFixed(1);
     return `${sign}${num} ${formatDistanceUnitWord(abs, distanceUnit)}`;
   };
@@ -646,13 +653,13 @@ export function buildResultView(
       entryZone,
       stopLossPriceText: stopLoss.toFixed(decimals),
       stopLossPrice: stopLoss,
-      stopLossDistanceText: fmtDist(stopLossPips, '-'),
+      stopLossDistanceText: fmtDist(stopLossPips, stopLoss, '-'),
       tp1PriceText: tp1.toFixed(decimals),
       tp1Price: tp1,
-      tp1DistanceText: fmtDist(tp1Pips, '+'),
+      tp1DistanceText: fmtDist(tp1Pips, tp1, '+'),
       tp2PriceText: tp2.toFixed(decimals),
       tp2Price: tp2,
-      tp2DistanceText: fmtDist(tp2Pips, '+'),
+      tp2DistanceText: fmtDist(tp2Pips, tp2, '+'),
       lotSize,
       lotSizeText: !isAccountTooSmall ? `${lotSize} lots` : '0 lots (below min)',
       riskMoney,
@@ -746,7 +753,9 @@ export function buildMarketContextSummaryLines(
   const vol = context.volatilityRegime;
   const volatilityLine =
     vol.sampleCount > 0 && vol.currentAtrPips !== null && vol.percentile30d !== null
-      ? `Volatility is ${vol.regime} — daily ATR(14) is ${vol.currentAtrPips.toFixed(1)} ${formatDistanceUnitWord(vol.currentAtrPips, unit)} (${vol.percentile30d.toFixed(0)}th percentile, n=${vol.sampleCount}).`
+      ? unit === 'price' && vol.currentAtr !== null
+        ? `Volatility is ${vol.regime} — daily ATR(14) is ${vol.currentAtr.toFixed(decimals)} (${vol.percentile30d.toFixed(0)}th percentile, n=${vol.sampleCount}).`
+        : `Volatility is ${vol.regime} — daily ATR(14) is ${vol.currentAtrPips.toFixed(1)} ${formatDistanceUnitWord(vol.currentAtrPips, unit)} (${vol.percentile30d.toFixed(0)}th percentile, n=${vol.sampleCount}).`
       : `Volatility regime unavailable (n=${vol.sampleCount} daily bars).`;
 
   // Line 3: Nearest level above & nearest level below
@@ -754,13 +763,21 @@ export function buildMarketContextSummaryLines(
   const above = sorted.find((l) => l.price > context.currentPrice);
   const below = sorted.find((l) => l.price < context.currentPrice);
 
+  const fmtLevelDist = (lvl: KeyLevelMapItem, sign: '+' | '-') => {
+    if (unit === 'price') {
+      const diff = Math.abs(lvl.price - context.currentPrice);
+      return `${sign}${diff.toFixed(decimals)}`;
+    }
+    return `${sign}${lvl.absPipsFromLevel.toFixed(1)} ${formatDistanceUnitWord(lvl.absPipsFromLevel, unit)}`;
+  };
+
   let levelsLine = 'Key levels: awaiting sufficient candle history.';
   if (above && below) {
-    levelsLine = `Nearest levels: ${above.label} above at ${above.price.toFixed(decimals)} (+${above.absPipsFromLevel.toFixed(1)} ${formatDistanceUnitWord(above.absPipsFromLevel, unit)}) and ${below.label} below at ${below.price.toFixed(decimals)} (-${below.absPipsFromLevel.toFixed(1)} ${formatDistanceUnitWord(below.absPipsFromLevel, unit)}).`;
+    levelsLine = `Nearest levels: ${above.label} above at ${above.price.toFixed(decimals)} (${fmtLevelDist(above, '+')}) and ${below.label} below at ${below.price.toFixed(decimals)} (${fmtLevelDist(below, '-')}).`;
   } else if (above) {
-    levelsLine = `Nearest level above: ${above.label} at ${above.price.toFixed(decimals)} (+${above.absPipsFromLevel.toFixed(1)} ${formatDistanceUnitWord(above.absPipsFromLevel, unit)}).`;
+    levelsLine = `Nearest level above: ${above.label} at ${above.price.toFixed(decimals)} (${fmtLevelDist(above, '+')}).`;
   } else if (below) {
-    levelsLine = `Nearest level below: ${below.label} at ${below.price.toFixed(decimals)} (-${below.absPipsFromLevel.toFixed(1)} ${formatDistanceUnitWord(below.absPipsFromLevel, unit)}).`;
+    levelsLine = `Nearest level below: ${below.label} at ${below.price.toFixed(decimals)} (${fmtLevelDist(below, '-')}).`;
   }
 
   return { trendLine, volatilityLine, levelsLine };

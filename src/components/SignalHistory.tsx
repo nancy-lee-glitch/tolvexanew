@@ -313,8 +313,15 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                 {/* 4. Outcome Badge & Controls */}
                 <div className="flex items-center gap-2 shrink-0">
                   {(() => {
-                    const rowUnit = resolveAssetPipSpec({ symbol: sig.asset, name: sig.asset }).distanceUnit;
+                    const rowSpec = resolveAssetPipSpec({ symbol: sig.asset, name: sig.asset });
+                    const rowUnit = rowSpec.distanceUnit;
                     const unitWord = typeof sig.pipDiff === 'number' ? formatDistanceUnitWord(sig.pipDiff, rowUnit) : rowUnit;
+                    const diffLabel =
+                      typeof sig.pipDiff === 'number'
+                        ? rowUnit === 'price'
+                          ? `${sig.pipDiff > 0 ? '+' : ''}${(sig.pipDiff * rowSpec.pipSize).toFixed(rowSpec.decimals)}`
+                          : `${sig.pipDiff > 0 ? '+' : ''}${sig.pipDiff} ${unitWord}`
+                        : '';
                     if (isWin) {
                       return (
                         <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-black shadow-sm">
@@ -322,8 +329,8 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
                           </svg>
                           <span>WON</span>
-                          {typeof sig.pipDiff === 'number' && (
-                            <span className="text-[10px] opacity-80">(+{sig.pipDiff} {unitWord})</span>
+                          {diffLabel && (
+                            <span className="text-[10px] opacity-80">({diffLabel})</span>
                           )}
                         </div>
                       );
@@ -335,8 +342,8 @@ export function SignalHistory({ signals, activeAsset, onUpdateOutcome }: SignalH
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M6 18L18 6M6 6l12 12" />
                           </svg>
                           <span>LOST</span>
-                          {typeof sig.pipDiff === 'number' && (
-                            <span className="text-[10px] opacity-80">({sig.pipDiff} {unitWord})</span>
+                          {diffLabel && (
+                            <span className="text-[10px] opacity-80">({diffLabel})</span>
                           )}
                         </div>
                       );

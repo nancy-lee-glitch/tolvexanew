@@ -26,6 +26,14 @@ const SignalLogSchema = z.object({
   expiry: z.string().max(16).optional().nullable(),
   strength: z.enum(['Low', 'Medium', 'High']).optional(),
   inputs_snapshot: z.record(z.string(), z.unknown()).optional(),
+  conditions_override: z
+    .object({
+      overridden: z.boolean(),
+      level: z.enum(['NOT_ADVISED', 'CAUTION']).optional(),
+      reasonCodes: z.array(z.string().min(1).max(48)).max(20),
+      overriddenAt: z.string().max(64).optional(),
+    })
+    .optional(),
   feed_source: z.string().max(256).optional(),
   valid_until: z.string().optional().nullable(),
 });
@@ -106,15 +114,20 @@ export default async function handler(req: any, res: any) {
     });
   }
 
-  // Re-verify serialized inputs_snapshot after parsing
-  if (payload.inputs_snapshot) {
-    const parsedSnapshotBytes = Buffer.byteLength(JSON.stringify(payload.inputs_snapshot), 'utf8');
-    if (parsedSnapshotBytes > MAX_INPUTS_SNAPSHOT_BYTES) {
-      return res.status(413).json({
-        ok: false,
-        error: 'inputs_snapshot exceeds the 8 KB serialized limit.',
-      });
-    }
+  const mergedInputsSnapshot: Record<string, unknown> = {
+    ...(payload.inputs_snapshot || {}),
+    ...(payload.conditions_override
+      ? { conditions_override: payload.conditions_override }
+      : {}),
+  };
+
+  // Re-verify serialized inputs_snapshot after parsing & override merge
+  const parsedSnapshotBytes = Buffer.byteLength(JSON.stringify(mergedInputsSnapshot), 'utf8');
+  if (parsedSnapshotBytes > MAX_INPUTS_SNAPSHOT_BYTES) {
+    return res.status(413).json({
+      ok: false,
+      error: 'inputs_snapshot exceeds the 8 KB serialized limit.',
+    });
   }
 
   // 2. Authentication check: derive user_id from verified token, reject unauthenticated
@@ -160,7 +173,7 @@ export default async function handler(req: any, res: any) {
         platform: payload.platform || null,
         expiry: payload.expiry || null,
         strength: payload.strength || null,
-        inputs_snapshot: payload.inputs_snapshot || {},
+        inputs_snapshot: mergedInputsSnapshot,
         feed_source: payload.feed_source || null,
         created_at: new Date().toISOString(),
         valid_until: payload.valid_until || null,

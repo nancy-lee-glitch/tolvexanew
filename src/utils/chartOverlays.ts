@@ -53,13 +53,20 @@ export interface ChartHistorySignalItem {
 export interface BuildSignalOverlayOptions {
   compact?: boolean;
   distanceUnit?: DistanceUnit;
+  decimals?: number;
 }
 
 function formatShortDistance(
   pips: number | null | undefined,
   signed: '+' | '-' | '',
-  unit: DistanceUnit = 'pips'
+  unit: DistanceUnit = 'pips',
+  priceDiff?: number,
+  decimals = 2
 ): string {
+  if (unit === 'price') {
+    if (typeof priceDiff !== 'number' || !Number.isFinite(priceDiff) || priceDiff <= 0) return '';
+    return `${signed}${Math.abs(priceDiff).toFixed(Math.min(8, Math.max(0, decimals)))}`;
+  }
   if (typeof pips !== 'number' || !Number.isFinite(pips) || pips <= 0) return '';
   const absVal = Math.abs(pips);
   const formatted = Number.isInteger(absVal) ? String(absVal) : absVal.toFixed(1);
@@ -80,6 +87,7 @@ export function buildSignalChartOverlays(
 
   const compact = Boolean(options.compact);
   const unit: DistanceUnit = options.distanceUnit || signal.distanceUnit || 'pips';
+  const decimals = options.decimals ?? 2;
 
   if (signal.profile === 'MT5') {
     const overlays: ChartOverlay[] = [];
@@ -128,7 +136,13 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.stopLoss === 'number' && Number.isFinite(signal.stopLoss) && signal.stopLoss > 0) {
-      const slTag = formatShortDistance(signal.stopLossPips, '-', unit);
+      const slTag = formatShortDistance(
+        signal.stopLossPips,
+        '-',
+        unit,
+        signal.entryPrice > 0 ? Math.abs(signal.stopLoss - signal.entryPrice) : undefined,
+        decimals
+      );
       overlays.push({
         id: 'mt5-sl',
         type: 'priceLine',
@@ -144,7 +158,13 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.takeProfit1 === 'number' && Number.isFinite(signal.takeProfit1) && signal.takeProfit1 > 0) {
-      const tp1Tag = formatShortDistance(signal.takeProfit1Pips, '+', unit);
+      const tp1Tag = formatShortDistance(
+        signal.takeProfit1Pips,
+        '+',
+        unit,
+        signal.entryPrice > 0 ? Math.abs(signal.takeProfit1 - signal.entryPrice) : undefined,
+        decimals
+      );
       overlays.push({
         id: 'mt5-tp1',
         type: 'priceLine',
@@ -160,7 +180,13 @@ export function buildSignalChartOverlays(
     }
 
     if (typeof signal.takeProfit2 === 'number' && Number.isFinite(signal.takeProfit2) && signal.takeProfit2 > 0) {
-      const tp2Tag = formatShortDistance(signal.takeProfit2Pips, '+', unit);
+      const tp2Tag = formatShortDistance(
+        signal.takeProfit2Pips,
+        '+',
+        unit,
+        signal.entryPrice > 0 ? Math.abs(signal.takeProfit2 - signal.entryPrice) : undefined,
+        decimals
+      );
       overlays.push({
         id: 'mt5-tp2',
         type: 'priceLine',

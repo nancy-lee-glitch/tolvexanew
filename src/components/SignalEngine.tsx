@@ -22,7 +22,12 @@ import {
   computeSignalHistoryLearning,
   getAssetTimestampedTicks,
 } from '../utils/quantEngine.ts';
-import { formatDistanceUnitWord, resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
+import {
+  formatDistanceUnitWord,
+  formatPriceDifference,
+  isOtcInstrument,
+  resolveAssetPipSpec,
+} from '../utils/instrumentMeta.ts';
 import {
   analyzeBinarySignal,
   analyzeMT5Signal,
@@ -51,9 +56,12 @@ import {
   type MarketEventRow,
 } from '../utils/supabaseClient.ts';
 import {
+  fetchRemoteConditionsConfig,
   fetchRemoteMinActionableStrength,
   getBrokerPlatforms,
+  getConditionsConfig,
   getMinActionableStrength,
+  getUserDailyLossLimitCount,
   resolveBrokerDestinationUrl,
 } from '../utils/siteConfigManager.ts';
 import { useBrand } from '../utils/brand.ts';
@@ -65,6 +73,13 @@ import {
   buildResultView,
   isStrengthBelowMinimum,
 } from '../utils/resultView.ts';
+import {
+  assessConditions,
+  pickConsistentWaitReason,
+  resolveAnalyseGateState,
+  type ConditionsAssessment,
+  type ConditionsConfig,
+} from '../utils/conditions.ts';
 
 interface SignalEngineProps {
   activeAsset: AssetConfig;
@@ -80,9 +95,11 @@ interface SignalEngineProps {
   onOpenVipRadar?: () => void;
   isFeedActive?: boolean;
   feedHealthStatus?: string;
+  tickAgeSeconds?: number;
   onSignalOutput?: (sig: EngineChartSignal | null) => void;
   onMarketContextUpdate?: (ctx: MarketContextSummary | null) => void;
   onProfileChange?: (profile: AnalysisProfile) => void;
+  onConditionsChange?: (assessment: ConditionsAssessment) => void;
 }
 
 export const BINARY_HORIZONS: Array<{
@@ -130,9 +147,11 @@ export function SignalEngine({
   onOpenVipRadar,
   isFeedActive = true,
   feedHealthStatus = 'LIVE',
+  tickAgeSeconds,
   onSignalOutput,
   onMarketContextUpdate,
   onProfileChange,
+  onConditionsChange,
 }: SignalEngineProps) {
   const { siteName } = useBrand();
   // 1. Unified Broker Platform Selector State (Replaces Quick/MT5 dual buttons)
@@ -199,19 +218,22 @@ export function SignalEngine({
   }, [currentPlatform.id, activeAsset?.symbol]);
 
   const isOtc = useMemo(() => {
-    return (
+    return isOtcInstrument(
+      activeAsset,
       Boolean(brokerMeta.isOtc) ||
-      Boolean((activeAsset as unknown as { is_otc?: boolean })?.is_otc) ||
-      Boolean((currentPlatform as unknown as { is_otc?: boolean })?.is_otc) ||
-      (activeAsset?.name || '').toUpperCase().includes('OTC') ||
-      (activeAsset?.symbol || '').toUpperCase().includes('OTC')
+        Boolean((currentPlatform as unknown as { is_otc?: boolean })?.is_otc)
     );
   }, [activeAsset, currentPlatform, brokerMeta.isOtc]);
 
-  // Track latest tick arrival timestamp for tick freshness interlock (< 6s)
+  // Track latest tick arrival timestamp & currentPrice ref for conditions gate
   const lastTickTimeRef = useRef<number>(Date.now());
+  const hasLiveTickRef = useRef<boolean>(false);
+  const currentPriceRef = useRef<number>(currentPrice);
+  currentPriceRef.current = currentPrice;
+
   useEffect(() => {
-    if (ticks && ticks.length > 0) {
+    if ((ticks && ticks.length > 0) || currentPrice > 0) {
+      hasLiveTickRef.current = true;
       lastTickTimeRef.current = Date.now();
     }
   }, [ticks, currentPrice]);
@@ -310,15 +332,97 @@ export function SignalEngine({
     setIsLocked(false);
     setIsExpired(false);
     setFreshnessSec(0);
+    hasLiveTickRef.current = false;
+    lastTickTimeRef.current = Date.now();
     if (countdownRef.current) clearInterval(countdownRef.current);
     onSignalOutput?.(null);
     onMarketContextUpdate?.(null);
   }, [activeAsset?.symbol, onSignalOutput, onMarketContextUpdate]);
 
-  // Binary Stake Sizing (1% - 2% suggested stake) & 3-Loss Cool-Down
+  // Proactively preload MarketContext when entering cockpit or switching asset so
+  // ATR percentile, session profile quartile, and M15/H1/H4/D1 trends feed the conditions gate.
+  useEffect(() => {
+    const targetSymbol = activeAsset?.symbol;
+    if (!targetSymbol) return;
+    let cancelled = false;
+    setIsLoadingContext(true);
+
+    Promise.all([
+      getOrFetchCandles(targetSymbol, '1d', 90).catch(() => []),
+      getOrFetchCandles(targetSymbol, '4h', 120).catch(() => []),
+      getOrFetchCandles(targetSymbol, '1h', 1400).catch(() => []),
+      getOrFetchCandles(targetSymbol, '15m', 160).catch(() => []),
+    ])
+      .then(([d1C, h4C, h1C, m15C]) => {
+        if (cancelled || latestSymbolRef.current !== targetSymbol) return;
+        const refPrice =
+          currentPriceRef.current > 0
+            ? currentPriceRef.current
+            : m15C[m15C.length - 1]?.close || h1C[h1C.length - 1]?.close || 0;
+        const ctx = computeMarketContext({
+          asset: activeAsset,
+          currentPrice: refPrice,
+          m15Candles: m15C,
+          h1Candles: h1C,
+          h4Candles: h4C,
+          d1Candles: d1C,
+        });
+        setMarketContext(ctx);
+        onMarketContextUpdate?.(ctx);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled && latestSymbolRef.current === targetSymbol) {
+          setIsLoadingContext(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAsset, onMarketContextUpdate]);
+
+  // Trading Conditions Gate config, daily loss limit, and live 1s clock
+  const [conditionsConfig, setConditionsConfig] = useState<ConditionsConfig>(() =>
+    getConditionsConfig()
+  );
+  const [dailyLossLimitCount, setDailyLossLimitCount] = useState<number | null>(() =>
+    getUserDailyLossLimitCount()
+  );
+  const [nowClockMs, setNowClockMs] = useState<number>(() => Date.now());
+  const [overrideArmed, setOverrideArmed] = useState<boolean>(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRemoteConditionsConfig()
+      .then((cfg) => {
+        if (!cancelled) setConditionsConfig(cfg);
+      })
+      .catch(() => {});
+
+    const onCfgChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<ConditionsConfig>)?.detail;
+      if (detail) setConditionsConfig(detail);
+    };
+    const onDailyLimitChanged = (ev: Event) => {
+      const detail = (ev as CustomEvent<number | null>)?.detail;
+      setDailyLossLimitCount(typeof detail === 'number' ? detail : null);
+    };
+    window.addEventListener('pulsetrade_conditions_config_changed', onCfgChanged);
+    window.addEventListener('pulsetrade_daily_loss_limit_changed', onDailyLimitChanged);
+
+    const clockId = window.setInterval(() => setNowClockMs(Date.now()), 1000);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('pulsetrade_conditions_config_changed', onCfgChanged);
+      window.removeEventListener('pulsetrade_daily_loss_limit_changed', onDailyLimitChanged);
+      window.clearInterval(clockId);
+    };
+  }, []);
+
+  // Binary Stake Sizing (1% - 2% suggested stake)
   const [binaryBalance, setBinaryBalance] = useState<number>(100);
   const [binaryRiskPct, setBinaryRiskPct] = useState<number>(1);
-  const [breakAcknowledged, setBreakAcknowledged] = useState<boolean>(false);
 
   // MT5 Risk & Account Profile (persisted to Supabase for signed-in users)
   const [mt5AccountCurrency, setMt5AccountCurrency] = useState<'USD' | 'EUR' | 'GBP' | 'JPY' | 'AUD' | 'CAD' | 'CHF'>(
@@ -462,11 +566,10 @@ export function SignalEngine({
     return calculateSafeCloseAnalysis(safeTicks, closeTf, assetPipSpec.pipSize, assetPipSpec.distanceUnit);
   }, [safeTicks, binaryHorizon, mt5Horizon, assetPipSpec.pipSize, assetPipSpec.distanceUnit, analysisMode]);
 
-  // Count consecutive recent Binary losses for "Take a break" cool-down
-  const binaryConsecutiveLosses = useMemo(() => {
+  // Count consecutive recent losses & today's UTC losses for Trading Conditions Gate
+  const consecutiveLosses = useMemo(() => {
     let count = 0;
     for (const item of signalHistory) {
-      if (item.platformProfile && item.platformProfile !== 'BINARY_QUICK') continue;
       if (item.outcome === 'PENDING' || item.outcome === 'IN_TRADE' || item.outcome === 'WAIT') continue;
       if (item.outcome === 'LOSS') {
         count += 1;
@@ -477,8 +580,73 @@ export function SignalEngine({
     return count;
   }, [signalHistory]);
 
-  const isTakeABreakLocked =
-    analysisProfile === 'BINARY_QUICK' && binaryConsecutiveLosses >= 3 && !breakAcknowledged;
+  const dailyLossesCount = useMemo(() => {
+    const todayUtc = new Date(nowClockMs).toISOString().slice(0, 10);
+    let count = 0;
+    for (const item of signalHistory) {
+      if (item.outcome !== 'LOSS') continue;
+      if (typeof item.generatedAt === 'number' && Number.isFinite(item.generatedAt)) {
+        const dayStr = new Date(item.generatedAt).toISOString().slice(0, 10);
+        if (dayStr === todayUtc) count += 1;
+      }
+    }
+    return count;
+  }, [signalHistory, nowClockMs]);
+
+  const effectiveTickAgeSec = useMemo(() => {
+    if (typeof tickAgeSeconds === 'number' && Number.isFinite(tickAgeSeconds)) {
+      if (!hasLiveTickRef.current) return tickAgeSeconds;
+      const localElapsedSec = Math.max(0, (nowClockMs - lastTickTimeRef.current) / 1000);
+      return Math.max(tickAgeSeconds, localElapsedSec);
+    }
+    if (!hasLiveTickRef.current) return null;
+    return Math.max(0, (nowClockMs - lastTickTimeRef.current) / 1000);
+  }, [tickAgeSeconds, nowClockMs]);
+
+  const conditionsAssessment = useMemo(
+    () =>
+      assessConditions({
+        asset: activeAsset,
+        platformProfile: analysisProfile,
+        feedStatus: feedHealthStatus,
+        tickAgeSeconds: effectiveTickAgeSec,
+        nowMs: nowClockMs,
+        marketContext,
+        upcomingEvents: marketEvents,
+        userState: {
+          consecutiveLosses,
+          dailyLossesCount,
+          dailyLossLimitCount,
+        },
+        config: conditionsConfig,
+      }),
+    [
+      activeAsset,
+      analysisProfile,
+      feedHealthStatus,
+      effectiveTickAgeSec,
+      nowClockMs,
+      marketContext,
+      marketEvents,
+      consecutiveLosses,
+      dailyLossesCount,
+      dailyLossLimitCount,
+      conditionsConfig,
+    ]
+  );
+
+  useEffect(() => {
+    onConditionsChange?.(conditionsAssessment);
+  }, [conditionsAssessment, onConditionsChange]);
+
+  const conditionsReasonKey = useMemo(
+    () => conditionsAssessment.reasons.map((r) => r.code).join(','),
+    [conditionsAssessment.reasons]
+  );
+
+  useEffect(() => {
+    setOverrideArmed(false);
+  }, [activeAsset?.symbol, selectedPlatformId, conditionsReasonKey, conditionsAssessment.level]);
 
   // Rule 3: DELAYED status blocks binary profile only, never MT5 candle-based scans
   const isFeedBlockedForProfile = useMemo(() => {
@@ -504,8 +672,55 @@ export function SignalEngine({
     return () => clearInterval(id);
   }, [analysisMode, signal]);
 
+  const isHardTechnicalBlock =
+    isLocked ||
+    isRechecking ||
+    Boolean(activeTrade) ||
+    isOtc ||
+    isFeedBlockedForProfile ||
+    (analysisProfile === 'BINARY_QUICK' && safeTicks.length < 5);
+
+  const normalScanLabel =
+    analysisMode === 'quick'
+      ? `⚡ SCAN BINARY SIGNAL (${activeAsset?.name || 'EUR/USD'} • ${binaryHorizon === 'auto' ? 'Auto' : binaryHorizon.toUpperCase()})`
+      : `📊 SCAN MT5 SETUP (${activeAsset?.name || 'EUR/USD'} • ${mt5Horizon === 'M15' ? 'Intraday M15' : 'Swing H1'})`;
+
+  const hardBlockLabel = isOtc
+    ? '🚫 OTC ASSET — PROPRIETARY BROKER PRICING'
+    : feedHealthStatus === 'MARKET_CLOSED'
+    ? '🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)'
+    : isFeedBlockedForProfile
+    ? feedHealthStatus === 'IDLE'
+      ? 'Idle — pick an asset'
+      : feedHealthStatus === 'DELAYED'
+      ? '⏳ FEED QUIET — BINARY REQUIRES LIVE TICKS'
+      : feedHealthStatus === 'OFFLINE'
+      ? '⚠️ FEED OFFLINE — RETRYING...'
+      : '⚡ CONNECTING TO LIVE FEED...'
+    : analysisProfile === 'BINARY_QUICK' && safeTicks.length < 5
+    ? `⏳ COLLECTING LIVE TICKS (${safeTicks.length}/5)...`
+    : isRechecking
+    ? 'AUDITING MARKET DATA...'
+    : isLocked
+    ? '🔒 AWAITING SESSION OUTCOME FEEDBACK'
+    : activeTrade
+    ? '⚡ TRADE ACTIVE — TRACKING IN-FLIGHT DELTA'
+    : normalScanLabel;
+
+  const analyseGate = resolveAnalyseGateState({
+    level: conditionsAssessment.level,
+    reasons: conditionsAssessment.reasons,
+    overrideArmed,
+    isHardTechnicalBlock,
+    hardBlockLabel,
+    normalLabel: normalScanLabel,
+  });
+
   // PRIMARY CONFIRMATION ENGINE TRIGGER
-  const handleTriggerAnalysis = async () => {
+  const handleTriggerAnalysis = async (
+    overrideMeta?: SignalData['conditionsOverride'],
+    fromAutoScan = false
+  ) => {
     // 1) Security check: Login required to trade
     if (!user) {
       onOpenAuth?.('login');
@@ -514,10 +729,25 @@ export function SignalEngine({
 
     if (isLocked || isRechecking || activeTrade) return;
 
-    // 3-consecutive-loss Take-A-Break interlock for Binary profile
-    if (isTakeABreakLocked) {
-      setCreditNotice('Take a break acknowledged is required after 3 consecutive Binary losses.');
-      return;
+    // Two-tap Trading Conditions Gate ("NOT_ADVISED" requires explicit confirmation tap; never consumes credits on tap 1)
+    if (!fromAutoScan && !overrideMeta?.overridden) {
+      if (analyseGate.action === 'ARM_OVERRIDE') {
+        setOverrideArmed(true);
+        setCreditNotice(
+          'Conditions are not advised. Tap "I understand the risk, analyse anyway" to proceed (no credit charged for this step).'
+        );
+        return;
+      }
+      if (analyseGate.action === 'RUN_WITH_OVERRIDE') {
+        const nextOverrideMeta: SignalData['conditionsOverride'] = {
+          overridden: true,
+          level: conditionsAssessment.level === 'CAUTION' ? 'CAUTION' : 'NOT_ADVISED',
+          reasonCodes: conditionsAssessment.reasons.map((r) => r.code),
+          overriddenAt: new Date().toISOString(),
+        };
+        setOverrideArmed(false);
+        return handleTriggerAnalysis(nextOverrideMeta, false);
+      }
     }
 
     // 0) Safety Interlock: OTC Check
@@ -761,6 +991,18 @@ export function SignalEngine({
           (binaryRes.direction === 'CALL' || binaryRes.direction === 'PUT') &&
           isStrengthBelowMinimum(binaryRes.strength, minStrengthRef.current);
 
+        const rawBinaryWaitReason = binaryRes.whyNotTrade || binaryRes.reasons[0] || '';
+        const consistentBinaryWaitReason =
+          !binaryBelowMinStrength && binaryRes.direction === 'WAIT'
+            ? pickConsistentWaitReason(
+                rawBinaryWaitReason,
+                conditionsAssessment,
+                typeof binaryRes.inputsSnapshot?.blocker === 'string'
+                  ? binaryRes.inputsSnapshot.blocker
+                  : undefined
+              )
+            : rawBinaryWaitReason;
+
         const mappedSignal: SignalData = {
           engine: binaryRes.engine,
           profile: 'BINARY_QUICK',
@@ -788,17 +1030,26 @@ export function SignalEngine({
           createdAt: binaryRes.createdAt,
           validUntil: binaryRes.validUntil,
           enterWithinSeconds: binaryRes.enterWithinSeconds,
-          reasons: binaryBelowMinStrength ? [MIN_STRENGTH_WAIT_REASON] : binaryRes.reasons,
-          whyNotTrade: binaryBelowMinStrength ? MIN_STRENGTH_WAIT_REASON : binaryRes.whyNotTrade,
+          reasons: binaryBelowMinStrength
+            ? [MIN_STRENGTH_WAIT_REASON]
+            : binaryRes.direction === 'WAIT' && consistentBinaryWaitReason
+            ? [consistentBinaryWaitReason]
+            : binaryRes.reasons,
+          whyNotTrade: binaryBelowMinStrength
+            ? MIN_STRENGTH_WAIT_REASON
+            : binaryRes.direction === 'WAIT'
+            ? consistentBinaryWaitReason
+            : binaryRes.whyNotTrade,
           payoutPct: binaryRes.payoutPct,
           breakEvenWinRatePct: binaryRes.breakEvenWinRatePct,
           breakEvenMessage: binaryRes.breakEvenMessage,
           feedSource: binaryRes.feedSource,
           inputsSnapshot: binaryRes.inputsSnapshot,
+          conditionsOverride: overrideMeta?.overridden ? overrideMeta : undefined,
           entryPrice: binaryRes.entryPrice ?? (currentPrice || 0),
           plainLanguageReason: binaryBelowMinStrength
             ? MIN_STRENGTH_WAIT_REASON
-            : binaryRes.whyNotTrade || binaryRes.reasons.join(' '),
+            : consistentBinaryWaitReason || binaryRes.reasons.join(' '),
           riskNote: 'Trading binary contracts carries full stake risk. algorithmic signals are educational and not financial advice.',
           gatePassed: !binaryBelowMinStrength && binaryRes.direction !== 'WAIT',
           status: 'READY',
@@ -837,7 +1088,7 @@ export function SignalEngine({
           });
 
         const isActionable = mappedSignal.direction === 'CALL' || mappedSignal.direction === 'PUT';
-        if (binaryBelowMinStrength) {
+        if (binaryBelowMinStrength || (!isActionable && overrideMeta?.overridden)) {
           logSignalToSupabase(mappedSignal);
         }
         if (isActionable) {
@@ -905,7 +1156,7 @@ export function SignalEngine({
               if (remaining <= 0) {
                 if (autoScanCountdownRef.current) clearInterval(autoScanCountdownRef.current);
                 setAutoScanAttempt((att) => att + 1);
-                triggerAnalysisRef.current?.();
+                (triggerAnalysisRef.current as unknown as (o?: SignalData['conditionsOverride'], a?: boolean) => void)?.(undefined, true);
               }
             }, 1000);
           } else if (autoScanAttempt >= MAX_AUTO_SCAN_ATTEMPTS) {
@@ -1008,6 +1259,18 @@ export function SignalEngine({
         engineActionable && isStrengthBelowMinimum(mt5Res.strength, minStrengthRef.current);
       const isActionable = engineActionable && !mt5BelowMinStrength;
 
+      const rawMt5WaitReason = mt5Res.whyNotTrade || mt5Res.reasons[0] || '';
+      const consistentMt5WaitReason =
+        !mt5BelowMinStrength && mt5Res.direction === 'WAIT'
+          ? pickConsistentWaitReason(
+              rawMt5WaitReason,
+              conditionsAssessment,
+              typeof mt5Res.inputsSnapshot?.blocker === 'string'
+                ? mt5Res.inputsSnapshot.blocker
+                : undefined
+            )
+          : rawMt5WaitReason;
+
       const generatedSignal: SignalData = {
         engine: mt5Res.engine,
         profile: 'MT5',
@@ -1034,10 +1297,19 @@ export function SignalEngine({
         createdAt: mt5Res.createdAt,
         validUntil: mt5Res.validUntil,
         validityWindowDesc: mt5Res.validityWindowDesc,
-        reasons: mt5BelowMinStrength ? [MIN_STRENGTH_WAIT_REASON] : mt5Res.reasons,
-        whyNotTrade: mt5BelowMinStrength ? MIN_STRENGTH_WAIT_REASON : mt5Res.whyNotTrade,
+        reasons: mt5BelowMinStrength
+          ? [MIN_STRENGTH_WAIT_REASON]
+          : mt5Res.direction === 'WAIT' && consistentMt5WaitReason
+          ? [consistentMt5WaitReason]
+          : mt5Res.reasons,
+        whyNotTrade: mt5BelowMinStrength
+          ? MIN_STRENGTH_WAIT_REASON
+          : mt5Res.direction === 'WAIT'
+          ? consistentMt5WaitReason
+          : mt5Res.whyNotTrade,
         feedSource: mt5Res.feedSource,
         inputsSnapshot: mt5Res.inputsSnapshot,
+        conditionsOverride: overrideMeta?.overridden ? overrideMeta : undefined,
         entryPrice: mt5Res.entryPrice,
         targetPrice: isActionable ? (mt5Res.takeProfit1 ?? undefined) : undefined,
         entryZone: isActionable ? (mt5Res.entryZone ?? undefined) : undefined,
@@ -1049,7 +1321,7 @@ export function SignalEngine({
         accountSizingWarning: mt5Res.accountSizingWarning || mt5Res.riskWarning,
         plainLanguageReason: mt5BelowMinStrength
           ? MIN_STRENGTH_WAIT_REASON
-          : mt5Res.whyNotTrade || mt5Res.reasons.join(' '),
+          : consistentMt5WaitReason || mt5Res.reasons.join(' '),
         riskNote:
           mt5Res.riskWarning ||
           `${mt5Res.tradeManagementNote} Algorithmic setups are educational and not financial advice.`,
@@ -1112,7 +1384,7 @@ export function SignalEngine({
       setIsLoadingContext(false);
       setIsRechecking(false);
 
-      if (mt5BelowMinStrength) {
+      if (mt5BelowMinStrength || (!isActionable && overrideMeta?.overridden)) {
         logSignalToSupabase(generatedSignal);
       }
 
@@ -1185,7 +1457,9 @@ export function SignalEngine({
 
   // Keep trigger ref always updated to latest instance
   useEffect(() => {
-    triggerAnalysisRef.current = handleTriggerAnalysis;
+    triggerAnalysisRef.current = () => {
+      handleTriggerAnalysis(undefined, true);
+    };
   });
 
   // Trade Execution tracking (Binary only)
@@ -1230,7 +1504,6 @@ export function SignalEngine({
     if (signalHistory.length > 0) {
       handleUpdateHistoryOutcome(signalHistory[0].id, outcome);
     }
-    setBreakAcknowledged(false);
 
     setTimeout(() => {
       setActiveTrade(null);
@@ -1277,7 +1550,6 @@ export function SignalEngine({
     if (signalHistory.length > 0) {
       handleUpdateHistoryOutcome(signalHistory[0].id, outcome);
     }
-    setBreakAcknowledged(false);
     setIsLocked(false);
     setIsExpired(false);
     setSignal(null);
@@ -1659,7 +1931,15 @@ export function SignalEngine({
                   activeTrade.status === 'IN_THE_MONEY' ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               >
-                {activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} {formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)}
+                {assetPipSpec.distanceUnit === 'price'
+                  ? formatPriceDifference(
+                      activeTrade.direction === 'CALL'
+                        ? currentPrice - activeTrade.entryPrice
+                        : activeTrade.entryPrice - currentPrice,
+                      assetPipSpec.decimals,
+                      true
+                    )
+                  : `${activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} ${formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)}`}
               </span>
             </div>
           </div>
@@ -1670,7 +1950,19 @@ export function SignalEngine({
               onClick={handleSafeCloseNow}
               className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black font-mono text-xs shadow-lg shadow-emerald-500/20 transition flex items-center justify-center gap-2 animate-pulse active:scale-98"
             >
-              <span>⭐ LOCK PROFIT / SAFE CLOSE NOW ({activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} {formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)})</span>
+              <span>
+                ⭐ LOCK PROFIT / SAFE CLOSE NOW (
+                {assetPipSpec.distanceUnit === 'price'
+                  ? formatPriceDifference(
+                      activeTrade.direction === 'CALL'
+                        ? currentPrice - activeTrade.entryPrice
+                        : activeTrade.entryPrice - currentPrice,
+                      assetPipSpec.decimals,
+                      true
+                    )
+                  : `${activeTrade.pipDiff > 0 ? `+${activeTrade.pipDiff}` : activeTrade.pipDiff} ${formatDistanceUnitWord(activeTrade.pipDiff, assetPipSpec.distanceUnit)}`}
+                )
+              </span>
             </button>
           )}
         </div>
@@ -1686,31 +1978,6 @@ export function SignalEngine({
               OTC prices are set by your broker; we cannot analyse them. Please select a standardized market instrument (Forex, Crypto, or Commodities) from the asset picker.
             </p>
           </div>
-        </div>
-      )}
-
-      {/* 3-Consecutive-Loss Take-a-Break Banner */}
-      {isTakeABreakLocked && (
-        <div className="bg-rose-950/50 border-2 border-rose-500/60 rounded-2xl p-4 font-mono text-xs space-y-3 shadow-2xl">
-          <div className="flex items-start gap-3">
-            <span className="text-xl">🛑</span>
-            <div className="space-y-1">
-              <div className="font-black text-rose-300 uppercase tracking-wider">
-                Take a break &mdash; 3 Consecutive Losses Recorded
-              </div>
-              <p className="text-[11px] text-rose-100/90 leading-relaxed">
-                Short-expiry binary payouts require discipline to protect capital during losing streaks. Step away from the screen for a few minutes and avoid increasing your stake size to chase losses.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            id="btn-acknowledge-break"
-            onClick={() => setBreakAcknowledged(true)}
-            className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-rose-200 border border-rose-500/40 font-bold text-xs transition cursor-pointer"
-          >
-            Take a break acknowledged &mdash; Resume Scanning
-          </button>
         </div>
       )}
 
@@ -2233,21 +2500,11 @@ export function SignalEngine({
           type="button"
           id="btn-analyse-trigger"
           data-tour="generate-signal"
-          onClick={handleTriggerAnalysis}
-          disabled={
-            isLocked ||
-            isRechecking ||
-            Boolean(activeTrade) ||
-            isOtc ||
-            isTakeABreakLocked ||
-            isFeedBlockedForProfile ||
-            (analysisProfile === 'BINARY_QUICK' && safeTicks.length < 5)
-          }
+          onClick={() => handleTriggerAnalysis()}
+          disabled={analyseGate.disabled}
           className={`w-full py-3.5 px-4 rounded-2xl font-black font-mono text-xs sm:text-sm uppercase tracking-wider shadow-2xl transition-all duration-200 flex items-center justify-center gap-2 ${
             isOtc
               ? 'bg-amber-950/40 text-amber-300 border border-amber-500/50 cursor-not-allowed opacity-90'
-              : isTakeABreakLocked
-              ? 'bg-rose-950/40 text-rose-300 border border-rose-500/50 cursor-not-allowed opacity-90'
               : feedHealthStatus === 'MARKET_CLOSED'
               ? 'bg-amber-950/30 text-amber-300 border border-amber-600/40 cursor-not-allowed'
               : isFeedBlockedForProfile
@@ -2258,30 +2515,14 @@ export function SignalEngine({
               ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
               : isRechecking
               ? 'bg-emerald-500/20 text-emerald-300 border-2 border-emerald-400 cursor-wait'
+              : analyseGate.action === 'RUN_WITH_OVERRIDE'
+              ? 'bg-rose-600 hover:bg-rose-500 text-white border-2 border-rose-300 shadow-rose-500/30 active:scale-98 cursor-pointer'
               : analysisMode === 'quick'
               ? 'bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-emerald-500/30 active:scale-98 cursor-pointer'
               : 'bg-gradient-to-r from-blue-500 via-indigo-500 to-blue-400 hover:from-blue-400 hover:to-indigo-400 text-white shadow-blue-500/30 active:scale-98 cursor-pointer'
           }`}
         >
-          {isOtc ? (
-            <span>🚫 OTC ASSET — PROPRIETARY BROKER PRICING</span>
-          ) : isTakeABreakLocked ? (
-            <span>🛑 TAKE A BREAK REQUIRED ABOVE TO RESUME</span>
-          ) : feedHealthStatus === 'MARKET_CLOSED' ? (
-            <span>🏛️ FOREX MARKET CLOSED (SWITCH TO 24/7 ASSET)</span>
-          ) : isFeedBlockedForProfile ? (
-            feedHealthStatus === 'IDLE' ? (
-              <span>Idle &mdash; pick an asset</span>
-            ) : feedHealthStatus === 'DELAYED' ? (
-              <span>⏳ FEED QUIET — BINARY REQUIRES LIVE TICKS</span>
-            ) : feedHealthStatus === 'OFFLINE' ? (
-              <span>⚠️ FEED OFFLINE — RETRYING...</span>
-            ) : (
-              <span>⚡ CONNECTING TO LIVE FEED...</span>
-            )
-          ) : analysisProfile === 'BINARY_QUICK' && safeTicks.length < 5 ? (
-            <span>⏳ COLLECTING LIVE TICKS ({safeTicks.length}/5)...</span>
-          ) : isRechecking ? (
+          {isRechecking ? (
             <>
               <svg className="animate-spin h-4 w-4 text-emerald-400" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -2293,24 +2534,8 @@ export function SignalEngine({
               </svg>
               <span>AUDITING MARKET DATA...</span>
             </>
-          ) : isLocked ? (
-            <span>🔒 AWAITING SESSION OUTCOME FEEDBACK</span>
-          ) : activeTrade ? (
-            <span>⚡ TRADE ACTIVE — TRACKING IN-FLIGHT DELTA</span>
-          ) : analysisMode === 'quick' ? (
-            <>
-              <span>⚡ SCAN BINARY SIGNAL</span>
-              <span className="text-xs opacity-75">
-                ({activeAsset?.name || 'EUR/USD'} &bull; {binaryHorizon === 'auto' ? 'Auto' : binaryHorizon.toUpperCase()})
-              </span>
-            </>
           ) : (
-            <>
-              <span>📊 SCAN MT5 SETUP</span>
-              <span className="text-xs opacity-75">
-                ({activeAsset?.name || 'EUR/USD'} &bull; {mt5Horizon === 'M15' ? 'Intraday M15' : 'Swing H1'})
-              </span>
-            </>
+            <span>{analyseGate.buttonLabel}</span>
           )}
         </button>
       </div>

@@ -15,7 +15,16 @@ import type { MarketContextSummary } from '../utils/engines/marketContext.ts';
 import type { FeedHealthStatus } from '../services/derivFeed.ts';
 import type { Candle } from '../services/liveFeed.ts';
 import { getOrFetchCandles, mergeTickIntoCandles } from '../services/candleStore.ts';
-import { getOrInitializeTimestampedTicks } from '../utils/quantEngine.ts';
+import { getLiveFeed } from '../services/feedSingleton.ts';
+import {
+  getOrInitializeTimestampedTicks,
+  seedTimestampedTicksFromCandles,
+} from '../utils/quantEngine.ts';
+import {
+  computeLiveTickMetrics,
+  reportChartDiagnostics,
+  resolveChartEmptyOverlayState,
+} from '../utils/chartDiagnostics.ts';
 import { fetchUserAssetSignalMarkers } from '../utils/supabaseClient.ts';
 import {
   buildHistoryMarkerOverlays,
@@ -27,7 +36,11 @@ import {
   type ChartOverlayLineStyle,
   type EngineChartSignal,
 } from '../utils/chartOverlays.ts';
-import { formatDistanceUnitWord, resolveAssetPipSpec } from '../utils/instrumentMeta.ts';
+import {
+  formatChartChangeSummary,
+  formatPriceDifference,
+  resolveAssetPipSpec,
+} from '../utils/instrumentMeta.ts';
 
 export type ChartType = 'line' | 'area' | 'candles';
 export type AggregationInterval =
@@ -114,6 +127,7 @@ interface LiveChartProps {
   user?: UserProfile | null;
   onClearSignal?: () => void;
   onAssetChange?: (asset: AssetConfig) => void;
+  onRetryConnection?: () => void;
 }
 
 interface BarPoint {
@@ -142,6 +156,7 @@ export function LiveChart({
   isVIP = false,
   user = null,
   onClearSignal,
+  onRetryConnection,
 }: LiveChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fallbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -156,6 +171,20 @@ export function LiveChart({
   const animationFrameRef = useRef<number | null>(null);
   const activeSymbolRef = useRef<string>(activeAsset.symbol);
   const lastAutoSelectedSignalIdRef = useRef<number>(0);
+
+  // Live tick metrics & diagnostics tracking refs
+  const tickSeriesStatsRef = useRef<{
+    open: number;
+    high: number;
+    low: number;
+    firstTimeSec: number;
+    lastTimeSec: number;
+  } | null>(null);
+  const lastMetricsSyncMsRef = useRef<number>(0);
+  const metricsFlushTimerRef = useRef<number | null>(null);
+  const metricsTotalBarsRef = useRef<number>(0);
+  const lastUpdateAtMsRef = useRef<number | null>(null);
+  const latestCloseRef = useRef<number>(currentPrice || 0);
 
   const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 640 : false
@@ -187,14 +216,16 @@ export function LiveChart({
   const [isScrolledAway, setIsScrolledAway] = useState<boolean>(false);
   const [hoverData, setHoverData] = useState<{ price: string; time: string; tooltip?: string } | null>(null);
   const [useFallbackCanvas, setUseFallbackCanvas] = useState<boolean>(false);
-  const [isLoadingHistory, setIsLoadingHistory] = useState<boolean>(false);
-  const [historyEmptyNote, setHistoryEmptyNote] = useState<string | null>(null);
+  const [seriesPointCount, setSeriesPointCount] = useState<number>(0);
+  const [loadingTimedOut, setLoadingTimedOut] = useState<boolean>(false);
+  const [retryNonce, setRetryNonce] = useState<number>(0);
   const [seriesRevision, setSeriesRevision] = useState<number>(0);
   const [vipHistorySignals, setVipHistorySignals] = useState<ChartHistorySignalItem[]>([]);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   // Buffer summary metrics
   const [metrics, setMetrics] = useState({
+    changePrice: 0,
     changePips: 0,
     changePct: 0,
     high: currentPrice || 0,
@@ -203,11 +234,51 @@ export function LiveChart({
     timespanMinutes: 0,
   });
 
+  // 8-second empty-chart timeout watcher
+  useEffect(() => {
+    if (seriesPointCount > 0 || feedStatus === 'MARKET_CLOSED') {
+      setLoadingTimedOut(false);
+      return;
+    }
+    setLoadingTimedOut(false);
+    const timer = window.setTimeout(() => {
+      setLoadingTimedOut(true);
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [seriesPointCount, feedStatus, activeAsset.symbol, interval, retryNonce]);
+
+  // Report live Chart diagnostics whenever key chart state changes
+  useEffect(() => {
+    reportChartDiagnostics({
+      activeSymbol: activeAsset.symbol,
+      seriesPointCount,
+      wsConnected,
+      selectedInterval: interval,
+      lastUpdateAtMs: lastUpdateAtMsRef.current,
+    });
+  }, [activeAsset.symbol, seriesPointCount, wsConnected, interval]);
+
+  const handleRetryChart = useCallback(() => {
+    setLoadingTimedOut(false);
+    setRetryNonce((n) => n + 1);
+    if (onRetryConnection) {
+      onRetryConnection();
+    } else {
+      try {
+        getLiveFeed().manualRetry();
+      } catch {}
+    }
+  }, [onRetryConnection]);
+
   const pipSpec = useMemo(() => resolveAssetPipSpec(activeAsset), [activeAsset]);
   const decimals = pipSpec.decimals;
   const pipSize = pipSpec.pipSize;
-  const distanceUnit = signal?.distanceUnit || pipSpec.distanceUnit;
-  const shortDistanceSuffix = distanceUnit === 'points' ? ' pts' : 'p';
+  const distanceUnit =
+    pipSpec.distanceUnit === 'price'
+      ? 'price'
+      : signal?.distanceUnit || pipSpec.distanceUnit;
+  const shortDistanceSuffix =
+    distanceUnit === 'points' ? ' pts' : distanceUnit === 'pips' ? 'p' : '';
 
   // When an actionable MT5 signal arrives, preselect its structure timeframe + candles once
   useEffect(() => {
@@ -423,7 +494,19 @@ export function LiveChart({
       const pct = parseFloat(((change / (open || 1)) * 100).toFixed(2));
       const spanMin = Math.round((deduped[deduped.length - 1].time - deduped[0].time) / 60);
 
+      metricsTotalBarsRef.current = deduped.length;
+      lastMetricsSyncMsRef.current = Date.now();
+      tickSeriesStatsRef.current = {
+        open,
+        high,
+        low,
+        firstTimeSec: deduped[0].time,
+        lastTimeSec: deduped[deduped.length - 1].time,
+      };
+      latestCloseRef.current = close;
+
       setMetrics({
+        changePrice: Number.isFinite(change) ? change : 0,
         changePips: Number.isNaN(pips) ? 0 : pips,
         changePct: Number.isNaN(pct) ? 0 : pct,
         high,
@@ -432,6 +515,7 @@ export function LiveChart({
         timespanMinutes: Number.isNaN(spanMin) ? 0 : spanMin,
       });
 
+      let count = 0;
       if (activeChartType === 'candles') {
         const bars: BarPoint[] = deduped.map((c) => ({
           time: c.time as UTCTimestamp,
@@ -443,6 +527,7 @@ export function LiveChart({
         targetSeries.setData(bars);
         lastBarRef.current = bars[bars.length - 1] || null;
         seriesDataTimesRef.current = bars.map((b) => Number(b.time));
+        count = bars.length;
       } else {
         const linePts: LinePoint[] = deduped.map((c) => ({
           time: c.time as UTCTimestamp,
@@ -451,11 +536,85 @@ export function LiveChart({
         targetSeries.setData(linePts);
         lastBarRef.current = null;
         seriesDataTimesRef.current = linePts.map((p) => Number(p.time));
+        count = linePts.length;
       }
 
+      const nowTs = Date.now();
+      lastUpdateAtMsRef.current = nowTs;
+      setSeriesPointCount(count);
+      reportChartDiagnostics({
+        activeSymbol: activeSymbolRef.current,
+        seriesPointCount: count,
+        lastUpdateAtMs: nowTs,
+      });
       setSeriesRevision((r) => r + 1);
     },
     [pipSize]
+  );
+
+  // Helper: apply TimestampedTick[] to chart series, metrics, and diagnostics consistently
+  const applyTicksToSeries = useCallback(
+    (
+      ticks: TimestampedTick[],
+      targetSeries: any,
+      activeChartType: ChartType,
+      stepSec: number
+    ) => {
+      if (!targetSeries || !ticks || ticks.length === 0) return;
+      const prices = ticks.map((t) => t.price);
+      const high = Math.max(...prices);
+      const low = Math.min(...prices);
+      const open = ticks[0].price;
+      const close = ticks[ticks.length - 1].price;
+      const firstTimeSec = ticks[0].time;
+      const lastTimeSec = ticks[ticks.length - 1].time;
+
+      let pointTimes: number[] = [];
+      if (activeChartType === 'candles') {
+        const data = buildCandleDataFromTicks(ticks, stepSec);
+        if (data.length > 0) {
+          (targetSeries as ISeriesApi<'Candlestick'>).setData(data);
+          lastBarRef.current = data[data.length - 1];
+          pointTimes = data.map((d) => Number(d.time));
+        }
+      } else {
+        const data = buildLineData(ticks, stepSec);
+        if (data.length > 0) {
+          (targetSeries as ISeriesApi<'Line'> | ISeriesApi<'Area'>).setData(data);
+          lastBarRef.current = null;
+          pointTimes = data.map((d) => Number(d.time));
+        }
+      }
+
+      seriesDataTimesRef.current = pointTimes;
+      const pointCount = pointTimes.length;
+      const nowTs = Date.now();
+      tickSeriesStatsRef.current = { open, high, low, firstTimeSec, lastTimeSec };
+      latestCloseRef.current = close;
+      lastMetricsSyncMsRef.current = nowTs;
+      lastUpdateAtMsRef.current = nowTs;
+
+      const nextMetrics = computeLiveTickMetrics({
+        open,
+        close,
+        high,
+        low,
+        firstTimeSec,
+        lastTimeSec,
+        pointCount,
+        pipSize,
+      });
+      metricsTotalBarsRef.current = nextMetrics.totalBars;
+      setMetrics(nextMetrics);
+      setSeriesPointCount(pointCount);
+      reportChartDiagnostics({
+        activeSymbol: activeSymbolRef.current,
+        seriesPointCount: pointCount,
+        lastUpdateAtMs: nowTs,
+      });
+      setSeriesRevision((r) => r + 1);
+    },
+    [buildCandleDataFromTicks, buildLineData, pipSize]
   );
 
   // Draw fallback HTML5 canvas if lightweight-charts fails to mount
@@ -511,11 +670,17 @@ export function LiveChart({
 
     const targetSymbol = activeAsset.symbol;
     const histMode = isHistoricalInterval(interval);
-    setHistoryEmptyNote(null);
-    setIsLoadingHistory(histMode);
     priceLinesRef.current = [];
     seriesDataTimesRef.current = [];
     lastBarRef.current = null;
+    tickSeriesStatsRef.current = null;
+    lastMetricsSyncMsRef.current = 0;
+    metricsTotalBarsRef.current = 0;
+    if (metricsFlushTimerRef.current !== null) {
+      window.clearTimeout(metricsFlushTimerRef.current);
+      metricsFlushTimerRef.current = null;
+    }
+    setSeriesPointCount(0);
 
     try {
       if (chartRef.current) {
@@ -613,26 +778,10 @@ export function LiveChart({
         const ticks = getOrInitializeTimestampedTicks(targetSymbol);
 
         if (ticks.length > 0) {
-          const prices = ticks.map((t) => t.price);
-          const high = Math.max(...prices);
-          const low = Math.min(...prices);
-          const open = ticks[0].price;
-          const close = ticks[ticks.length - 1].price;
-          const change = close - open;
-          const pips = parseFloat((change / pipSize).toFixed(1));
-          const pct = parseFloat(((change / (open || 1)) * 100).toFixed(2));
-          const spanMin = Math.round((ticks[ticks.length - 1].time - ticks[0].time) / 60);
-
-          setMetrics({
-            changePips: isNaN(pips) ? 0 : pips,
-            changePct: isNaN(pct) ? 0 : pct,
-            high: isNaN(high) ? currentPrice : high,
-            low: isNaN(low) ? currentPrice : low,
-            totalBars: ticks.length,
-            timespanMinutes: isNaN(spanMin) ? 0 : spanMin,
-          });
+          applyTicksToSeries(ticks, createdSeries, chartType, intervalSeconds);
         } else {
           setMetrics({
+            changePrice: 0,
             changePips: 0,
             changePct: 0,
             high: currentPrice || 0,
@@ -640,32 +789,40 @@ export function LiveChart({
             totalBars: 0,
             timespanMinutes: 0,
           });
-        }
+          reportChartDiagnostics({
+            activeSymbol: targetSymbol,
+            seriesPointCount: 0,
+            wsConnected,
+            selectedInterval: interval,
+            lastUpdateAtMs: lastUpdateAtMsRef.current,
+          });
 
-        if (chartType === 'candles') {
-          const data = buildCandleDataFromTicks(ticks, intervalSeconds);
-          if (data.length > 0) {
-            (createdSeries as ISeriesApi<'Candlestick'>).setData(data);
-            lastBarRef.current = data[data.length - 1];
-            seriesDataTimesRef.current = data.map((d) => Number(d.time));
-          }
-        } else {
-          const data = buildLineData(ticks, intervalSeconds);
-          if (data.length > 0) {
-            (createdSeries as ISeriesApi<'Line'> | ISeriesApi<'Area'>).setData(data);
-            seriesDataTimesRef.current = data.map((d) => Number(d.time));
-          }
+          // Empty tick buffer: hydrate from last 60 minutes of real M1 candle closes
+          getOrFetchCandles(targetSymbol, '1m', 60)
+            .then((m1Candles) => {
+              if (isDisposed || activeSymbolRef.current !== targetSymbol || !seriesRef.current) return;
+              if (!m1Candles || m1Candles.length === 0) {
+                setSeriesRevision((r) => r + 1);
+                return;
+              }
+              const hydrated = seedTimestampedTicksFromCandles(targetSymbol, m1Candles, 60);
+              if (hydrated.length > 0) {
+                applyTicksToSeries(hydrated, seriesRef.current, chartType, intervalSeconds);
+                try {
+                  chartRef.current?.timeScale().scrollToRealTime();
+                } catch {}
+              }
+            })
+            .catch(() => {});
         }
-        setSeriesRevision((r) => r + 1);
       } else {
         // Historical Candles (M5, M15, H1, H4, D1) from candleStore (Supabase cache + WS fallback)
         const barCount = interval === 'H1' ? 300 : interval === 'M5' ? 280 : interval === 'M15' ? 240 : 180;
         getOrFetchCandles(targetSymbol, interval, barCount)
           .then((candles) => {
             if (isDisposed || activeSymbolRef.current !== targetSymbol || !seriesRef.current) return;
-            setIsLoadingHistory(false);
             if (!candles || candles.length === 0) {
-              setHistoryEmptyNote(`No ${interval} candle history available yet`);
+              setSeriesPointCount(0);
               setSeriesRevision((r) => r + 1);
               return;
             }
@@ -678,12 +835,7 @@ export function LiveChart({
               chartRef.current?.timeScale().scrollToRealTime();
             } catch {}
           })
-          .catch(() => {
-            if (!isDisposed && activeSymbolRef.current === targetSymbol) {
-              setIsLoadingHistory(false);
-              setHistoryEmptyNote(`Unable to load ${interval} candle history`);
-            }
-          });
+          .catch(() => {});
       }
 
       try {
@@ -755,8 +907,9 @@ export function LiveChart({
     } catch (err) {
       console.warn('[LiveChart init warning, activating resilient fallback]', err);
       setUseFallbackCanvas(true);
-      setIsLoadingHistory(false);
       const ticks = getOrInitializeTimestampedTicks(targetSymbol);
+      seriesDataTimesRef.current = ticks.map((t) => t.time);
+      setSeriesPointCount(ticks.length);
       drawFallbackChart(ticks);
     }
 
@@ -767,6 +920,10 @@ export function LiveChart({
       }
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (metricsFlushTimerRef.current !== null) {
+        window.clearTimeout(metricsFlushTimerRef.current);
+        metricsFlushTimerRef.current = null;
       }
       priceLinesRef.current = [];
       if (chart) {
@@ -786,8 +943,8 @@ export function LiveChart({
     intervalSeconds,
     decimals,
     pipSize,
-    buildLineData,
-    buildCandleDataFromTicks,
+    retryNonce,
+    applyTicksToSeries,
     updateSeriesFromCandles,
     drawFallbackChart,
   ]);
@@ -806,7 +963,11 @@ export function LiveChart({
     priceLinesRef.current = [];
 
     // 2) Signal Overlays (MT5 Entry/SL/TP1/TP2 or Binary Entry + Marker; empty for WAIT/null)
-    const signalOverlays = buildSignalChartOverlays(signal, { compact: isMobileViewport, distanceUnit });
+    const signalOverlays = buildSignalChartOverlays(signal, {
+      compact: isMobileViewport,
+      distanceUnit,
+      decimals,
+    });
 
     // 3) Key Levels Overlays when toggled on
     const levelOverlays = showLevels ? buildKeyLevelOverlays(marketContext, currentPrice, 8) : [];
@@ -909,12 +1070,13 @@ export function LiveChart({
           priceLineColor: pLineColor,
         });
 
+        const prevPointCount = seriesDataTimesRef.current.length;
         const bucketNum =
           intervalSeconds > 1 ? Math.floor(nowSec / intervalSeconds) * intervalSeconds : Number(nowSec);
         const bucketTime = bucketNum as UTCTimestamp;
         const lastKnownTime =
-          seriesDataTimesRef.current.length > 0
-            ? seriesDataTimesRef.current[seriesDataTimesRef.current.length - 1]
+          prevPointCount > 0
+            ? seriesDataTimesRef.current[prevPointCount - 1]
             : 0;
 
         // Avoid non-monotonic backward time updates while historical load settles
@@ -955,6 +1117,72 @@ export function LiveChart({
           }
         }
 
+        if (seriesDataTimesRef.current.length !== prevPointCount) {
+          setSeriesPointCount(seriesDataTimesRef.current.length);
+        }
+
+        const tickNowMs = Date.now();
+        lastUpdateAtMsRef.current = tickNowMs;
+        latestCloseRef.current = currentPrice;
+
+        const prevStats = tickSeriesStatsRef.current;
+        if (!prevStats) {
+          tickSeriesStatsRef.current = {
+            open: prevPrice > 0 && prevPointCount > 0 ? prevPrice : currentPrice,
+            high: currentPrice,
+            low: currentPrice,
+            firstTimeSec: bucketNum,
+            lastTimeSec: bucketNum,
+          };
+        } else {
+          prevStats.high = Math.max(prevStats.high, currentPrice);
+          prevStats.low = Math.min(prevStats.low, currentPrice);
+          prevStats.lastTimeSec = Math.max(prevStats.lastTimeSec, bucketNum);
+        }
+
+        reportChartDiagnostics({
+          activeSymbol: activeAsset.symbol,
+          seriesPointCount: seriesDataTimesRef.current.length,
+          wsConnected,
+          selectedInterval: interval,
+          lastUpdateAtMs: tickNowMs,
+        });
+
+        // Update footer metrics as ticks arrive (throttled ~once per second) for tick intervals
+        if (!isHistoricalInterval(interval)) {
+          const flushMetrics = (flushTs: number) => {
+            const st = tickSeriesStatsRef.current;
+            if (!st) return;
+            const nextM = computeLiveTickMetrics({
+              open: st.open,
+              close: latestCloseRef.current,
+              high: st.high,
+              low: st.low,
+              firstTimeSec: st.firstTimeSec,
+              lastTimeSec: st.lastTimeSec,
+              pointCount: seriesDataTimesRef.current.length,
+              pipSize,
+            });
+            metricsTotalBarsRef.current = nextM.totalBars;
+            lastMetricsSyncMsRef.current = flushTs;
+            setMetrics(nextM);
+          };
+
+          const elapsedSinceSync = tickNowMs - lastMetricsSyncMsRef.current;
+          if (metricsTotalBarsRef.current === 0 || elapsedSinceSync >= 1000) {
+            if (metricsFlushTimerRef.current !== null) {
+              window.clearTimeout(metricsFlushTimerRef.current);
+              metricsFlushTimerRef.current = null;
+            }
+            flushMetrics(tickNowMs);
+          } else if (metricsFlushTimerRef.current === null) {
+            metricsFlushTimerRef.current = window.setTimeout(() => {
+              metricsFlushTimerRef.current = null;
+              flushMetrics(Date.now());
+            }, Math.max(50, 1000 - elapsedSinceSync));
+          }
+        }
+
         if (autoFollowRef.current && chartRef.current) {
           chartRef.current.timeScale().scrollToRealTime();
         }
@@ -968,7 +1196,7 @@ export function LiveChart({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [currentPrice, prevPrice, pricePulse, chartType, intervalSeconds, wsConnected]);
+  }, [currentPrice, prevPrice, pricePulse, chartType, interval, intervalSeconds, wsConnected, activeAsset.symbol, pipSize]);
 
   // Tab visibility resume handler: sync to live when trader returns to tab
   useEffect(() => {
@@ -992,7 +1220,7 @@ export function LiveChart({
     } catch {}
   };
 
-  const isPositive = metrics.changePips >= 0;
+  const isPositive = distanceUnit === 'price' ? metrics.changePrice >= 0 : metrics.changePips >= 0;
   const isWaitSignal = signal?.direction === 'WAIT';
   const isBinaryActive = Boolean(signal && signal.profile === 'BINARY_QUICK' && signal.direction !== 'WAIT');
   const isMt5Active = Boolean(signal && signal.profile === 'MT5' && signal.direction !== 'WAIT');
@@ -1081,8 +1309,17 @@ export function LiveChart({
                   : '--'}
               </span>
               {metrics.totalBars > 0 && (
-                <span className={`text-xs font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {isPositive ? `+${metrics.changePips}` : metrics.changePips} {formatDistanceUnitWord(metrics.changePips, distanceUnit)} ({isPositive ? '+' : ''}{metrics.changePct}%)
+                <span
+                  data-testid="chart-price-change"
+                  className={`text-xs font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}
+                >
+                  {formatChartChangeSummary({
+                    changePrice: metrics.changePrice,
+                    changePips: metrics.changePips,
+                    changePct: metrics.changePct,
+                    decimals,
+                    distanceUnit,
+                  })}
                 </span>
               )}
             </div>
@@ -1167,13 +1404,48 @@ export function LiveChart({
 
           <div className="flex items-center gap-2 flex-wrap text-[10px]">
             {signal.stopLossPips !== null && (
-              <span className="text-rose-400 font-bold">SL -{signal.stopLossPips}{shortDistanceSuffix}</span>
+              <span className="text-rose-400 font-bold">
+                SL{' '}
+                {distanceUnit === 'price'
+                  ? formatPriceDifference(
+                      -(
+                        typeof signal.stopLoss === 'number' && signal.entryPrice > 0
+                          ? Math.abs(signal.stopLoss - signal.entryPrice)
+                          : Math.abs(signal.stopLossPips) * pipSize
+                      ),
+                      decimals,
+                      true
+                    )
+                  : `-${signal.stopLossPips}${shortDistanceSuffix}`}
+              </span>
             )}
             {signal.takeProfit1Pips !== null && (
-              <span className="text-emerald-400 font-bold">TP1 +{signal.takeProfit1Pips}{shortDistanceSuffix}</span>
+              <span className="text-emerald-400 font-bold">
+                TP1{' '}
+                {distanceUnit === 'price'
+                  ? formatPriceDifference(
+                      typeof signal.takeProfit1 === 'number' && signal.entryPrice > 0
+                        ? Math.abs(signal.takeProfit1 - signal.entryPrice)
+                        : Math.abs(signal.takeProfit1Pips) * pipSize,
+                      decimals,
+                      true
+                    )
+                  : `+${signal.takeProfit1Pips}${shortDistanceSuffix}`}
+              </span>
             )}
             {signal.takeProfit2Pips !== null && (
-              <span className="text-emerald-300 font-bold">TP2 +{signal.takeProfit2Pips}{shortDistanceSuffix}</span>
+              <span className="text-emerald-300 font-bold">
+                TP2{' '}
+                {distanceUnit === 'price'
+                  ? formatPriceDifference(
+                      typeof signal.takeProfit2 === 'number' && signal.entryPrice > 0
+                        ? Math.abs(signal.takeProfit2 - signal.entryPrice)
+                        : Math.abs(signal.takeProfit2Pips) * pipSize,
+                      decimals,
+                      true
+                    )
+                  : `+${signal.takeProfit2Pips}${shortDistanceSuffix}`}
+              </span>
             )}
             <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
               Valid {formatRemainingMMSS(mt5ValidLeftSec)}
@@ -1270,23 +1542,37 @@ export function LiveChart({
           </div>
         )}
 
-        {/* Loading indicator for historical M5-D1 timeframes */}
-        {isLoadingHistory && (
-          <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 rounded-xl pointer-events-none z-10">
-            <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300 font-bold">
-              Loading {interval} candles...
+        {/* Zero-points empty state overlay: Loading (0-8s), Timeout + Retry (>8s), or Market closed */}
+        {(() => {
+          const emptyOverlay = resolveChartEmptyOverlayState({
+            pointCount: seriesPointCount,
+            feedStatus,
+            elapsedMs: loadingTimedOut ? 8000 : 0,
+          });
+          if (!emptyOverlay.visible || !emptyOverlay.message) return null;
+          return (
+            <div
+              data-testid="chart-empty-overlay"
+              className="absolute inset-0 flex items-center justify-center bg-slate-950/75 rounded-xl z-10 px-4 text-center"
+            >
+              <div className="px-4 py-3 rounded-xl bg-slate-900/95 border border-slate-700/80 shadow-lg max-w-xs space-y-2.5">
+                <div className="text-xs font-bold text-slate-200 leading-snug">
+                  {emptyOverlay.message}
+                </div>
+                {emptyOverlay.showRetry && (
+                  <button
+                    type="button"
+                    data-testid="chart-retry-btn"
+                    onClick={handleRetryChart}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs transition cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-
-        {/* Honest empty history indicator */}
-        {!isLoadingHistory && historyEmptyNote && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-            <div className="px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-800 text-xs text-slate-400">
-              {historyEmptyNote}
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* Hover Crosshair & Marker Tooltip Overlay */}
         {hoverData && (
@@ -1302,8 +1588,8 @@ export function LiveChart({
           </div>
         )}
 
-        {/* Non-live feed status notice (only shown when live ticks paused and not actively looking at historical candles) */}
-        {!wsConnected && !isHistoricalInterval(interval) && (
+        {/* Non-live feed status notice (only shown when chart has buffered points while feed paused) */}
+        {seriesPointCount > 0 && !wsConnected && !isHistoricalInterval(interval) && (
           <div className="absolute top-2 right-2 bg-slate-950/90 border border-amber-500/40 rounded-lg px-2.5 py-1 text-[10px] font-mono text-amber-300 pointer-events-none shadow-md z-10 flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
             <span>{feedStatus === 'IDLE' ? 'IDLE' : `${String(feedStatus)} BUFFER`}</span>
@@ -1328,11 +1614,11 @@ export function LiveChart({
       {/* Chart Footer: Buffer health & active overlays summary */}
       <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500 mt-2 pt-2 border-t border-slate-800/80 tabular-nums">
         <div className="flex items-center gap-2">
-          <span>
+          <span data-testid="chart-footer-metrics">
             {metrics.totalBars > 0
               ? isHistoricalInterval(interval)
                 ? `${metrics.totalBars} ${interval} bars`
-                : `Buffer: ~${metrics.timespanMinutes}m`
+                : `Buffer: ~${metrics.timespanMinutes}m (${metrics.totalBars} pts)`
               : 'Waiting for data...'}
           </span>
           <span>&bull;</span>

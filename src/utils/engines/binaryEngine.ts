@@ -32,7 +32,14 @@ import {
   calculateRSI,
   detectSwingLevels,
 } from './indicators.ts';
-import { formatDistanceUnitWord, resolveAssetPipSpec } from '../instrumentMeta.ts';
+import {
+  assertSpecMatchesSymbol,
+  formatSignedDistance,
+  inferAssetCurrencies,
+  isOtcInstrument,
+  resolveAssetPipSpec,
+  resolveBaseInstrumentSpec,
+} from '../instrumentMeta.ts';
 import { isSyntheticAsset } from '../../services/symbolMap.ts';
 
 const EXPIRY_SECONDS: Record<BinaryExpiry, number> = {
@@ -128,6 +135,33 @@ function checkSessionWindow(asset: AssetConfig, nowMs: number): {
     };
   }
 
+  const isIndexSymbol = asset.type === 'INDEX' || /^OTC_/i.test(asset.symbol);
+  if (isIndexSymbol) {
+    if (asset.exchange_is_open === false) {
+      return {
+        blocked: true,
+        sessionName: 'Index Exchange Closed',
+        sessionQuality: 'THIN',
+        note: 'Exchange is currently closed for this index.',
+      };
+    }
+    if (asset.exchange_is_open === true) {
+      return {
+        blocked: false,
+        sessionName: 'Index Exchange Open',
+        sessionQuality: 'PRIME',
+        note: 'Exchange is currently open for trading.',
+      };
+    }
+  } else if (asset.exchange_is_open === false) {
+    return {
+      blocked: true,
+      sessionName: 'Market Closed',
+      sessionQuality: 'THIN',
+      note: 'Exchange is currently closed for this instrument.',
+    };
+  }
+
   const d = new Date(nowMs);
   const utcDay = d.getUTCDay(); // 0=Sun .. 6=Sat
   const utcHour = d.getUTCHours();
@@ -196,7 +230,7 @@ function findBlockingNewsEvent(
   // Synthetic indices follow mathematical volatility models, not macro calendars
   if (asset.type === 'SYNTH') return null;
 
-  const assetText = `${asset.symbol} ${asset.name}`.toUpperCase();
+  const { baseCcy, quoteCcy } = inferAssetCurrencies(asset);
   const windowMs = 15 * 60 * 1000;
 
   for (const ev of events) {
@@ -208,7 +242,7 @@ function findBlockingNewsEvent(
     const ccy = (ev.currency || '').toUpperCase().trim();
     const matchesCurrency =
       ccy === 'ALL' ||
-      assetText.includes(ccy) ||
+      (Boolean(ccy) && (ccy === baseCcy || ccy === quoteCcy)) ||
       (ccy === 'USD' && (asset.type === 'CRYPTO' || asset.type === 'COMMODITY' || asset.type === 'INDEX' || asset.type === 'STOCK'));
 
     if (matchesCurrency) {
@@ -364,8 +398,40 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
     evaluatedAt: new Date(nowMs).toISOString(),
   };
 
+  // 0. Hard Gate: Defence-in-depth spec sanity check
+  const resolvedBaseSpec = resolveBaseInstrumentSpec(
+    input.asset,
+    input.instrumentSpec,
+    input.contractSizeOverride
+  );
+  const specAssertion = assertSpecMatchesSymbol(input.asset.symbol, resolvedBaseSpec);
+  if (!specAssertion.ok) {
+    console.error('[binaryEngine]', specAssertion.detail || specAssertion.reason);
+    const reason = 'Instrument settings mismatch; analysis disabled for safety';
+    return buildWaitResult({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      payoutPct,
+      rawScore: 0,
+      expiry: fallbackExpiry,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        specAssertion.detail || 'Symbol contract size or pip size disagrees with canonical market spec.',
+        'Signal generation is disabled until the instrument settings mismatch is resolved.',
+      ],
+      inputsSnapshot: {
+        ...baseSnapshot,
+        blocker: 'SPEC_MISMATCH',
+        detail: specAssertion.detail,
+        spec: resolvedBaseSpec,
+      },
+    });
+  }
+
   // 1. Hard Gate: OTC proprietary broker prices
-  if (input.isOtc || input.asset.is_otc || /OTC/i.test(input.asset.symbol) || /OTC/i.test(input.asset.name)) {
+  if (isOtcInstrument(input.asset, input.isOtc)) {
     const reason = 'OTC prices are set by your broker; we cannot analyse them.';
     return buildWaitResult({
       input,
@@ -945,9 +1011,9 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   }
 
   // Active live-tick counter-move protection & key level wall protection
-  const microRounded = parseFloat(netMicroPips.toFixed(1));
+  const microLabel = formatSignedDistance(netMicroPips, pipSize, resolvedDec, distanceUnit, { signed: true });
   if (candidateDirection === 'CALL' && (netMicroPips < -0.5 * atrInPips || momentumProxy.sellPct >= 62)) {
-    const reason = `60s live tick stream is moving downward (${netMicroPips.toFixed(1)} ${formatDistanceUnitWord(microRounded, distanceUnit)}, ${momentumProxy.sellPct}% down deltas) against bullish M1 setup.`;
+    const reason = `60s live tick stream is moving downward (${microLabel}, ${momentumProxy.sellPct}% down deltas) against bullish M1 setup.`;
     return buildWaitResult({
       input,
       nowMs,
@@ -967,7 +1033,7 @@ export function analyzeBinarySignal(input: BinaryEngineInput): BinarySignalOutpu
   }
 
   if (candidateDirection === 'PUT' && (netMicroPips > 0.5 * atrInPips || momentumProxy.buyPct >= 62)) {
-    const reason = `60s live tick stream is moving upward (+${netMicroPips.toFixed(1)} ${formatDistanceUnitWord(microRounded, distanceUnit)}, ${momentumProxy.buyPct}% up deltas) against bearish M1 setup.`;
+    const reason = `60s live tick stream is moving upward (${microLabel}, ${momentumProxy.buyPct}% up deltas) against bearish M1 setup.`;
     return buildWaitResult({
       input,
       nowMs,

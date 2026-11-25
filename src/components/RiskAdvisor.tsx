@@ -1,9 +1,25 @@
 import React, { useState } from 'react';
+import {
+  getUserDailyLossLimitCount,
+  saveUserDailyLossLimitCount,
+} from '../utils/siteConfigManager.ts';
 
 export function RiskAdvisor() {
   const [balance, setBalance] = useState<number>(250);
+  const [dailyLossLimit, setDailyLossLimit] = useState<number | null>(() =>
+    getUserDailyLossLimitCount()
+  );
   const stake = (balance * 0.02).toFixed(2);
   const maxSafeStake = (balance * 0.05).toFixed(2);
+
+  const handleDailyLossLimitChange = (raw: string) => {
+    if (!raw) {
+      setDailyLossLimit(saveUserDailyLossLimitCount(null));
+      return;
+    }
+    const parsed = parseInt(raw, 10);
+    setDailyLossLimit(saveUserDailyLossLimitCount(Number.isFinite(parsed) ? parsed : null));
+  };
 
   return (
     <div data-tour="risk-advisor" className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-4 font-mono">
@@ -24,7 +40,7 @@ export function RiskAdvisor() {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
         {/* Capital Balance Input */}
         <div className="space-y-1">
           <label htmlFor="capital-balance-input" className="text-[10px] text-slate-400 uppercase tracking-wider block">
@@ -42,6 +58,25 @@ export function RiskAdvisor() {
               className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 pl-7 pr-3 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
             />
           </div>
+        </div>
+
+        {/* Daily Loss Limit (Optional) */}
+        <div className="space-y-1">
+          <label htmlFor="daily-loss-limit-select" className="text-[10px] text-slate-400 uppercase tracking-wider block">
+            Daily Loss Limit
+          </label>
+          <select
+            id="daily-loss-limit-select"
+            value={dailyLossLimit === null ? '' : String(dailyLossLimit)}
+            onChange={(e) => handleDailyLossLimitChange(e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-sm text-white font-mono focus:border-emerald-500 focus:outline-none"
+          >
+            <option value="">Off</option>
+            <option value="2">2 losses / day</option>
+            <option value="3">3 losses / day</option>
+            <option value="4">4 losses / day</option>
+            <option value="5">5 losses / day</option>
+          </select>
         </div>
 
         {/* 2% Recommended Stake */}

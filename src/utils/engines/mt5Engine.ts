@@ -33,62 +33,31 @@ import {
 } from './indicators.ts';
 import {
   DEFAULT_INSTRUMENT_SPECS,
-  formatDistanceUnitWord,
+  assertSpecMatchesSymbol,
+  formatSignedDistance,
   inferAssetCurrencies,
+  isOtcInstrument,
   normalizeSpecKey,
   resolveAssetPipSpec,
+  resolveBaseInstrumentSpec,
+  resolveDefaultMaxLot,
 } from '../instrumentMeta.ts';
 import { isSyntheticAsset } from '../../services/symbolMap.ts';
 
-export { DEFAULT_INSTRUMENT_SPECS, inferAssetCurrencies, normalizeSpecKey };
+export {
+  DEFAULT_INSTRUMENT_SPECS,
+  assertSpecMatchesSymbol,
+  inferAssetCurrencies,
+  isOtcInstrument,
+  normalizeSpecKey,
+};
 
 export function resolveInstrumentSpec(
   asset: AssetConfig,
   overrideSpec?: Partial<InstrumentSpec>,
   contractSizeOverride?: number
 ): InstrumentSpec {
-  const key = normalizeSpecKey(asset.symbol) || normalizeSpecKey(asset.name);
-  const { quoteCcy: inferredQuote } = inferAssetCurrencies(asset);
-  const defaultBySymbol = DEFAULT_INSTRUMENT_SPECS[key];
-  const resolvedPip = resolveAssetPipSpec(asset);
-
-  let defaultContract = 1;
-  if (defaultBySymbol) {
-    defaultContract = defaultBySymbol.contractSize;
-  } else if (asset.type === 'FOREX') {
-    defaultContract = 100000;
-  } else if (asset.type === 'COMMODITY') {
-    defaultContract = asset.symbol.toUpperCase().includes('XAG') ? 5000 : 100;
-  } else {
-    defaultContract = 1;
-  }
-
-  const baseSpec: InstrumentSpec = {
-    symbol: key || asset.symbol,
-    contractSize: overrideSpec?.contractSize && overrideSpec.contractSize > 0
-      ? Number(overrideSpec.contractSize)
-      : defaultContract,
-    minLot: overrideSpec?.minLot && overrideSpec.minLot > 0
-      ? Number(overrideSpec.minLot)
-      : defaultBySymbol?.minLot ?? 0.01,
-    lotStep: overrideSpec?.lotStep && overrideSpec.lotStep > 0
-      ? Number(overrideSpec.lotStep)
-      : defaultBySymbol?.lotStep ?? 0.01,
-    quoteCcy: (overrideSpec?.quoteCcy || defaultBySymbol?.quoteCcy || inferredQuote || 'USD').toUpperCase(),
-    pipSize: overrideSpec?.pipSize && overrideSpec.pipSize > 0
-      ? Number(overrideSpec.pipSize)
-      : resolvedPip.pipSize,
-    decimals: typeof overrideSpec?.decimals === 'number'
-      ? overrideSpec.decimals
-      : resolvedPip.decimals,
-    distanceUnit: overrideSpec?.distanceUnit || resolvedPip.distanceUnit,
-  };
-
-  if (typeof contractSizeOverride === 'number' && Number.isFinite(contractSizeOverride) && contractSizeOverride > 0) {
-    baseSpec.contractSize = contractSizeOverride;
-  }
-
-  return baseSpec;
+  return resolveBaseInstrumentSpec(asset, overrideSpec, contractSizeOverride);
 }
 
 function lookupRate(rates: Record<string, number> | undefined, pair: string): number | null {
@@ -163,6 +132,7 @@ export interface PositionSizingResult {
   rawLots: number;
   riskMoney: number;
   tooSmallForMinLot: boolean;
+  outsideSafeLimits?: boolean;
   minLotRiskMoney: number;
   warning?: string;
 }
@@ -209,11 +179,33 @@ export function calculateMT5PositionSize(params: {
     };
   }
 
+  const maxLot =
+    typeof spec.maxLot === 'number' && Number.isFinite(spec.maxLot) && spec.maxLot > 0
+      ? spec.maxLot
+      : resolveDefaultMaxLot({
+          symbol: spec.symbol,
+          name: spec.symbol,
+          type: spec.contractSize === 100000 ? 'FOREX' : spec.contractSize === 1 ? 'CRYPTO' : 'COMMODITY',
+        });
+
+  if (flooredLot > maxLot) {
+    return {
+      lotSize: 0,
+      rawLots,
+      riskMoney,
+      tooSmallForMinLot: false,
+      outsideSafeLimits: true,
+      minLotRiskMoney,
+      warning: 'Lot size is outside safe limits',
+    };
+  }
+
   return {
     lotSize: flooredLot,
     rawLots,
     riskMoney,
     tooSmallForMinLot: false,
+    outsideSafeLimits: false,
     minLotRiskMoney,
   };
 }
@@ -244,8 +236,9 @@ export function computeDailyPivotLevels(prevDay: Candle | undefined): DailyPivot
 export function computeRoundNumbers(price: number, asset: AssetConfig): number[] {
   if (!Number.isFinite(price) || price <= 0) return [];
   const { pipSize, decimals } = resolveAssetPipSpec(asset);
+  const specKey = normalizeSpecKey(asset.symbol) || normalizeSpecKey(asset.name);
   let step = 0.01; // big figure on 5-decimal FX (e.g. 1.0800, 1.0900, 1.1000)
-  if (asset.type === 'COMMODITY' && asset.symbol.toUpperCase().includes('XAU')) {
+  if (specKey === 'XAU/USD') {
     step = 50;
   } else if (pipSize >= 1) {
     step = price >= 10000 ? 1000 : price >= 1000 ? 100 : 10;
@@ -356,6 +349,26 @@ function checkMT5Session(asset: AssetConfig, nowMs: number): {
     };
   }
 
+  const isIndexSymbol = asset.type === 'INDEX' || /^OTC_/i.test(asset.symbol);
+  if (isIndexSymbol) {
+    if (asset.exchange_is_open === false) {
+      return {
+        blocked: true,
+        sessionName: 'Index Exchange Closed',
+        sessionQuality: 'THIN',
+        note: 'Exchange is currently closed for this index.',
+      };
+    }
+    if (asset.exchange_is_open === true) {
+      return {
+        blocked: false,
+        sessionName: 'Index Exchange Open',
+        sessionQuality: 'PRIME',
+        note: 'Exchange is currently open for trading.',
+      };
+    }
+  }
+
   const d = new Date(nowMs);
   const utcDay = d.getUTCDay();
   const utcHour = d.getUTCHours();
@@ -421,7 +434,7 @@ function findBlockingMT5News(
   if (!events || events.length === 0) return null;
   if (asset.type === 'SYNTH' || isSyntheticAsset(asset)) return null;
 
-  const assetText = `${asset.symbol} ${asset.name}`.toUpperCase();
+  const { baseCcy, quoteCcy } = inferAssetCurrencies(asset);
   const windowMs = 30 * 60 * 1000; // ±30 min rule for MT5
 
   for (const ev of events) {
@@ -433,7 +446,7 @@ function findBlockingMT5News(
     const ccy = (ev.currency || '').toUpperCase().trim();
     const matches =
       ccy === 'ALL' ||
-      assetText.includes(ccy) ||
+      (Boolean(ccy) && (ccy === baseCcy || ccy === quoteCcy)) ||
       (ccy === 'USD' && (asset.type === 'CRYPTO' || asset.type === 'COMMODITY' || asset.type === 'INDEX' || asset.type === 'STOCK'));
 
     if (matches) return ev;
@@ -514,7 +527,7 @@ function buildWaitMT5Result(params: {
     reasons,
     whyNotTrade,
     riskWarning,
-    distanceUnit,
+    distanceUnit: distanceUnit ?? resolveAssetPipSpec(input.asset).distanceUnit,
     structureTimeframe,
     timeframe: structureTimeframe,
     createdAt: isoNow,
@@ -532,8 +545,9 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
   const dec = spec.decimals || resolvedPip.decimals;
   const pipSize = spec.pipSize || resolvedPip.pipSize;
   const distanceUnit: DistanceUnit = spec.distanceUnit || resolvedPip.distanceUnit;
-  const unitSingular = distanceUnit === 'points' ? 'point' : 'pip';
-  const unitPlural = distanceUnit === 'points' ? 'points' : 'pips';
+  const resolvedWaitUnit = distanceUnit;
+  const fmtDist = (valPips: number, signed = false) =>
+    formatSignedDistance(valPips, pipSize, dec, distanceUnit, { signed });
 
   const accountCurrency = (input.accountCurrency || 'USD').toUpperCase();
   const accountBalance = typeof input.accountBalance === 'number' && Number.isFinite(input.accountBalance)
@@ -584,8 +598,34 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
     evaluatedAt: new Date(nowMs).toISOString(),
   };
 
+  // 0. Hard Gate: Defence-in-depth spec sanity check
+  const specAssertion = assertSpecMatchesSymbol(input.asset.symbol, spec);
+  if (!specAssertion.ok) {
+    console.error('[mt5Engine]', specAssertion.detail || specAssertion.reason);
+    const reason = 'Instrument settings mismatch; analysis disabled for safety';
+    return buildWaitMT5Result({
+      input,
+      nowMs,
+      entryPrice: latestPrice,
+      accountCurrency,
+      riskMoney,
+      sessionNote: session.note,
+      sessionQuality: session.sessionQuality,
+      structureTimeframe,
+      rawScore: 0,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        specAssertion.detail || 'Symbol contract size or pip size disagrees with canonical market spec.',
+        'Position sizing is blocked until the instrument settings mismatch is resolved.',
+      ],
+      inputsSnapshot: { ...baseSnapshot, blocker: 'SPEC_MISMATCH', detail: specAssertion.detail },
+      riskWarning,
+    });
+  }
+
   // 1. Hard Gate: OTC proprietary broker pricing
-  if (input.isOtc || input.asset.is_otc || /OTC/i.test(input.asset.symbol) || /OTC/i.test(input.asset.name)) {
+  if (isOtcInstrument(input.asset, input.isOtc)) {
     const reason = 'OTC prices are set by your broker; we cannot analyse them.';
     return buildWaitMT5Result({
       input,
@@ -789,6 +829,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
 
   if (htfDirection === 'WAIT') {
     const atrDist = parseFloat((atrStructure / pipSize).toFixed(1));
+    const atrText = fmtDist(atrDist);
     const reason = `Higher-timeframe bias conflict or neutral chop (D1: ${d1Bias.bias}, H4: ${h4Bias.bias}).`;
     return buildWaitMT5Result({
       input,
@@ -803,12 +844,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `${structureTimeframe} structure is ${structureAssessment.bias} with ATR(14) at ${atrDist.toFixed(1)} ${formatDistanceUnitWord(atrDist, distanceUnit)}.`,
+        `${structureTimeframe} structure is ${structureAssessment.bias} with ATR(14) at ${atrText}.`,
         'Wait for D1 and H4 directional alignment before entering an MT5 position.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'HTF_BIAS_CONFLICT' },
       riskWarning,
-      distanceUnit,
+      distanceUnit: resolvedWaitUnit,
     });
   }
 
@@ -948,12 +989,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Nearest structural swing at ${structuralSwingPrice.toFixed(dec)} + 0.25×ATR requires ${reqDist.toFixed(1)} ${formatDistanceUnitWord(reqDist, distanceUnit)} vs 3×ATR ceiling of ${maxDist.toFixed(1)} ${formatDistanceUnitWord(maxDist, distanceUnit)}.`,
+        `Nearest structural swing at ${structuralSwingPrice.toFixed(dec)} + 0.25×ATR requires ${fmtDist(reqDist)} vs 3×ATR ceiling of ${fmtDist(maxDist)}.`,
         'Wait for price to form a closer structural swing before committing risk.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'STOP_TOO_WIDE', rawSlDistance, atrStructure },
       riskWarning,
-      distanceUnit,
+      distanceUnit: resolvedWaitUnit,
     });
   }
 
@@ -982,7 +1023,8 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
   if (spreadPrice >= 0.15 * slDistance) {
     const spreadSharePct = ((spreadPrice / slDistance) * 100).toFixed(1);
     const minSlDist = parseFloat(((spreadPrice / 0.15) / pipSize).toFixed(1));
-    const reason = `Broker spread (${spreadPipsUsed} ${formatDistanceUnitWord(spreadPipsUsed, distanceUnit)} = ${spreadSharePct}% of stop distance) meets or exceeds 15% of SL distance.`;
+    const spreadText = formatSignedDistance(spreadPipsUsed, pipSize, dec, distanceUnit, { pipDecimals: 2 });
+    const reason = `Broker spread (${spreadText} = ${spreadSharePct}% of stop distance) meets or exceeds 15% of SL distance.`;
     return buildWaitMT5Result({
       input,
       nowMs,
@@ -996,12 +1038,12 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Minimum affordable SL distance for a ${spreadPipsUsed}-${unitSingular} spread is ${minSlDist.toFixed(1)} ${formatDistanceUnitWord(minSlDist, distanceUnit)}.`,
+        `Minimum affordable SL distance for a ${spreadText} spread is ${fmtDist(minSlDist)}.`,
         'Lower spread or wait for a wider higher-timeframe structure setup.',
       ],
       inputsSnapshot: { ...indicatorSnapshot, blocker: 'SPREAD_TOO_HIGH', spreadPrice, slDistance },
       riskWarning,
-      distanceUnit,
+      distanceUnit: resolvedWaitUnit,
     });
   }
 
@@ -1062,7 +1104,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
       whyNotTrade: reason,
       reasons: [
         reason,
-        `Proposed SL distance is ${stopLossPips.toFixed(1)} ${formatDistanceUnitWord(stopLossPips, distanceUnit)}, requiring at least ${minRoomDist.toFixed(1)} ${formatDistanceUnitWord(minRoomDist, distanceUnit)} clear room to TP1.`,
+        `Proposed SL distance is ${fmtDist(stopLossPips)}, requiring at least ${fmtDist(minRoomDist)} clear room to TP1.`,
         'Stand aside until price clears the opposing level or pulls back for better asymmetry.',
       ],
       inputsSnapshot: {
@@ -1072,7 +1114,7 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
         blockingLevelPrice,
       },
       riskWarning,
-      distanceUnit,
+      distanceUnit: resolvedWaitUnit,
     });
   }
 
@@ -1133,6 +1175,34 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
     quoteToAccountRate,
     accountCurrency,
   });
+
+  if (sizing.outsideSafeLimits) {
+    const reason = 'Lot size is outside safe limits';
+    return buildWaitMT5Result({
+      input,
+      nowMs,
+      entryPrice,
+      accountCurrency,
+      riskMoney,
+      sessionNote: session.note,
+      sessionQuality: session.sessionQuality,
+      structureTimeframe,
+      rawScore: 55,
+      whyNotTrade: reason,
+      reasons: [
+        reason,
+        `Calculated size (${sizing.rawLots.toFixed(2)} lots) exceeds maximum safe broker limit (${spec.maxLot ?? resolveDefaultMaxLot(input.asset)} lots).`,
+        'Lower your risk percentage or account size per ticket before placing this order.',
+      ],
+      inputsSnapshot: {
+        ...indicatorSnapshot,
+        blocker: 'LOT_OUTSIDE_SAFE_LIMITS',
+        rawLots: sizing.rawLots,
+        maxLot: spec.maxLot,
+      },
+      riskWarning,
+    });
+  }
 
   let accountSizingWarning = sizing.warning;
 
@@ -1205,23 +1275,26 @@ export function analyzeMT5Signal(input: MT5EngineInput): MT5SignalOutput {
     ? `0 lots (account too small for min ${spec.minLot} lot)`
     : `${sizing.lotSize} lots`;
 
+  const slDistLabel = formatSignedDistance(stopLossPips, pipSize, dec, distanceUnit);
+  const tp1DistLabel = formatSignedDistance(takeProfit1Pips, pipSize, dec, distanceUnit, { signed: true });
+  const tp2DistLabel = formatSignedDistance(takeProfit2Pips, pipSize, dec, distanceUnit, { signed: true });
+
   const copyOrderText = [
     `${orderLabel} ${cleanSymbol} @ ${entryPrice.toFixed(dec)}`,
-    `SL: ${stopLoss.toFixed(dec)} (${stopLossPips} ${formatDistanceUnitWord(stopLossPips, distanceUnit)})`,
-    `TP1: ${takeProfit1.toFixed(dec)} (+${takeProfit1Pips} ${formatDistanceUnitWord(takeProfit1Pips, distanceUnit)} | 1:${rewardRiskTp1.toFixed(2)})`,
-    `TP2: ${takeProfit2.toFixed(dec)} (+${takeProfit2Pips} ${formatDistanceUnitWord(takeProfit2Pips, distanceUnit)} | 1:${rewardRiskTp2.toFixed(2)})`,
+    `SL: ${stopLoss.toFixed(dec)} (${slDistLabel})`,
+    `TP1: ${takeProfit1.toFixed(dec)} (${tp1DistLabel} | 1:${rewardRiskTp1.toFixed(2)})`,
+    `TP2: ${takeProfit2.toFixed(dec)} (${tp2DistLabel} | 1:${rewardRiskTp2.toFixed(2)})`,
     `Size: ${lotText} | Risk: ${accountCurrency} ${sizing.riskMoney.toFixed(2)} (${effectiveRiskPct}%)`,
     `Valid: ${validityWindowDesc} | Management: ${tradeManagementNote}`,
   ].join(' | ');
 
   const rewardRiskRatio = `1:${rewardRiskTp1.toFixed(2)} (TP2 1:${rewardRiskTp2.toFixed(2)})`;
   const atrDist = parseFloat((atrStructure / pipSize).toFixed(1));
+  const atrDistLabel = formatSignedDistance(atrDist, pipSize, dec, distanceUnit);
 
   const reasons: [string, string, string] = [
-    `D1 (${d1Bias.bias}) & H4 (${h4Bias.bias}) bias aligned with ${structureTimeframe} structure (ATR ${atrDist.toFixed(
-      1
-    )} ${formatDistanceUnitWord(atrDist, distanceUnit)}; swing invalidation at ${structuralSwingPrice.toFixed(dec)}).`,
-    `M5 entry (${orderKind} @ ${entryPrice.toFixed(dec)}): SL ${stopLoss.toFixed(dec)} (${stopLossPips} ${formatDistanceUnitWord(stopLossPips, distanceUnit)}), TP1 ${takeProfit1.toFixed(
+    `D1 (${d1Bias.bias}) & H4 (${h4Bias.bias}) bias aligned with ${structureTimeframe} structure (ATR ${atrDistLabel}; swing invalidation at ${structuralSwingPrice.toFixed(dec)}).`,
+    `M5 entry (${orderKind} @ ${entryPrice.toFixed(dec)}): SL ${stopLoss.toFixed(dec)} (${slDistLabel}), TP1 ${takeProfit1.toFixed(
       dec
     )} (1:${rewardRiskTp1.toFixed(2)}), TP2 ${takeProfit2.toFixed(dec)} (1:${rewardRiskTp2.toFixed(2)}).`,
     `${session.sessionName}: ${tradeManagementNote}`,

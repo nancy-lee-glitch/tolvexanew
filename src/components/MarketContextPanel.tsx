@@ -44,7 +44,7 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
 
   const { trendTable, levelsMap, volatilityRegime, sessionProfile, decimals, currentPrice } = context;
   const distanceUnit = context.distanceUnit || 'pips';
-  const unitShort = distanceUnit === 'points' ? ' pts' : 'p';
+  const unitShort = distanceUnit === 'points' ? ' pts' : distanceUnit === 'pips' ? 'p' : '';
 
   const summary = buildMarketContextSummaryLines(context);
   const nearestSortedLevels = getSortedNearestLevels(context);
@@ -97,7 +97,12 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
         <div className="space-y-4 pt-3 border-t border-slate-800">
           <div className="text-[11px] font-mono text-slate-400 tabular-nums flex flex-wrap justify-between gap-2">
             <span>
-              {distanceUnit === 'points' ? 'Point size' : 'Pip size'} {context.pipSize} &middot; Identical audit data for Free &amp; VIP
+              {distanceUnit === 'points'
+                ? `Point size ${context.pipSize}`
+                : distanceUnit === 'pips'
+                ? `Pip size ${context.pipSize}`
+                : `Tick size ${context.tickSize ?? context.pipSize}`}{' '}
+              &middot; Identical audit data for Free &amp; VIP
             </span>
             <span className="text-slate-500">No win rates or outcome estimates</span>
           </div>
@@ -135,7 +140,15 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
 
                     const distLabel =
                       row.distancePips !== null && row.distancePct !== null
-                        ? `${row.distancePips >= 0 ? '+' : ''}${row.distancePips.toFixed(1)} ${formatDistanceUnitWord(row.distancePips, distanceUnit)} (${row.distancePct >= 0 ? '+' : ''}${row.distancePct.toFixed(2)}%)`
+                        ? distanceUnit === 'price'
+                          ? (() => {
+                              const priceDiff =
+                                row.lastClose !== null && row.ema21 !== null
+                                  ? row.lastClose - row.ema21
+                                  : row.distancePips * context.pipSize;
+                              return `${priceDiff >= 0 ? '+' : ''}${priceDiff.toFixed(decimals)} (${row.distancePct >= 0 ? '+' : ''}${row.distancePct.toFixed(2)}%)`;
+                            })()
+                          : `${row.distancePips >= 0 ? '+' : ''}${row.distancePips.toFixed(1)} ${formatDistanceUnitWord(row.distancePips, distanceUnit)} (${row.distancePct >= 0 ? '+' : ''}${row.distancePct.toFixed(2)}%)`
                         : 'Insufficient data';
 
                     return (
@@ -223,7 +236,11 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
               <div>
                 <div className="text-[10px] text-slate-500">Current Daily ATR(14)</div>
                 <div className="font-semibold text-white mt-0.5">
-                  {volatilityRegime.currentAtrPips !== null
+                  {distanceUnit === 'price'
+                    ? volatilityRegime.currentAtr !== null
+                      ? volatilityRegime.currentAtr.toFixed(decimals)
+                      : 'N/A'
+                    : volatilityRegime.currentAtrPips !== null
                     ? `${volatilityRegime.currentAtrPips.toFixed(1)} ${formatDistanceUnitWord(volatilityRegime.currentAtrPips, distanceUnit)}`
                     : 'N/A'}
                 </div>
@@ -272,7 +289,9 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
                       <div key={b.hourUtc} className="flex items-center justify-between text-slate-300">
                         <span>{b.hourLabel} UTC</span>
                         <span>
-                          {b.avgRangePips?.toFixed(1)} {formatDistanceUnitWord(b.avgRangePips ?? 0, distanceUnit)}{' '}
+                          {distanceUnit === 'price'
+                            ? ((b.avgRangePips ?? 0) * context.pipSize).toFixed(decimals)
+                            : `${b.avgRangePips?.toFixed(1)} ${formatDistanceUnitWord(b.avgRangePips ?? 0, distanceUnit)}`}{' '}
                           <span className="text-slate-500">(n={b.sampleCount})</span>
                         </span>
                       </div>
@@ -285,7 +304,9 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
                       <div key={b.hourUtc} className="flex items-center justify-between text-slate-300">
                         <span>{b.hourLabel} UTC</span>
                         <span>
-                          {b.avgRangePips?.toFixed(1)} {formatDistanceUnitWord(b.avgRangePips ?? 0, distanceUnit)}{' '}
+                          {distanceUnit === 'price'
+                            ? ((b.avgRangePips ?? 0) * context.pipSize).toFixed(decimals)
+                            : `${b.avgRangePips?.toFixed(1)} ${formatDistanceUnitWord(b.avgRangePips ?? 0, distanceUnit)}`}{' '}
                           <span className="text-slate-500">(n={b.sampleCount})</span>
                         </span>
                       </div>
@@ -322,7 +343,11 @@ export function MarketContextPanel({ context, isLoading = false }: MarketContext
                             <span className="text-slate-500">n={bucket.sampleCount}</span>
                           </div>
                           <div className="text-slate-200 font-semibold">
-                            {bucket.avgRangePips !== null ? `${bucket.avgRangePips.toFixed(1)}${unitShort}` : '—'}
+                            {bucket.avgRangePips !== null
+                              ? distanceUnit === 'price'
+                                ? (bucket.avgRangePips * context.pipSize).toFixed(decimals)
+                                : `${bucket.avgRangePips.toFixed(1)}${unitShort}`
+                              : '—'}
                           </div>
                           <svg viewBox="0 0 100 4" className="w-full h-1 rounded overflow-hidden bg-slate-800 block" aria-hidden="true">
                             <rect

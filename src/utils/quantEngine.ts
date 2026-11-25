@@ -24,7 +24,12 @@ import type {
   AssetConfig,
   DistanceUnit,
 } from '../types.ts';
-import { formatDistanceUnitWord, resolveAssetPipSpec } from './instrumentMeta.ts';
+import {
+  formatPriceDifference,
+  formatSignedDistance,
+  normalizeSpecKey,
+  resolveAssetPipSpec,
+} from './instrumentMeta.ts';
 import { isSyntheticAsset } from '../services/symbolMap.ts';
 
 export type { TimestampedTick, LiveRegimeInfo };
@@ -499,14 +504,14 @@ export function detectMarketStructure(
   const maxPrice = Math.max(...safePrices);
   const minPrice = Math.min(...safePrices);
   const recentRangePips = parseFloat(((maxPrice - minPrice) / pipSize).toFixed(1));
-  const rangeUnit = formatDistanceUnitWord(recentRangePips, distanceUnit);
+  const rangeText = formatSignedDistance(recentRangePips, pipSize, decimals, distanceUnit);
 
   // If price is completely flat or range is negligible
   if (recentRangePips < 1.0) {
     return {
       structure: 'RANGING',
       cue: 'COMPRESSION',
-      summary: `Extreme Compression (${recentRangePips} ${rangeUnit} range) — Volatility too low for reliable expansion`,
+      summary: `Extreme Compression (${rangeText} range) — Volatility too low for reliable expansion`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -555,14 +560,13 @@ export function detectMarketStructure(
   // Trend slope check across full buffer
   const firstPrice = safePrices[0];
   const deltaPips = (currentPrice - firstPrice) / pipSize;
-  const deltaRounded = parseFloat(deltaPips.toFixed(1));
-  const deltaUnit = formatDistanceUnitWord(deltaRounded, distanceUnit);
+  const signedDeltaText = formatSignedDistance(deltaPips, pipSize, decimals, distanceUnit, { signed: true });
 
   if (deltaPips > 3.0) {
     return {
       structure: 'BULLISH',
       cue: 'EXPANSION',
-      summary: `Bullish Trend Expansion (+${deltaPips.toFixed(1)} ${deltaUnit} upward displacement)`,
+      summary: `Bullish Trend Expansion (${signedDeltaText} upward displacement)`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -571,7 +575,7 @@ export function detectMarketStructure(
     return {
       structure: 'BEARISH',
       cue: 'EXPANSION',
-      summary: `Bearish Trend Expansion (${deltaPips.toFixed(1)} ${deltaUnit} downward displacement)`,
+      summary: `Bearish Trend Expansion (${signedDeltaText} downward displacement)`,
       swingHigh: maxPrice,
       swingLow: minPrice,
       recentRangePips,
@@ -581,7 +585,7 @@ export function detectMarketStructure(
   return {
     structure: 'RANGING',
     cue: 'RANGE_CONSOLIDATION',
-    summary: `Equilibrium Range (${recentRangePips} ${rangeUnit} band) — Consolidating between ${minPrice.toFixed(decimals)} and ${maxPrice.toFixed(decimals)}`,
+    summary: `Equilibrium Range (${rangeText} band) — Consolidating between ${minPrice.toFixed(decimals)} and ${maxPrice.toFixed(decimals)}`,
     swingHigh: maxPrice,
     swingLow: minPrice,
     recentRangePips,
@@ -613,7 +617,8 @@ export interface LiveMovementEvaluation {
 export function evaluateLiveMarketMovement(
   prices: number[],
   pipSize: number,
-  distanceUnit: DistanceUnit = 'pips'
+  distanceUnit: DistanceUnit = 'pips',
+  decimals: number = 2
 ): LiveMovementEvaluation {
   const pipsMultiplier = 1 / pipSize;
   if (!prices || prices.length < 4) {
@@ -631,7 +636,10 @@ export function evaluateLiveMarketMovement(
   const sampleWindow = Math.min(prices.length, 8);
   const startPrice = prices[prices.length - sampleWindow];
   const netPipsDelta = parseFloat(((currentPrice - startPrice) * pipsMultiplier).toFixed(2));
-  const netUnit = formatDistanceUnitWord(netPipsDelta, distanceUnit);
+  const signedNetLabel = formatSignedDistance(netPipsDelta, pipSize, decimals, distanceUnit, {
+    signed: true,
+    pipDecimals: 2,
+  });
 
   // Immediate 3-tick micro movement
   const last3 = prices.slice(-3);
@@ -658,9 +666,9 @@ export function evaluateLiveMarketMovement(
 
   const getConflictMessage = (proposed: 'CALL' | 'PUT'): string => {
     if (proposed === 'CALL') {
-      return `Live price is actively falling (${netPipsDelta} ${netUnit} across last ${sampleWindow} ticks) directly opposing bullish bias. Never buy into an active drop.`;
+      return `Live price is actively falling (${signedNetLabel} across last ${sampleWindow} ticks) directly opposing bullish bias. Never buy into an active drop.`;
     }
-    return `Live price is actively climbing (+${netPipsDelta} ${netUnit} across last ${sampleWindow} ticks) directly opposing bearish bias. Never sell into an active rally.`;
+    return `Live price is actively climbing (${signedNetLabel} across last ${sampleWindow} ticks) directly opposing bearish bias. Never sell into an active rally.`;
   };
 
   return {
@@ -671,10 +679,10 @@ export function evaluateLiveMarketMovement(
     conflictMessage: getConflictMessage('CALL'),
     summary:
       direction === 'BULLISH'
-        ? `Live price advancing (+${netPipsDelta} ${netUnit})`
+        ? `Live price advancing (${signedNetLabel})`
         : direction === 'BEARISH'
-        ? `Live price retreating (${netPipsDelta} ${netUnit})`
-        : `Live micro movement is flat (${netPipsDelta >= 0 ? '+' : ''}${netPipsDelta} ${netUnit})`,
+        ? `Live price retreating (${signedNetLabel})`
+        : `Live micro movement is flat (${signedNetLabel})`,
   };
 }
 
@@ -723,7 +731,6 @@ export function evaluateQuickConfluence(params: {
     decimals = 5,
   } = params;
 
-  const unitLabelPlural = distanceUnit === 'points' ? 'points' : 'pips';
   const velUnit = distanceUnit === 'points' ? 'pts/s' : 'p/s';
 
   const safePrices = prices.slice(-30);
@@ -749,34 +756,37 @@ export function evaluateQuickConfluence(params: {
   }
 
   // Factor 0: Live Price Path Confirmation (CORE)
-  const liveMovement = evaluateLiveMarketMovement(safePrices, pipSize, distanceUnit);
-  const netUnit = formatDistanceUnitWord(liveMovement.netPipsDelta, distanceUnit);
+  const liveMovement = evaluateLiveMarketMovement(safePrices, pipSize, distanceUnit, decimals);
+  const netDeltaLabel = formatSignedDistance(liveMovement.netPipsDelta, pipSize, decimals, distanceUnit, {
+    signed: true,
+    pipDecimals: 2,
+  });
   let livePathStatus: 'PASS' | 'FAIL' | 'UNSURE' = 'FAIL';
   let livePathDetail = '';
 
   if (structure === 'BULLISH') {
     if (liveMovement.isConflictingWith('CALL')) {
       livePathStatus = 'FAIL';
-      livePathDetail = `Live ticks falling (${liveMovement.netPipsDelta} ${netUnit} in last 8 ticks); directly opposes CALL`;
-      failReasons.push(`Live tick path conflict: price is dropping (${liveMovement.netPipsDelta} ${netUnit}) against bullish indicators.`);
+      livePathDetail = `Live ticks falling (${netDeltaLabel} in last 8 ticks); directly opposes CALL`;
+      failReasons.push(`Live tick path conflict: price is dropping (${netDeltaLabel}) against bullish indicators.`);
     } else if (liveMovement.direction === 'BULLISH' || (liveMovement.netPipsDelta >= 0 && liveMovement.recentTicksDelta >= 0)) {
       livePathStatus = 'PASS';
-      livePathDetail = `Live tick path confirms upward advance (+${liveMovement.netPipsDelta} ${netUnit} in 8 ticks)`;
+      livePathDetail = `Live tick path confirms upward advance (${netDeltaLabel} in 8 ticks)`;
     } else {
       livePathStatus = 'UNSURE';
-      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} ${netUnit})`;
+      livePathDetail = `Live tick path is neutral/flattening (${netDeltaLabel})`;
     }
   } else if (structure === 'BEARISH') {
     if (liveMovement.isConflictingWith('PUT')) {
       livePathStatus = 'FAIL';
-      livePathDetail = `Live ticks rising (+${liveMovement.netPipsDelta} ${netUnit} in last 8 ticks); directly opposes PUT`;
-      failReasons.push(`Live tick path conflict: price is rallying (+${liveMovement.netPipsDelta} ${netUnit}) against bearish indicators.`);
+      livePathDetail = `Live ticks rising (${netDeltaLabel} in last 8 ticks); directly opposes PUT`;
+      failReasons.push(`Live tick path conflict: price is rallying (${netDeltaLabel}) against bearish indicators.`);
     } else if (liveMovement.direction === 'BEARISH' || (liveMovement.netPipsDelta <= 0 && liveMovement.recentTicksDelta <= 0)) {
       livePathStatus = 'PASS';
-      livePathDetail = `Live tick path confirms downward pressure (${liveMovement.netPipsDelta} ${netUnit} in 8 ticks)`;
+      livePathDetail = `Live tick path confirms downward pressure (${netDeltaLabel} in 8 ticks)`;
     } else {
       livePathStatus = 'UNSURE';
-      livePathDetail = `Live tick path is neutral/flattening (${liveMovement.netPipsDelta >= 0 ? '+' : ''}${liveMovement.netPipsDelta} ${netUnit})`;
+      livePathDetail = `Live tick path is neutral/flattening (${netDeltaLabel})`;
     }
   } else {
     livePathStatus = 'FAIL';
@@ -795,13 +805,14 @@ export function evaluateQuickConfluence(params: {
   // Factor 1: EMA Alignment (CORE)
   let emaStatus: 'PASS' | 'FAIL' | 'UNSURE' = 'FAIL';
   let emaDetail = '';
+  const emaSpreadLabel = formatSignedDistance(emaSpread, pipSize, decimals, distanceUnit);
   if (structure === 'BULLISH') {
     if (ema9 >= ema21 || (currentPrice >= ema21 && velocity >= 0)) {
       emaStatus = 'PASS';
       emaDetail = `EMA 9 (${ema9.toFixed(decimals)}) >= EMA 21 (${ema21.toFixed(decimals)}) supporting upward impulse`;
     } else if (Math.abs(emaSpread) < 0.1) {
       emaStatus = 'UNSURE';
-      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} ${unitLabelPlural}); momentum building`;
+      emaDetail = `EMA spread tight (${emaSpreadLabel}); momentum building`;
     } else {
       emaStatus = 'FAIL';
       emaDetail = `EMA 9 lagging below EMA 21 against bullish structure`;
@@ -812,7 +823,7 @@ export function evaluateQuickConfluence(params: {
       emaDetail = `EMA 9 (${ema9.toFixed(decimals)}) <= EMA 21 (${ema21.toFixed(decimals)}) supporting downward pressure`;
     } else if (Math.abs(emaSpread) < 0.1) {
       emaStatus = 'UNSURE';
-      emaDetail = `EMA spread tight (${emaSpread.toFixed(1)} ${unitLabelPlural}); momentum building`;
+      emaDetail = `EMA spread tight (${emaSpreadLabel}); momentum building`;
     } else {
       emaStatus = 'FAIL';
       emaDetail = `EMA 9 tracking above EMA 21 against bearish structure`;
@@ -874,16 +885,20 @@ export function evaluateQuickConfluence(params: {
   let volRegimeStatus: 'PASS' | 'FAIL' | 'UNSURE' | 'WARN' = 'PASS';
   let volRegimeDetail = '';
   const absVelocity = Math.abs(velocity);
+  const fmtVel = (signed: boolean, decPlaces = 2) =>
+    distanceUnit === 'price'
+      ? `${formatPriceDifference(velocity * pipSize, Math.max(decimals, decPlaces), signed)}/s`
+      : `${signed && velocity > 0 ? '+' : ''}${velocity.toFixed(decPlaces)} ${velUnit}`;
 
   if (absVelocity < 0.015 && momentumBuyPct === 50 && momentumSellPct === 50) {
     volRegimeStatus = 'WARN';
-    volRegimeDetail = `Market stagnant (velocity: ${velocity.toFixed(3)} ${velUnit}); low tick flow increases expiry chop`;
+    volRegimeDetail = `Market stagnant (velocity: ${fmtVel(false, 3)}); low tick flow increases expiry chop`;
   } else if (absVelocity >= 0.04) {
     volRegimeStatus = 'PASS';
-    volRegimeDetail = `Dynamic tick velocity (${velocity > 0 ? '+' : ''}${velocity.toFixed(2)} ${velUnit}) active for short window`;
+    volRegimeDetail = `Dynamic tick velocity (${fmtVel(true, 2)}) active for short window`;
   } else {
     volRegimeStatus = 'PASS';
-    volRegimeDetail = `Normal tick volatility (${velocity.toFixed(2)} ${velUnit}); standard activity`;
+    volRegimeDetail = `Normal tick volatility (${fmtVel(false, 2)}); standard activity`;
   }
 
   factors.push({
@@ -1085,7 +1100,7 @@ export function analyzeMarketConfluence(
 
   const effectivePipSize = resolvedSpec ? resolvedSpec.pipSize : pipSize;
   const effectiveUnit: DistanceUnit = resolvedSpec ? resolvedSpec.distanceUnit : 'pips';
-  const effectiveDecimals = resolvedSpec ? resolvedSpec.decimals : activeTimeframe.includes('USD') ? 5 : 2;
+  const effectiveDecimals = resolvedSpec ? resolvedSpec.decimals : pipSize <= 0.001 ? 5 : 2;
 
   const safePrices = prices;
   const pipsMultiplier = 1 / effectivePipSize;
@@ -1187,8 +1202,8 @@ export function analyzeMarketConfluence(
   return {
     rsi,
     rsiState,
-    emaFast: parseFloat(ema9.toFixed(activeTimeframe.includes('USD') ? 5 : 2)),
-    emaSlow: parseFloat(ema21.toFixed(activeTimeframe.includes('USD') ? 5 : 2)),
+    emaFast: parseFloat(ema9.toFixed(effectiveDecimals)),
+    emaSlow: parseFloat(ema21.toFixed(effectiveDecimals)),
     emaSpread: parseFloat(emaSpread.toFixed(2)),
     emaTrend,
     momentumBuyPct: momentum.buyPct,
@@ -1216,7 +1231,8 @@ export function calculateSafeCloseAnalysis(
   ticks: number[],
   activeTimeframe: string = '1m',
   pipSize: number = 0.0001,
-  distanceUnit: DistanceUnit = 'pips'
+  distanceUnit: DistanceUnit = 'pips',
+  decimals: number = 2
 ): SafeCloseAnalysis {
   if (!ticks || ticks.length < 2) {
     return {
@@ -1231,7 +1247,6 @@ export function calculateSafeCloseAnalysis(
   }
   const safeTicks = ticks;
   const pipsMultiplier = 1 / pipSize;
-  const currentPrice = safeTicks[safeTicks.length - 1];
 
   let totalDeltaPips = 0;
   for (let i = 1; i < safeTicks.length; i++) {
@@ -1242,7 +1257,6 @@ export function calculateSafeCloseAnalysis(
   let volatilityLevel: SafeCloseAnalysis['volatilityLevel'] = 'NORMAL';
   let recommendedSeconds = 45;
   let profitTargetPips = 6.0;
-  let decayFactor = 0.02;
 
   if (activeTimeframe === '1m') {
     recommendedSeconds = 45;
@@ -1262,27 +1276,28 @@ export function calculateSafeCloseAnalysis(
     volatilityLevel = 'HIGH';
     recommendedSeconds = Math.max(15, Math.round(recommendedSeconds * 0.75));
     profitTargetPips = parseFloat((profitTargetPips * 1.3).toFixed(1));
-    decayFactor = 0.04;
   } else if (avgTickVelocity < 0.2) {
     volatilityLevel = 'LOW';
     recommendedSeconds = Math.round(recommendedSeconds * 1.25);
     profitTargetPips = parseFloat((profitTargetPips * 0.85).toFixed(1));
-    decayFactor = 0.015;
   }
 
   const minRange = Math.max(10, Math.round(recommendedSeconds * 0.8));
   const maxRange = Math.round(recommendedSeconds * 1.15);
   const peakMomentumWindow = `${minRange}s - ${maxRange}s`;
-  const targetUnit = formatDistanceUnitWord(profitTargetPips, distanceUnit);
-  const velUnit = distanceUnit === 'points' ? 'pts/s' : 'p/s';
+  const targetLabel = formatSignedDistance(profitTargetPips, pipSize, decimals, distanceUnit, { signed: true });
+  const velText =
+    distanceUnit === 'price'
+      ? `${formatPriceDifference(avgTickVelocity * pipSize, decimals, false)}/s`
+      : `${avgTickVelocity.toFixed(2)} ${distanceUnit === 'points' ? 'pts/s' : 'p/s'}`;
 
   let advisoryText = '';
   if (volatilityLevel === 'HIGH') {
-    advisoryText = `High market velocity (${avgTickVelocity.toFixed(2)} ${velUnit}). Peak impulse window: ${peakMomentumWindow}. Safe close advised upon reaching +${profitTargetPips} ${targetUnit}.`;
+    advisoryText = `High market velocity (${velText}). Peak impulse window: ${peakMomentumWindow}. Safe close advised upon reaching ${targetLabel}.`;
   } else if (volatilityLevel === 'LOW') {
-    advisoryText = `Low volatility (${avgTickVelocity.toFixed(2)} ${velUnit}). Steady hold advised. Target +${profitTargetPips} ${targetUnit} before expected mean-reversion.`;
+    advisoryText = `Low volatility (${velText}). Steady hold advised. Target ${targetLabel} before expected mean-reversion.`;
   } else {
-    advisoryText = `Normal velocity conditions. Expected peak momentum at ${peakMomentumWindow}. Optimal safe close zone: +${profitTargetPips} ${targetUnit}.`;
+    advisoryText = `Normal velocity conditions. Expected peak momentum at ${peakMomentumWindow}. Optimal safe close zone: ${targetLabel}.`;
   }
 
   return {
@@ -1371,6 +1386,68 @@ export function getAssetTimestampedTicks(symbol: string): TimestampedTick[] {
 }
 
 /**
+ * Seeds a symbol's rolling timestamped tick buffer from real historical M1 candle closes
+ * (defaulting to the trailing 60 minutes / 60 bars) without clobbering newer live ticks.
+ */
+export function seedTimestampedTicksFromCandles(
+  symbol: string,
+  candles: Array<{ time: number; close: number }>,
+  maxCandles = 60
+): TimestampedTick[] {
+  if (!symbol || !Array.isArray(candles) || candles.length === 0) {
+    return getAssetTimestampedTicks(symbol);
+  }
+
+  const validCandles = candles
+    .filter(
+      (c) =>
+        c &&
+        typeof c.time === 'number' &&
+        Number.isFinite(c.time) &&
+        typeof c.close === 'number' &&
+        Number.isFinite(c.close) &&
+        c.close > 0
+    )
+    .sort((a, b) => a.time - b.time)
+    .slice(-Math.max(1, maxCandles));
+
+  if (validCandles.length === 0) {
+    return getAssetTimestampedTicks(symbol);
+  }
+
+  const latestCandleSec = Math.floor(validCandles[validCandles.length - 1].time);
+  const cutoffSec = latestCandleSec - maxCandles * 60;
+  const recentWindow = validCandles.filter((c) => Math.floor(c.time) >= cutoffSec);
+  const historicalSource = recentWindow.length > 0 ? recentWindow : validCandles;
+
+  const byTime = new Map<number, number>();
+  for (const c of historicalSource) {
+    byTime.set(Math.floor(c.time), c.close);
+  }
+
+  const existing = assetTimestampedTickBuffers[symbol] || [];
+  for (const t of existing) {
+    if (t && Number.isFinite(t.time) && Number.isFinite(t.price) && t.price > 0) {
+      byTime.set(Math.floor(t.time), t.price);
+    }
+  }
+
+  const merged = Array.from(byTime.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([time, price]) => ({ time, price }))
+    .slice(-7200);
+
+  assetTimestampedTickBuffers[symbol] = merged;
+
+  const existingPrices = assetTickBuffers[symbol] || [];
+  if (existingPrices.length < merged.length) {
+    assetTickBuffers[symbol] = merged.slice(-500).map((t) => t.price);
+  }
+
+  return [...merged];
+}
+
+/**
  * Calculates current profit/loss and real-time safe close recommendation during an active trade.
  */
 export function evaluateActiveTradeHealth(
@@ -1380,7 +1457,8 @@ export function evaluateActiveTradeHealth(
   pipSize: number,
   elapsedSeconds: number,
   expirySeconds: number = 60,
-  distanceUnit: DistanceUnit = 'pips'
+  distanceUnit: DistanceUnit = 'pips',
+  decimals: number = 2
 ): {
   pips: number;
   isProfit: boolean;
@@ -1391,7 +1469,10 @@ export function evaluateActiveTradeHealth(
   const pipsMultiplier = 1 / pipSize;
   const rawDelta = direction === 'CALL' ? currentPrice - entryPrice : entryPrice - currentPrice;
   const pips = parseFloat((rawDelta * pipsMultiplier).toFixed(1));
-  const unitWord = formatDistanceUnitWord(pips, distanceUnit);
+  const distText =
+    distanceUnit === 'price'
+      ? formatPriceDifference(rawDelta, decimals, true)
+      : formatSignedDistance(pips, pipSize, decimals, distanceUnit, { signed: true });
   const isProfit = pips > 0;
   const timeProgressPct = (elapsedSeconds / expirySeconds) * 100;
 
@@ -1402,19 +1483,19 @@ export function evaluateActiveTradeHealth(
   if (pips >= 5.0 && timeProgressPct >= 60) {
     status = 'MAX_MOMENTUM_CLOSE_NOW';
     healthScore = 95;
-    actionMessage = `Peak Momentum Reached (+${pips} ${unitWord})! Secure profit now before mean-reversion.`;
+    actionMessage = `Peak Momentum Reached (${distText})! Secure profit now before mean-reversion.`;
   } else if (pips >= 2.5) {
     status = 'SAFE_PROFIT';
     healthScore = 80;
-    actionMessage = `In Solid Profit (+${pips} ${unitWord}). Buffer protected against micro-spikes.`;
+    actionMessage = `In Solid Profit (${distText}). Buffer protected against micro-spikes.`;
   } else if (pips < -2.0) {
     status = 'AT_RISK';
     healthScore = 20;
-    actionMessage = `Position under pressure (${pips} ${unitWord}). Awaiting support bounce or expiry settlement.`;
+    actionMessage = `Position under pressure (${distText}). Awaiting support bounce or expiry settlement.`;
   } else {
     status = 'HOLDING';
     healthScore = 55;
-    actionMessage = `Floating near entry (${pips >= 0 ? '+' : ''}${pips} ${unitWord}). Momentum continuation in progress.`;
+    actionMessage = `Floating near entry (${distText}). Momentum continuation in progress.`;
   }
 
   return { pips, isProfit, status, healthScore, actionMessage };
@@ -1558,13 +1639,18 @@ export function evaluateMultiWindowLiveConfirmation(
     return { bias: 'NEUTRAL' as const, deltaPips: parseFloat(deltaPips.toFixed(1)), slopePips: parseFloat(slopePips.toFixed(2)) };
   };
 
+  const resolvedSpecForWindow = symbol ? resolveAssetPipSpec({ symbol, name: symbol }) : null;
+  const resolvedDec = resolvedSpecForWindow?.decimals ?? 2;
   const longResult = measureWindowDirectionalBias(safeLong);
   const midResult = measureWindowDirectionalBias(safeMid);
   const shortResult = measureWindowDirectionalBias(safeShort);
 
-  const longDesc = `${longMins}m Context (${longResult.deltaPips >= 0 ? '+' : ''}${longResult.deltaPips} ${formatDistanceUnitWord(longResult.deltaPips, resolvedUnit)})`;
-  const midDesc = `${midMins}m Context (${midResult.deltaPips >= 0 ? '+' : ''}${midResult.deltaPips} ${formatDistanceUnitWord(midResult.deltaPips, resolvedUnit)})`;
-  const shortDesc = `${shortMins}m Context (${shortResult.deltaPips >= 0 ? '+' : ''}${shortResult.deltaPips} ${formatDistanceUnitWord(shortResult.deltaPips, resolvedUnit)})`;
+  const fmtWinDelta = (dPips: number) =>
+    formatSignedDistance(dPips, pipSize, resolvedDec, resolvedUnit, { signed: true });
+
+  const longDesc = `${longMins}m Context (${fmtWinDelta(longResult.deltaPips)})`;
+  const midDesc = `${midMins}m Context (${fmtWinDelta(midResult.deltaPips)})`;
+  const shortDesc = `${shortMins}m Context (${fmtWinDelta(shortResult.deltaPips)})`;
 
   // All 3 windows MUST point in the same direction (BULLISH or BEARISH)
   const isAllBullish = longResult.bias === 'BULLISH' && midResult.bias === 'BULLISH' && shortResult.bias === 'BULLISH';
@@ -1582,20 +1668,23 @@ export function evaluateMultiWindowLiveConfirmation(
     totalDelta += Math.abs(safeShort[i] - safeShort[i - 1]) * pipsMultiplier;
   }
   const avgVelocity = safeShort.length > 1 ? totalDelta / (safeShort.length - 1) : 0.4;
-  const velUnit = resolvedUnit === 'points' ? 'pts/s' : 'p/s';
+  const velText =
+    resolvedUnit === 'price'
+      ? `${formatPriceDifference(avgVelocity * pipSize, resolvedDec, false)}/s`
+      : `${avgVelocity.toFixed(2)} ${resolvedUnit === 'points' ? 'pts/s' : 'p/s'}`;
 
   let suggestedExpiryMinutes = Math.round(T);
   let suggestedExpiryReason = 'Standard cycle expiry for prevailing structure';
 
   if (avgVelocity > 0.8) {
     suggestedExpiryMinutes = Math.max(1, Math.min(Math.round(T), 2));
-    suggestedExpiryReason = `High tick velocity (${avgVelocity.toFixed(2)} ${velUnit}). Rapid momentum burst best captured in ${suggestedExpiryMinutes}m before pull-back.`;
+    suggestedExpiryReason = `High tick velocity (${velText}). Rapid momentum burst best captured in ${suggestedExpiryMinutes}m before pull-back.`;
   } else if (avgVelocity < 0.25) {
     suggestedExpiryMinutes = Math.min(5, Math.round(T) + 1);
-    suggestedExpiryReason = `Compressed volatility (${avgVelocity.toFixed(2)} ${velUnit}). Extended ${suggestedExpiryMinutes}m expiry needed for clean breakout.`;
+    suggestedExpiryReason = `Compressed volatility (${velText}). Extended ${suggestedExpiryMinutes}m expiry needed for clean breakout.`;
   } else {
     suggestedExpiryMinutes = Math.round(T);
-    suggestedExpiryReason = `Optimal volatility alignment (${avgVelocity.toFixed(2)} ${velUnit}) for standard ${Math.round(T)}m expiry.`;
+    suggestedExpiryReason = `Optimal volatility alignment (${velText}) for standard ${Math.round(T)}m expiry.`;
   }
 
   return {
@@ -1648,13 +1737,14 @@ export function computeSignalHistoryLearning(
       generatedAt?: number;
     }> = JSON.parse(raw);
 
-    const target = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const targetKey = normalizeSpecKey(symbol) || symbol.toUpperCase().replace(/[^A-Z0-9_]/g, '');
 
     // Filter relevant recent actionable trades only (never include WAIT)
     const filtered = items.filter((item) => {
       if (item.outcome !== 'WIN' && item.outcome !== 'LOSS') return false;
-      const itemSym = ((item.asset || item.symbol || '') as string).toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const symMatch = itemSym.includes(target) || target.includes(itemSym);
+      const rawItemSym = (item.symbol || item.asset || '') as string;
+      const itemKey = normalizeSpecKey(rawItemSym) || rawItemSym.toUpperCase().replace(/[^A-Z0-9_]/g, '');
+      const symMatch = Boolean(targetKey) && itemKey === targetKey;
       const prof = item.platformProfile || item.profile;
       const profMatch = prof ? prof === profile : true;
       const tfMatch = item.timeframe ? item.timeframe === timeframe : true;

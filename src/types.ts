@@ -2,7 +2,7 @@
  * Tickvere - Shared TypeScript Definitions
  */
 
-export type DistanceUnit = 'pips' | 'points';
+export type DistanceUnit = 'pips' | 'points' | 'price';
 
 export interface AssetConfig {
   symbol: string;
@@ -16,6 +16,7 @@ export interface AssetConfig {
   marketHours?: string;
   category?: string;
   is_otc?: boolean;
+  exchange_is_open?: boolean;
 }
 
 export interface TimestampedTick {
@@ -156,6 +157,7 @@ export interface InstrumentSpec {
   contractSize: number;
   minLot: number;
   lotStep: number;
+  maxLot?: number;
   quoteCcy: string;
   pipSize: number;
   decimals: number;
@@ -270,6 +272,12 @@ export interface SignalData {
   analysisProfile?: AnalysisProfile;
   multiWindow?: MultiWindowConfirmation;
   historyLearning?: HistoryLearningContext;
+  conditionsOverride?: {
+    overridden: boolean;
+    level?: 'NOT_ADVISED' | 'CAUTION';
+    reasonCodes: string[];
+    overriddenAt?: string;
+  };
 }
 
 export type AnalysisProfile = 'BINARY_QUICK' | 'MT5';
