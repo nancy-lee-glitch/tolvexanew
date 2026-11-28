@@ -23,10 +23,9 @@ pulsetrade.sqlite-journal
 *.sqlite
 *.sqlite3
 *.db
-data/
-data/state.json
-data/*.json
-!data/README.md
-reports/*.csv
+# Local research data and reports (project ROOT only, not src/data)
+/data/
+/reports/*.csv
+
 # Vercel
 .vercel
